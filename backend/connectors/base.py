@@ -94,7 +94,11 @@ def resolve_connection(profile: str = "default") -> ConnectionInfo:
 def get_connector(db_type: DatabaseType, profile: str = "default") -> BaseConnector:
     """Factory method to create appropriate database connector."""
     config = resolve_connection(profile)
+    return get_connector_from_info(db_type, config)
 
+
+def get_connector_from_info(db_type: DatabaseType, config: ConnectionInfo) -> BaseConnector:
+    """Create a connector directly from resolved connection parameters."""
     from backend.connectors.postgresql import PostgreSQLConnector
     from backend.connectors.mysql import MySQLConnector
     from backend.connectors.mongodb import MongoDBConnector

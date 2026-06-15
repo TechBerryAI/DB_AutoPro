@@ -18,19 +18,62 @@ class MonitoringView(BaseView):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        row = 0
+        context = self.create_connection_context()
+        if context:
+            context.grid(row=row, column=0, padx=20, pady=(12, 8), sticky="ew")
+            row += 1
+
         title = self.create_section_title("Monitoring")
-        title.grid(row=0, column=0, padx=20, pady=20, sticky="w")
+        title.grid(row=row, column=0, padx=20, pady=20, sticky="w")
+        row += 1
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=1, column=0, padx=20, pady=5, sticky="w")
+        btn_frame.grid(row=row, column=0, padx=20, pady=5, sticky="w")
+        row += 1
 
-        ctk.CTkButton(btn_frame, text="Health Check", command=self._health_check, width=120).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="Backup Report", command=self._backup_report, width=120).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="Audit Logs", command=self._audit_logs, width=120).pack(side="left", padx=5)
+        ctk.CTkButton(
+            btn_frame,
+            text="Health Check",
+            command=self._health_check,
+            width=130,
+            height=36,
+            corner_radius=8,
+            fg_color=self.theme.c("primary"),
+            hover_color=self.theme.c("primary_hover"),
+        ).pack(side="left", padx=5)
+        ctk.CTkButton(
+            btn_frame,
+            text="Backup Report",
+            command=self._backup_report,
+            width=130,
+            height=36,
+            corner_radius=8,
+            fg_color=self.theme.c("bg_elevated"),
+            hover_color=self.theme.c("bg_card_hover"),
+        ).pack(side="left", padx=5)
+        ctk.CTkButton(
+            btn_frame,
+            text="Audit Logs",
+            command=self._audit_logs,
+            width=130,
+            height=36,
+            corner_radius=8,
+            fg_color=self.theme.c("bg_elevated"),
+            hover_color=self.theme.c("bg_card_hover"),
+        ).pack(side="left", padx=5)
 
-        self.results = ctk.CTkTextbox(self, height=400, font=ctk.CTkFont(family="Consolas", size=12))
-        self.results.grid(row=2, column=0, padx=20, pady=10, sticky="nsew")
-        self.grid_rowconfigure(2, weight=1)
+        self.results = ctk.CTkTextbox(
+            self,
+            height=400,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            fg_color=self.theme.c("bg_card"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+            text_color=self.theme.c("text_secondary"),
+        )
+        self.results.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
+        self.grid_rowconfigure(row, weight=1)
 
     def _health_check(self) -> None:
         results = self.service.health_check()

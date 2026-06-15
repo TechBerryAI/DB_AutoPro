@@ -22,31 +22,46 @@ class PatchView(BaseView):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        row = 0
+        context = self.create_connection_context()
+        if context:
+            context.grid(row=row, column=0, padx=20, pady=(12, 8), sticky="ew")
+            row += 1
+
         title = self.create_section_title("Patch Management")
-        title.grid(row=0, column=0, padx=20, pady=20, sticky="w")
+        title.grid(row=row, column=0, padx=20, pady=20, sticky="w")
+        row += 1
 
-        form = ctk.CTkFrame(self, corner_radius=10)
-        form.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        form = self.card_frame(self)
+        form.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
+        row += 1
 
-        ctk.CTkLabel(form, text="SQL File:").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        ctk.CTkLabel(form, text="Connection:").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        ctk.CTkLabel(
+            form,
+            text=self.connection.summary if self.connection else "default",
+        ).grid(row=0, column=1, padx=10, pady=8, sticky="w")
+
+        ctk.CTkLabel(form, text="SQL File:").grid(row=1, column=0, padx=10, pady=8, sticky="w")
         path_frame = ctk.CTkFrame(form, fg_color="transparent")
-        path_frame.grid(row=0, column=1, padx=10, pady=8)
+        path_frame.grid(row=1, column=1, padx=10, pady=8)
         self.sql_file = ctk.CTkEntry(path_frame, width=300)
         self.sql_file.pack(side="left")
         ctk.CTkButton(path_frame, text="Browse", width=80, command=self._browse).pack(side="left", padx=5)
 
-        ctk.CTkLabel(form, text="Description:").grid(row=1, column=0, padx=10, pady=8, sticky="w")
+        ctk.CTkLabel(form, text="Description:").grid(row=2, column=0, padx=10, pady=8, sticky="w")
         self.description = ctk.CTkEntry(form, width=300)
-        self.description.grid(row=1, column=1, padx=10, pady=8)
+        self.description.grid(row=2, column=1, padx=10, pady=8)
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=2, column=0, padx=20, pady=10, sticky="w")
+        btn_frame.grid(row=row, column=0, padx=20, pady=10, sticky="w")
+        row += 1
         ctk.CTkButton(btn_frame, text="Execute Patch", command=self._execute, width=120).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="View History", command=self._show_history, width=120).pack(side="left", padx=5)
 
         self.results = ctk.CTkTextbox(self, height=300)
-        self.results.grid(row=3, column=0, padx=20, pady=10, sticky="nsew")
-        self.grid_rowconfigure(3, weight=1)
+        self.results.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
+        self.grid_rowconfigure(row, weight=1)
 
     def _browse(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("SQL files", "*.sql"), ("All", "*.*")])
@@ -58,7 +73,8 @@ class PatchView(BaseView):
         def task():
             try:
                 request = PatchRequest(
-                    db_type=DatabaseType.POSTGRESQL,
+                    profile=self.get_active_profile(),
+                    db_type=self.get_active_db_type(),
                     sql_file=self.sql_file.get(),
                     description=self.description.get(),
                 )

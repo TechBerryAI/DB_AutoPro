@@ -19,17 +19,40 @@ class PostgreSQLConnector(BaseConnector):
             import psycopg2
             from psycopg2.extras import RealDictCursor
 
-            conn = psycopg2.connect(
-                host=self.config.host,
-                port=self.config.port,
-                dbname=self.config.database,
-                user=self.config.username,
-                password=self.config.password,
-                sslmode=self.config.ssl_mode or "prefer",
-            )
-            return conn, RealDictCursor
+            timeout = (self.config.extra_options or {}).get("connect_timeout", 10)
+            ssl_modes: list[str] = []
+            if self.config.ssl_mode:
+                ssl_modes.append(self.config.ssl_mode)
+            for mode in ("prefer", "require", "allow", "disable"):
+                if mode not in ssl_modes:
+                    ssl_modes.append(mode)
+
+            tried: set[str] = set()
+            last_error: Exception | None = None
+
+            for sslmode in ssl_modes:
+                if sslmode in tried:
+                    continue
+                tried.add(sslmode)
+                try:
+                    conn = psycopg2.connect(
+                        host=self.config.host,
+                        port=self.config.port,
+                        dbname=self.config.database,
+                        user=self.config.username,
+                        password=self.config.password,
+                        sslmode=sslmode,
+                        connect_timeout=timeout,
+                    )
+                    return conn, RealDictCursor
+                except Exception as exc:
+                    last_error = exc
+
+            raise ConnectorError(f"PostgreSQL connection failed: {last_error}") from last_error
         except ImportError as exc:
             raise ConnectorError("psycopg2 not installed", {"error": str(exc)}) from exc
+        except ConnectorError:
+            raise
         except Exception as exc:
             raise ConnectorError(f"PostgreSQL connection failed: {exc}") from exc
 

@@ -24,6 +24,7 @@ class MySQLConnector(BaseConnector):
                 database=self.config.database,
                 user=self.config.username,
                 password=self.config.password,
+                connection_timeout=(self.config.extra_options or {}).get("connect_timeout", 10),
             )
         except ImportError as exc:
             raise ConnectorError("mysql-connector-python not installed") from exc
