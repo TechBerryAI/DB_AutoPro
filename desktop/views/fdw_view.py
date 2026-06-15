@@ -21,11 +21,25 @@ class FDWView(BaseView):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        title = self.create_section_title("FDW Management")
-        title.grid(row=0, column=0, padx=20, pady=20, sticky="w")
+        row = 0
+        context = self.create_connection_context()
+        if context:
+            context.grid(row=row, column=0, padx=20, pady=(12, 8), sticky="ew")
+            row += 1
 
-        form = ctk.CTkFrame(self, corner_radius=10)
-        form.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        title = self.create_section_title("FDW Management")
+        title.grid(row=row, column=0, padx=20, pady=20, sticky="w")
+        row += 1
+
+        form = self.card_frame(self)
+        form.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
+        row += 1
+
+        ctk.CTkLabel(form, text="Local connection:").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        ctk.CTkLabel(
+            form,
+            text=self.connection.summary if self.connection else "default PostgreSQL profile",
+        ).grid(row=0, column=1, padx=10, pady=8, sticky="w")
 
         fields = [
             ("server_name", "Server Name", "foreign_server"),
@@ -40,20 +54,24 @@ class FDWView(BaseView):
 
         self.entries: dict[str, ctk.CTkEntry] = {}
         for i, (key, label, default) in enumerate(fields):
-            ctk.CTkLabel(form, text=f"{label}:").grid(row=i, column=0, padx=10, pady=5, sticky="w")
+            ctk.CTkLabel(form, text=f"{label}:").grid(row=i + 1, column=0, padx=10, pady=5, sticky="w")
             entry = ctk.CTkEntry(form, width=250)
             if default:
                 entry.insert(0, default)
-            entry.grid(row=i, column=1, padx=10, pady=5)
+            if self.connection and key == "local_user":
+                entry.delete(0, "end")
+                entry.insert(0, self.connection.username)
+            entry.grid(row=i + 1, column=1, padx=10, pady=5)
             self.entries[key] = entry
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=2, column=0, padx=20, pady=10, sticky="w")
+        btn_frame.grid(row=row, column=0, padx=20, pady=10, sticky="w")
+        row += 1
         ctk.CTkButton(btn_frame, text="Setup FDW", command=self._setup, width=120).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="Validate", command=self._validate, width=120).pack(side="left", padx=5)
 
         self.results = ctk.CTkTextbox(self, height=200)
-        self.results.grid(row=3, column=0, padx=20, pady=10, sticky="nsew")
+        self.results.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
 
     def _build_request(self) -> FDWRequest:
         schema = self.entries["schema_name"].get()

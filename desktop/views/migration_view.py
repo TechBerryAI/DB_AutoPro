@@ -21,39 +21,57 @@ class MigrationView(BaseView):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        title = self.create_section_title("Migration")
-        title.grid(row=0, column=0, padx=20, pady=20, sticky="w")
+        row = 0
+        context = self.create_connection_context()
+        if context:
+            context.grid(row=row, column=0, padx=20, pady=(12, 8), sticky="ew")
+            row += 1
 
-        form = ctk.CTkFrame(self, corner_radius=10)
-        form.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+        title = self.create_section_title("Migration")
+        title.grid(row=row, column=0, padx=20, pady=20, sticky="w")
+        row += 1
+
+        form = self.card_frame(self)
+        form.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
+        row += 1
 
         db_types = [t.value for t in DatabaseType]
+        active_type = self.get_active_db_type().value
 
         ctk.CTkLabel(form, text="Source Type:").grid(row=0, column=0, padx=10, pady=8, sticky="w")
         self.source_type = ctk.CTkComboBox(form, values=db_types, width=200)
-        self.source_type.set("postgresql")
+        self.source_type.set(active_type)
         self.source_type.grid(row=0, column=1, padx=10, pady=8)
 
         ctk.CTkLabel(form, text="Target Type:").grid(row=1, column=0, padx=10, pady=8, sticky="w")
         self.target_type = ctk.CTkComboBox(form, values=db_types, width=200)
-        self.target_type.set("postgresql")
+        self.target_type.set(active_type)
         self.target_type.grid(row=1, column=1, padx=10, pady=8)
+
+        ctk.CTkLabel(form, text="Connection:").grid(row=2, column=0, padx=10, pady=8, sticky="w")
+        ctk.CTkLabel(
+            form,
+            text=self.connection.name if self.connection else "default",
+        ).grid(row=2, column=1, padx=10, pady=8, sticky="w")
 
         self.schema_only_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(form, text="Schema only", variable=self.schema_only_var).grid(
-            row=2, column=0, columnspan=2, padx=10, pady=8, sticky="w"
+            row=3, column=0, columnspan=2, padx=10, pady=8, sticky="w"
         )
 
         ctk.CTkButton(self, text="Start Migration", command=self._run_migration, width=140).grid(
-            row=2, column=0, padx=20, pady=10, sticky="w"
+            row=row, column=0, padx=20, pady=10, sticky="w"
         )
+        row += 1
 
         self.progress, self.status_label = self.create_progress_section()
-        self.progress.grid(row=3, column=0, padx=20, pady=5, sticky="w")
-        self.status_label.grid(row=4, column=0, padx=20, pady=5, sticky="w")
+        self.progress.grid(row=row, column=0, padx=20, pady=5, sticky="w")
+        row += 1
+        self.status_label.grid(row=row, column=0, padx=20, pady=5, sticky="w")
+        row += 1
 
         self.results = ctk.CTkTextbox(self, height=200)
-        self.results.grid(row=5, column=0, padx=20, pady=10, sticky="nsew")
+        self.results.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
 
     def _update_progress(self, value: float, message: str) -> None:
         self.after(0, lambda: self.progress.set(value))

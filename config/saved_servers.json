@@ -1,0 +1,13 @@
+{
+  "servers": [
+    {
+      "name": "postgres",
+      "db_type": "postgresql",
+      "host": "192.168.1.109",
+      "port": 5432,
+      "username": "postgres",
+      "password": "postgresql@12345",
+      "database": "emp"
+    }
+  ]
+}
