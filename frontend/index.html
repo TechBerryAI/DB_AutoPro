@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Database Automation Pro</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="app">
+        <nav class="sidebar">
+            <h1>DB Auto Pro</h1>
+            <ul>
+                <li><a href="#" data-view="dashboard" class="active">Dashboard</a></li>
+                <li><a href="#" data-view="backups">Backups</a></li>
+                <li><a href="#" data-view="monitoring">Monitoring</a></li>
+                <li><a href="/docs" target="_blank">API Docs</a></li>
+            </ul>
+            <div class="auth-section">
+                <input type="text" id="username" placeholder="Username" value="admin">
+                <input type="password" id="password" placeholder="Password" value="admin123">
+                <button id="login-btn">Login</button>
+                <span id="auth-status">Not authenticated</span>
+            </div>
+        </nav>
+        <main class="content">
+            <section id="dashboard" class="view active">
+                <h2>Dashboard</h2>
+                <div class="stats-grid" id="stats-grid"></div>
+            </section>
+            <section id="backups" class="view">
+                <h2>Backups</h2>
+                <button id="refresh-backups">Refresh List</button>
+                <table id="backups-table">
+                    <thead><tr><th>Name</th><th>Size</th><th>Created</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </section>
+            <section id="monitoring" class="view">
+                <h2>Health Checks</h2>
+                <button id="run-health">Run Health Check</button>
+                <pre id="health-results"></pre>
+            </section>
+        </main>
+    </div>
+    <script src="js/app.js"></script>
+</body>
+</html>

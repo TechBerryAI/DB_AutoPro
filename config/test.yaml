@@ -1,0 +1,19 @@
+# Test environment overrides
+
+environment: test
+debug: true
+
+connections:
+  default:
+    host: localhost
+    port: 5432
+    database: test_db
+    username: test_user
+    password: test_pass
+
+backup:
+  output_dir: "./backups/test"
+  retention_days: 3
+
+logging:
+  level: DEBUG

@@ -1,0 +1,10 @@
+# Development environment overrides
+
+environment: dev
+debug: true
+
+logging:
+  level: DEBUG
+
+backup:
+  retention_days: 7

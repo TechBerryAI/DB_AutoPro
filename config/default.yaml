@@ -1,0 +1,43 @@
+# Database Automation Pro - Default Configuration
+
+app_name: "Database Automation Pro"
+environment: dev
+debug: true
+
+api_host: "0.0.0.0"
+api_port: 8000
+
+database_type: postgresql
+
+connections:
+  default:
+    host: localhost
+    port: 5432
+    database: postgres
+    username: postgres
+    password: ""
+    ssl_mode: prefer
+
+backup:
+  output_dir: "./backups"
+  compression: true
+  compression_format: gzip
+  retention_days: 30
+  schedule_cron: "0 2 * * *"
+
+jwt:
+  secret_key: "dev-secret-change-in-production"
+  algorithm: HS256
+  access_token_expire_minutes: 60
+  refresh_token_expire_days: 7
+
+logging:
+  level: INFO
+  format: json
+  audit_log_path: "./logs/audit.log"
+  app_log_path: "./logs/app.log"
+
+allowed_roles:
+  - admin
+  - operator
+  - viewer

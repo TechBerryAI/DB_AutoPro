@@ -1,0 +1,14 @@
+# Production environment overrides
+
+environment: prod
+debug: false
+
+logging:
+  level: WARNING
+
+backup:
+  retention_days: 90
+  schedule_cron: "0 1 * * *"
+
+jwt:
+  access_token_expire_minutes: 30
