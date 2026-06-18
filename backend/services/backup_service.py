@@ -15,11 +15,13 @@ from backend.core.config import get_settings
 from backend.core.exceptions import BackupError
 from backend.core.logging import get_audit_logger, get_logger
 from backend.models.schemas import (
+    BackupCategory,
     BackupMethod,
     BackupRequest,
     DatabaseType,
     OperationResult,
     OperationStatus,
+    backup_method_category,
 )
 
 logger = get_logger("services.backup")
@@ -27,6 +29,13 @@ audit = get_audit_logger()
 
 # In-memory operation tracking (production would use Redis/DB)
 _operations: dict[str, OperationResult] = {}
+
+
+def _cli_not_found_error(tool: str) -> BackupError:
+    return BackupError(
+        f"'{tool}' was not found on this PC. Install the database client tools "
+        f"and add them to PATH (e.g. PostgreSQL → pg_dump is in the 'bin' folder)."
+    )
 
 
 class BackupService:
@@ -76,7 +85,12 @@ class BackupService:
 
             final_path = handler(request, output_path, progress_callback)
 
-            if request.compress and self.settings.backup.compression:
+            physical = backup_method_category(request.method) == BackupCategory.PHYSICAL
+            if (
+                request.compress
+                and self.settings.backup.compression
+                and not physical
+            ):
                 if progress_callback:
                     progress_callback(0.8, "Compressing backup...")
                 final_path = self._compress(final_path)
@@ -91,6 +105,7 @@ class BackupService:
             result.details = {
                 "size_bytes": final_path.stat().st_size,
                 "method": request.method.value,
+                "category": backup_method_category(request.method).value,
                 "db_type": request.db_type.value,
             }
 
@@ -114,8 +129,17 @@ class BackupService:
             return Path(request.output_path)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         db_name = request.database or "all"
-        filename = f"{request.db_type.value}_{db_name}_{timestamp}.sql"
-        return self.output_dir / filename
+        category = backup_method_category(request.method)
+
+        if request.method == BackupMethod.PG_BASEBACKUP:
+            return self.output_dir / f"{request.db_type.value}_physical_{timestamp}"
+        if request.method == BackupMethod.MSSQL_BACKUP:
+            return self.output_dir / f"{request.db_type.value}_{db_name}_{timestamp}.bak"
+        if request.method == BackupMethod.MONGODUMP:
+            return self.output_dir / f"{request.db_type.value}_{db_name}_{timestamp}_dump"
+
+        suffix = "sql" if category.value == "logical" else "backup"
+        return self.output_dir / f"{request.db_type.value}_{db_name}_{timestamp}.{suffix}"
 
     def _backup_postgresql(
         self,
@@ -145,7 +169,10 @@ class BackupService:
                 "-D", str(backup_dir),
                 "-Ft", "-z", "-P",
             ]
-            subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)
+            try:
+                subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)
+            except FileNotFoundError as exc:
+                raise _cli_not_found_error("pg_basebackup") from exc
             return backup_dir
         else:
             db = request.database or conn.database
@@ -159,9 +186,13 @@ class BackupService:
                 "--format=plain",
             ]
 
-        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise _cli_not_found_error(cmd[0]) from exc
         if result.returncode != 0:
-            raise BackupError(f"pg_dump failed: {result.stderr}")
+            tool = request.method.value
+            raise BackupError(f"{tool} failed: {result.stderr}")
         return output_path
 
     def _backup_mysql(
