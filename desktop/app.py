@@ -19,7 +19,6 @@ from desktop.views.backup_view import BackupView
 from desktop.views.dashboard import DashboardView
 from desktop.views.fdw_view import FDWView
 from desktop.views.migration_view import MigrationView
-from desktop.views.monitoring_view import MonitoringView
 from desktop.views.patch_view import PatchView
 from desktop.views.restore_view import RestoreView
 from desktop.views.settings_view import SettingsView
@@ -31,7 +30,6 @@ NAV_ITEMS = [
     ("patch", "Patches", PatchView),
     ("fdw", "FDW", FDWView),
     ("migration", "Migration", MigrationView),
-    ("monitoring", "Monitoring", MonitoringView),
     ("settings", "Settings", SettingsView),
 ]
 

@@ -23,6 +23,11 @@ class UserRole(str, Enum):
     VIEWER = "viewer"
 
 
+class BackupCategory(str, Enum):
+    LOGICAL = "logical"
+    PHYSICAL = "physical"
+
+
 class BackupMethod(str, Enum):
     PG_DUMP = "pg_dump"
     PG_DUMPALL = "pg_dumpall"
@@ -30,6 +35,34 @@ class BackupMethod(str, Enum):
     MYSQLDUMP = "mysqldump"
     MONGODUMP = "mongodump"
     MSSQL_BACKUP = "mssql_backup"
+    ORACLE_EXPDP = "expdp"
+
+
+_BACKUP_METHODS: dict[tuple[DatabaseType, BackupCategory], list[BackupMethod]] = {
+    (DatabaseType.POSTGRESQL, BackupCategory.LOGICAL): [
+        BackupMethod.PG_DUMP,
+        BackupMethod.PG_DUMPALL,
+    ],
+    (DatabaseType.POSTGRESQL, BackupCategory.PHYSICAL): [BackupMethod.PG_BASEBACKUP],
+    (DatabaseType.MYSQL, BackupCategory.LOGICAL): [BackupMethod.MYSQLDUMP],
+    (DatabaseType.MONGODB, BackupCategory.LOGICAL): [BackupMethod.MONGODUMP],
+    (DatabaseType.MSSQL, BackupCategory.PHYSICAL): [BackupMethod.MSSQL_BACKUP],
+    (DatabaseType.ORACLE, BackupCategory.LOGICAL): [BackupMethod.ORACLE_EXPDP],
+}
+
+
+def backup_methods_for(
+    db_type: DatabaseType, category: BackupCategory
+) -> list[BackupMethod]:
+    """Return backup tools available for a database type and backup category."""
+    return list(_BACKUP_METHODS.get((db_type, category), []))
+
+
+def backup_method_category(method: BackupMethod) -> BackupCategory:
+    """Classify a backup method as logical or physical."""
+    if method in (BackupMethod.PG_BASEBACKUP, BackupMethod.MSSQL_BACKUP):
+        return BackupCategory.PHYSICAL
+    return BackupCategory.LOGICAL
 
 
 class OperationStatus(str, Enum):
