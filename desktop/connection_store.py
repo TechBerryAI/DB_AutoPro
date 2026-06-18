@@ -23,6 +23,17 @@ class SavedServer:
     username: str
     password: str
     database: str
+    auth_database: str = ""
+    ssh_enabled: bool = False
+    linux_username: str = ""
+    linux_password: str = ""
+    ssh_host: str = ""
+    ssh_port: int = 22
+    mongodump_path: str = ""
+    remote_backup_dir: str = ""
+    local_output_dir: str = ""
+    backup_folder_name: str = ""
+    backup_collection: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> SavedServer:
@@ -34,6 +45,17 @@ class SavedServer:
             username=data.get("username", ""),
             password=data.get("password", ""),
             database=data.get("database", "postgres"),
+            auth_database=data.get("auth_database", ""),
+            ssh_enabled=bool(data.get("ssh_enabled", False)),
+            linux_username=data.get("linux_username", ""),
+            linux_password=data.get("linux_password", ""),
+            ssh_host=data.get("ssh_host", ""),
+            ssh_port=int(data.get("ssh_port", 22)),
+            mongodump_path=data.get("mongodump_path", ""),
+            remote_backup_dir=data.get("remote_backup_dir", ""),
+            local_output_dir=data.get("local_output_dir", ""),
+            backup_folder_name=data.get("backup_folder_name", ""),
+            backup_collection=data.get("backup_collection", ""),
         )
 
 

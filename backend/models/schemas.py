@@ -85,6 +85,12 @@ class BackupRequest(BaseModel):
     database: str | None = None
     compress: bool = True
     output_path: str | None = None
+    local_output_dir: str | None = None
+    use_remote_exec: bool = False
+    remote_binary_path: str | None = None
+    remote_output_dir: str | None = None
+    backup_folder_name: str | None = None
+    collection: str | None = None
 
 
 class RestoreRequest(BaseModel):
