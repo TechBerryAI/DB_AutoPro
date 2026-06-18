@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote_plus
 
 from backend.connectors.base import BaseConnector
 from backend.core.exceptions import ConnectorError
@@ -14,19 +15,74 @@ class MongoDBConnector(BaseConnector):
 
     db_type = DatabaseType.MONGODB
 
+    def _auth_source_candidates(self) -> list[str]:
+        opts = self.config.extra_options or {}
+        explicit = opts.get("auth_source") or opts.get("authSource")
+        if explicit:
+            return [str(explicit)]
+
+        database = self.config.database or "admin"
+        candidates = [database]
+        if database != "admin":
+            candidates.append("admin")
+        return candidates
+
+    @staticmethod
+    def _is_auth_failure(exc: BaseException) -> bool:
+        from pymongo.errors import OperationFailure
+
+        if isinstance(exc, OperationFailure) and exc.code == 18:
+            return True
+        message = str(exc).lower()
+        return "authentication failed" in message or "authenticationfailed" in message
+
+    def _build_uri(self, auth_source: str | None = None) -> str:
+        """Build a MongoDB URI with RFC 3986–escaped credentials."""
+        host = self.config.host
+        port = self.config.port
+        database = self.config.database or "admin"
+        username = self.config.username
+        password = self.config.password
+        params = f"?authSource={quote_plus(auth_source)}" if auth_source and username else ""
+
+        if username:
+            user = quote_plus(username)
+            if password:
+                creds = f"{user}:{quote_plus(password)}@"
+            else:
+                creds = f"{user}@"
+            return f"mongodb://{creds}{host}:{port}/{database}{params}"
+        return f"mongodb://{host}:{port}/{database}"
+
     def _get_client(self) -> Any:
         try:
             from pymongo import MongoClient
-
-            uri = (
-                f"mongodb://{self.config.username}:{self.config.password}"
-                f"@{self.config.host}:{self.config.port}/{self.config.database}"
-            )
-            return MongoClient(uri, serverSelectionTimeoutMS=5000)
         except ImportError as exc:
             raise ConnectorError("pymongo not installed") from exc
-        except Exception as exc:
-            raise ConnectorError(f"MongoDB connection failed: {exc}") from exc
+
+        last_error: Exception | None = None
+        for auth_source in self._auth_source_candidates():
+            try:
+                client = MongoClient(
+                    self._build_uri(auth_source),
+                    serverSelectionTimeoutMS=5000,
+                )
+                client.admin.command("ping")
+                return client
+            except Exception as exc:
+                if self._is_auth_failure(exc):
+                    last_error = exc
+                    continue
+                raise ConnectorError(f"MongoDB connection failed: {exc}") from exc
+
+        if last_error:
+            tried = ", ".join(self._auth_source_candidates())
+            raise ConnectorError(
+                f"MongoDB authentication failed for user '{self.config.username}'. "
+                f"Tried authSource: {tried}. "
+                "Set the Auth database field to where this user was created (often 'admin')."
+            ) from last_error
+        raise ConnectorError("MongoDB connection failed")
 
     def test_connection(self) -> bool:
         client = self._get_client()
@@ -58,5 +114,22 @@ class MongoDBConnector(BaseConnector):
         try:
             info = client.server_info()
             return info.get("version", "unknown")
+        finally:
+            client.close()
+
+    def list_collections(self, database: str | None = None) -> list[dict[str, Any]]:
+        """Return collection names and document counts for a database."""
+        db_name = database or self.config.database or "admin"
+        client = self._get_client()
+        try:
+            db = client[db_name]
+            collections: list[dict[str, Any]] = []
+            for name in sorted(db.list_collection_names()):
+                try:
+                    count = db[name].estimated_document_count()
+                except Exception:
+                    count = 0
+                collections.append({"name": name, "count": count})
+            return collections
         finally:
             client.close()

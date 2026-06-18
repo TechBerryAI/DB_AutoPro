@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tkinter as tk
 
 import customtkinter as ctk
 
@@ -151,17 +152,45 @@ class DatabaseAutomationApp(ctk.CTk):
         self.content.grid(row=0, column=1, sticky="nsew")
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
+        self.content.grid_rowconfigure(1, weight=0)
 
-        self.view_container = ctk.CTkFrame(self.content, fg_color="transparent")
-        self.view_container.grid(row=0, column=0, sticky="nsew")
+        self._vertical_split = tk.PanedWindow(
+            self.content,
+            orient=tk.VERTICAL,
+            sashwidth=7,
+            sashrelief=tk.FLAT,
+            bg=self._t.c("border_subtle"),
+            bd=0,
+            opaqueresize=True,
+            showhandle=False,
+        )
+        self._vertical_split.grid(row=0, column=0, sticky="nsew")
+
+        self.view_container = ctk.CTkFrame(
+            self._vertical_split,
+            fg_color=self._t.c("bg_content"),
+        )
         self.view_container.grid_columnconfigure(0, weight=1)
         self.view_container.grid_rowconfigure(0, weight=1)
 
-        self.execution_log = ExecutionLogPanel(self.content, self._t)
-        self.execution_log.grid(row=1, column=0, sticky="ew")
+        self.execution_log = ExecutionLogPanel(self._vertical_split, self._t)
+
+        self._vertical_split.add(self.view_container, minsize=220)
+        self._vertical_split.add(self.execution_log, minsize=90)
+        self.after_idle(self._set_initial_log_split)
 
         self.status_footer = StatusFooterBar(self.content, self._t)
-        self.status_footer.grid(row=2, column=0, sticky="ew")
+        self.status_footer.grid(row=1, column=0, sticky="ew")
+
+    def _set_initial_log_split(self) -> None:
+        """Place the sash so the execution log starts at a comfortable height."""
+        try:
+            self.update_idletasks()
+            total = self._vertical_split.winfo_height()
+            if total > 200:
+                self._vertical_split.sash_place(0, 0, max(220, total - 130))
+        except tk.TclError:
+            pass
 
     def _build_connection_card(self) -> None:
         assert self.connection is not None

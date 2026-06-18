@@ -137,3 +137,17 @@ def _list_mongodb_databases(connector) -> list[dict[str, str]]:
             client.close()
     except Exception:
         return []
+
+
+def fetch_mongodb_collections(
+    connection: ConnectionResult, database_name: str
+) -> list[dict[str, Any]]:
+    """Return collections in a MongoDB database with estimated document counts."""
+    if connection.db_type != DatabaseType.MONGODB:
+        return []
+    if not database_name.strip():
+        raise ValueError("Database name is required to list collections.")
+
+    info = connection.to_connection_info()
+    connector = get_connector_from_info(connection.db_type, info)
+    return connector.list_collections(database_name.strip())

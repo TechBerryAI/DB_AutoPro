@@ -31,6 +31,14 @@ class ConnectionResult:
     password: str
     database: str
     saved_name: str | None = None
+    auth_database: str | None = None
+    ssh_enabled: bool = False
+    linux_username: str = ""
+    linux_password: str = ""
+    ssh_host: str | None = None
+    ssh_port: int = 22
+    mongodump_path: str = ""
+    remote_backup_dir: str = ""
 
     @property
     def summary(self) -> str:
@@ -38,6 +46,28 @@ class ConnectionResult:
             f"{self.name}  |  {self.db_type.value}  |  "
             f"{self.host}:{self.port}  |  {self.database}"
         )
+
+    def _extra_options(self) -> dict:
+        opts: dict = {
+            "connect_timeout": 10,
+            "mongo_host": self.host,
+            "mongo_port": self.port,
+        }
+        if self.db_type == DatabaseType.MONGODB and self.auth_database:
+            opts["auth_source"] = self.auth_database
+        if self.ssh_enabled:
+            opts.update({
+                "ssh_enabled": True,
+                "ssh_host": self.ssh_host or self.host,
+                "ssh_port": self.ssh_port,
+                "linux_username": self.linux_username,
+                "linux_password": self.linux_password,
+            })
+        if self.mongodump_path:
+            opts["mongodump_path"] = self.mongodump_path
+        if self.remote_backup_dir:
+            opts["remote_backup_dir"] = self.remote_backup_dir
+        return opts
 
     def to_connection_info(self) -> ConnectionInfo:
         return ConnectionInfo(
@@ -47,7 +77,7 @@ class ConnectionResult:
             username=self.username,
             password=self.password,
             ssl_mode="prefer",
-            extra_options={"connect_timeout": 10},
+            extra_options=self._extra_options(),
         )
 
 
@@ -62,7 +92,7 @@ def apply_connection(connection: ConnectionResult, profile: str = "default") -> 
         username=connection.username,
         password=SecretStr(connection.password),
         ssl_mode="prefer",
-        extra_options={"connect_timeout": 10},
+        extra_options=connection._extra_options(),
     )
 
 
@@ -90,7 +120,15 @@ def _friendly_error(exc: Exception, connection: ConnectionResult | None = None) 
             "Check that PostgreSQL is running on the server, port 5432 is open in the firewall, "
             "and listen_addresses in postgresql.conf allows remote connections."
         )
-    if "password authentication failed" in message.lower():
+    if "authentication failed" in message.lower() or "authenticationfailed" in message.lower():
+        if connection and connection.db_type == DatabaseType.MONGODB:
+            return (
+                f"{message}\n\n"
+                "MongoDB reached the server but rejected the login. Common fixes:\n"
+                "• Set Auth database to where the user was created (usually 'admin')\n"
+                "• Verify username and password on the MongoDB server\n"
+                "• Confirm the user has access to the target database"
+            )
         return f"{message}\n\nVerify the username and password."
     if "does not exist" in message.lower() and "database" in message.lower():
         return f"{message}\n\nVerify the database name exists on the server."
@@ -99,16 +137,22 @@ def _friendly_error(exc: Exception, connection: ConnectionResult | None = None) 
 
 def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
     """Test connectivity and return (success, message)."""
-    apply_connection(connection)
-    info = connection.to_connection_info()
+    from desktop.ssh_tunnel import ssh_tunnel_session
+
     try:
-        connector = get_connector_from_info(connection.db_type, info)
-        health = connector.health_check()
-        if health.get("status") == "healthy":
-            version = health.get("version", "unknown")
-            latency = health.get("latency_ms", 0)
-            return True, f"Connected successfully ({version}, {latency:.0f} ms)"
-        error = health.get("error", "Connection failed")
-        return False, _friendly_error(Exception(error), connection)
+        with ssh_tunnel_session(connection) as effective:
+            apply_connection(effective)
+            info = effective.to_connection_info()
+            connector = get_connector_from_info(effective.db_type, info)
+            health = connector.health_check()
+            if health.get("status") == "healthy":
+                version = health.get("version", "unknown")
+                latency = health.get("latency_ms", 0)
+                via = " via SSH" if connection.ssh_enabled else ""
+                return True, f"Connected successfully{via} ({version}, {latency:.0f} ms)"
+            error = health.get("error", "Connection failed")
+            return False, _friendly_error(Exception(error), connection)
+    except RuntimeError as exc:
+        return False, str(exc)
     except Exception as exc:
         return False, _friendly_error(exc, connection)

@@ -53,16 +53,17 @@ class BaseView(ctk.CTkFrame):
         """Connection is shown in the sidebar; no redundant strip per page."""
         return None
 
-    def create_section_title(self, text: str) -> ctk.CTkLabel:
+    def create_section_title(self, text: str, parent: ctk.CTkFrame | None = None) -> ctk.CTkLabel:
+        target = parent or self
         return ctk.CTkLabel(
-            self,
+            target,
             text=text,
             font=ctk.CTkFont(size=22, weight="bold"),
             text_color=self.theme.c("text_primary"),
         )
 
     def create_progress_section(self) -> tuple[ctk.CTkProgressBar, ctk.CTkLabel]:
-        progress = ctk.CTkProgressBar(self, width=400)
+        progress = ctk.CTkProgressBar(self)
         progress.set(0)
         status = ctk.CTkLabel(self, text="Ready", font=ctk.CTkFont(size=12))
         return progress, status

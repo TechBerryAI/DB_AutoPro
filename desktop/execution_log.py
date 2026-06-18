@@ -44,6 +44,7 @@ class ExecutionLogPanel(ctk.CTkFrame):
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
         toolbar.grid(row=0, column=0, sticky="ew", padx=14, pady=(8, 4))
@@ -110,14 +111,13 @@ class ExecutionLogPanel(ctk.CTkFrame):
 
         self._text = ctk.CTkTextbox(
             self,
-            height=72,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color=self.theme.c("bg_elevated"),
             border_width=0,
             text_color=self.theme.c("text_secondary"),
             activate_scrollbars=True,
         )
-        self._text.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="ew")
+        self._text.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="nsew")
         self._text.configure(state="disabled")
 
     def _configure_tags(self) -> None:

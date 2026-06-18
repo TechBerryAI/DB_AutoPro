@@ -46,6 +46,7 @@ class ConnectionDialog(ctk.CTk):
         self._saved_list_buttons: dict[str, ctk.CTkButton] = {}
         self._db_type_tiles: dict[str, ctk.CTkFrame] = {}
         self._password_visible = False
+        self._linux_password_visible = False
 
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
@@ -186,6 +187,7 @@ class ConnectionDialog(ctk.CTk):
         scroll.grid(row=0, column=0, sticky="nsew")
 
         self._build_database_type_card(scroll)
+        self._build_linux_access_card(scroll)
         self._build_details_card(scroll)
 
         footer = ctk.CTkFrame(main, fg_color="transparent")
@@ -338,12 +340,12 @@ class ConnectionDialog(ctk.CTk):
         self.port_entry.insert(0, "5432")
         self.port_entry.grid(row=0, column=2)
 
-        self._labeled_field(body, "Username", row=2)
+        self._labeled_field(body, "DB username", row=2)
         self.user_entry = ctk.CTkEntry(body, height=ENTRY_HEIGHT, placeholder_text="postgres")
         self.user_entry.insert(0, "postgres")
         self.user_entry.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=6)
 
-        self._labeled_field(body, "Password", row=3)
+        self._labeled_field(body, "DB password", row=3)
         password_row = ctk.CTkFrame(body, fg_color="transparent")
         password_row.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=6)
         password_row.grid_columnconfigure(0, weight=1)
@@ -368,14 +370,148 @@ class ConnectionDialog(ctk.CTk):
         self.database_entry = ctk.CTkEntry(body, height=ENTRY_HEIGHT, placeholder_text="Default per engine")
         self.database_entry.grid(row=4, column=1, sticky="ew", padx=(12, 0), pady=6)
 
-        ctk.CTkLabel(
+        self.auth_db_label = ctk.CTkLabel(
+            body,
+            text="Auth database",
+            font=ctk.CTkFont(size=12),
+            text_color=COLOR_TEXT,
+            width=130,
+            anchor="w",
+        )
+        self.auth_db_label.grid(row=5, column=0, sticky="w", pady=6)
+        self.auth_database_entry = ctk.CTkEntry(
+            body,
+            height=ENTRY_HEIGHT,
+            placeholder_text="admin (where MongoDB user was created)",
+        )
+        self.auth_database_entry.grid(row=5, column=1, sticky="ew", padx=(12, 0), pady=6)
+
+        self.hint_label = ctk.CTkLabel(
             body,
             text="Oracle: use Service name (ORCL, XEPDB1). Other engines use database name defaults.",
             font=ctk.CTkFont(size=11),
             text_color=COLOR_MUTED,
             wraplength=560,
             justify="left",
+        )
+        self.hint_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+    def _build_linux_access_card(self, parent: ctk.CTkFrame) -> None:
+        body = self._section_card(parent, "Linux Server Access (SSH)")
+        body.grid_columnconfigure(1, weight=1)
+
+        self.ssh_enabled_var = ctk.BooleanVar(value=False)
+        self.ssh_enabled_cb = ctk.CTkCheckBox(
+            body,
+            text="Connect through Linux server using SSH tunnel",
+            variable=self.ssh_enabled_var,
+            command=self._sync_ssh_fields,
+        )
+        self.ssh_enabled_cb.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        self._labeled_field(body, "Linux host", row=1)
+        self.ssh_host_entry = ctk.CTkEntry(
+            body,
+            height=ENTRY_HEIGHT,
+            placeholder_text="Same as database host if left blank",
+        )
+        self.ssh_host_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=6)
+
+        self._labeled_field(body, "SSH port", row=2)
+        self.ssh_port_entry = ctk.CTkEntry(body, width=90, height=ENTRY_HEIGHT)
+        self.ssh_port_entry.insert(0, "22")
+        self.ssh_port_entry.grid(row=2, column=1, sticky="w", padx=(12, 0), pady=6)
+
+        self._labeled_field(body, "Linux username", row=3)
+        self.linux_user_entry = ctk.CTkEntry(
+            body, height=ENTRY_HEIGHT, placeholder_text="e.g. ubuntu, root, techadmin"
+        )
+        self.linux_user_entry.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=6)
+
+        self._labeled_field(body, "Linux password", row=4)
+        linux_pw_row = ctk.CTkFrame(body, fg_color="transparent")
+        linux_pw_row.grid(row=4, column=1, sticky="ew", padx=(12, 0), pady=6)
+        linux_pw_row.grid_columnconfigure(0, weight=1)
+        self.linux_password_entry = ctk.CTkEntry(linux_pw_row, height=ENTRY_HEIGHT, show="*")
+        self.linux_password_entry.grid(row=0, column=0, sticky="ew")
+        self.linux_password_toggle_btn = ctk.CTkButton(
+            linux_pw_row,
+            text="👁",
+            width=40,
+            height=ENTRY_HEIGHT,
+            fg_color="#f1f5f9",
+            hover_color="#e2e8f0",
+            text_color=COLOR_TEXT,
+            border_width=1,
+            border_color=COLOR_CARD_BORDER,
+            font=ctk.CTkFont(size=16),
+            command=self._toggle_linux_password_visibility,
+        )
+        self.linux_password_toggle_btn.grid(row=0, column=1, padx=(8, 0))
+
+        ctk.CTkLabel(
+            body,
+            text=(
+                "Use the Linux login for the machine where the database runs. "
+                "The app opens an SSH tunnel, then connects with the DB username/password below."
+            ),
+            font=ctk.CTkFont(size=11),
+            text_color=COLOR_MUTED,
+            wraplength=560,
+            justify="left",
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        self._ssh_fields = (
+            self.ssh_host_entry,
+            self.ssh_port_entry,
+            self.linux_user_entry,
+            self.linux_password_entry,
+            self.linux_password_toggle_btn,
+        )
+        self._sync_ssh_fields()
+
+    def _toggle_linux_password_visibility(self) -> None:
+        self._linux_password_visible = not self._linux_password_visible
+        self.linux_password_entry.configure(show="" if self._linux_password_visible else "*")
+        self.linux_password_toggle_btn.configure(
+            text="🙈" if self._linux_password_visible else "👁"
+        )
+
+    def _sync_ssh_fields(self) -> None:
+        enabled = self.ssh_enabled_var.get()
+        state = "normal" if enabled else "disabled"
+        for widget in self._ssh_fields:
+            widget.configure(state=state)
+
+    def _with_ssh_fields_enabled(self, callback):
+        """Run callback while SSH inputs are editable (disabled entries may not read/write reliably)."""
+        was_enabled = self.ssh_enabled_var.get()
+        if not was_enabled:
+            for widget in self._ssh_fields:
+                widget.configure(state="normal")
+        try:
+            return callback()
+        finally:
+            if not was_enabled:
+                self._sync_ssh_fields()
+
+    def _linux_form_values(self) -> dict:
+        def read() -> dict:
+            ssh_port_raw = self.ssh_port_entry.get().strip() or "22"
+            try:
+                ssh_port = int(ssh_port_raw)
+            except ValueError:
+                ssh_port = 22
+            ssh_host = self.ssh_host_entry.get().strip() or None
+            return {
+                "ssh_enabled": self.ssh_enabled_var.get(),
+                "linux_username": self.linux_user_entry.get().strip(),
+                "linux_password": self.linux_password_entry.get(),
+                "ssh_host": ssh_host,
+                "ssh_port": ssh_port,
+            }
+
+        return self._with_ssh_fields_enabled(read)
 
     def _labeled_field(self, parent: ctk.CTkFrame, text: str, row: int) -> None:
         ctk.CTkLabel(
@@ -396,6 +532,25 @@ class ConnectionDialog(ctk.CTk):
             else:
                 tile.configure(border_color=COLOR_CARD_BORDER, fg_color="#f8fafc")
         self._apply_db_defaults(db_type)
+        self._update_mongodb_fields(db_type)
+
+    def _update_mongodb_fields(self, db_type: DatabaseType) -> None:
+        is_mongo = db_type == DatabaseType.MONGODB
+        if is_mongo:
+            self.auth_db_label.grid()
+            self.auth_database_entry.grid()
+            self.hint_label.configure(
+                text=(
+                    "MongoDB: Database / Service is the database to use (e.g. db1). "
+                    "Auth database is where the user was created — usually 'admin'."
+                )
+            )
+        else:
+            self.auth_db_label.grid_remove()
+            self.auth_database_entry.grid_remove()
+            self.hint_label.configure(
+                text="Oracle: use Service name (ORCL, XEPDB1). Other engines use database name defaults."
+            )
 
     def _apply_db_defaults(self, db_type: DatabaseType) -> None:
         defaults = DB_DEFAULTS[db_type]
@@ -476,6 +631,13 @@ class ConnectionDialog(ctk.CTk):
         self._highlight_saved_selection()
         self.connection_name_entry.delete(0, "end")
         self.password_entry.delete(0, "end")
+        self.linux_password_entry.delete(0, "end")
+        self.linux_user_entry.delete(0, "end")
+        self.ssh_host_entry.delete(0, "end")
+        self.ssh_enabled_var.set(False)
+        self.ssh_port_entry.delete(0, "end")
+        self.ssh_port_entry.insert(0, "22")
+        self._sync_ssh_fields()
         self._select_db_type(DatabaseType.POSTGRESQL)
         self._set_status("New connection profile.", "info")
 
@@ -494,6 +656,7 @@ class ConnectionDialog(ctk.CTk):
         host = self.host_entry.get().strip() or "localhost"
         database = self.database_entry.get().strip() or str(defaults["database"])
         name = self._get_connection_name() or self._selected_saved or f"{host} ({db_type.value})"
+        linux = self._linux_form_values()
         return ConnectionResult(
             name=name,
             db_type=db_type,
@@ -503,6 +666,12 @@ class ConnectionDialog(ctk.CTk):
             password=self.password_entry.get(),
             database=database,
             saved_name=self._selected_saved,
+            auth_database=self.auth_database_entry.get().strip() or None,
+            ssh_enabled=linux["ssh_enabled"],
+            linux_username=linux["linux_username"],
+            linux_password=linux["linux_password"],
+            ssh_host=linux["ssh_host"],
+            ssh_port=linux["ssh_port"],
         )
 
     def _fill_form(self, server: SavedServer) -> None:
@@ -519,13 +688,32 @@ class ConnectionDialog(ctk.CTk):
         self.password_entry.insert(0, server.password)
         self.database_entry.delete(0, "end")
         self.database_entry.insert(0, server.database)
+        self.auth_database_entry.delete(0, "end")
+        if server.auth_database:
+            self.auth_database_entry.insert(0, server.auth_database)
+        self.ssh_enabled_var.set(server.ssh_enabled)
+        self._sync_ssh_fields()
 
-    def _save_server(self) -> None:
+        def fill_ssh() -> None:
+            self.ssh_host_entry.delete(0, "end")
+            if server.ssh_host:
+                self.ssh_host_entry.insert(0, server.ssh_host)
+            self.ssh_port_entry.delete(0, "end")
+            self.ssh_port_entry.insert(0, str(server.ssh_port or 22))
+            self.linux_user_entry.delete(0, "end")
+            self.linux_user_entry.insert(0, server.linux_username)
+            self.linux_password_entry.delete(0, "end")
+            self.linux_password_entry.insert(0, server.linux_password)
+
+        self._with_ssh_fields_enabled(fill_ssh)
+        self._sync_ssh_fields()
+
+    def _persist_current_connection(self) -> bool:
         self._ensure_connection_name()
         name = self._get_connection_name()
         if not name:
             self._set_status("Enter a connection name before saving.", "warning")
-            return
+            return False
 
         connection = self._get_form_values()
         server = SavedServer(
@@ -536,11 +724,24 @@ class ConnectionDialog(ctk.CTk):
             username=connection.username,
             password=connection.password,
             database=connection.database,
+            auth_database=connection.auth_database or "",
+            ssh_enabled=connection.ssh_enabled,
+            linux_username=connection.linux_username,
+            linux_password=connection.linux_password,
+            ssh_host=connection.ssh_host or "",
+            ssh_port=connection.ssh_port,
         )
         upsert_server(server)
         self._selected_saved = name
+        self.connection_name_entry.delete(0, "end")
+        self.connection_name_entry.insert(0, name)
         self._refresh_saved_list()
-        self._set_status(f"Saved connection '{name}'.", "success")
+        return True
+
+    def _save_server(self) -> None:
+        name = self._get_connection_name()
+        if self._persist_current_connection():
+            self._set_status(f"Saved connection '{name or self._selected_saved}'.", "success")
 
     def _remove_saved(self) -> None:
         if not self._selected_saved:
@@ -607,6 +808,12 @@ class ConnectionDialog(ctk.CTk):
 
         self._ensure_connection_name()
 
+        linux = self._linux_form_values()
+        if linux["ssh_enabled"] and not linux["linux_username"]:
+            self._set_status("Linux username is required when SSH tunnel is enabled.", "error")
+            self.linux_user_entry.focus_set()
+            return None
+
         try:
             return self._get_form_values()
         except ValueError:
@@ -652,6 +859,8 @@ class ConnectionDialog(ctk.CTk):
         if ok:
             self._set_status(message, "success")
             if on_success_connect:
+                self._persist_current_connection()
+                connection.saved_name = self._selected_saved
                 self.connection_result = connection
                 self.after(300, self.destroy)
         else:
