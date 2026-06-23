@@ -29,6 +29,8 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
         self._on_selection_changed = on_selection_changed
         self._current_path = initial_path
         self._selected_path = ""
+        self._selected_entry_path: str | None = None
+        self._row_widgets: dict[str, ctk.CTkFrame] = {}
         self._entries: list[dict] = []
         self._build_ui()
 
@@ -118,7 +120,22 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
 
         threading.Thread(target=task, daemon=True).start()
 
+    def _row_colors(self, selected: bool) -> tuple[str, str]:
+        if selected:
+            return self.theme.c("primary"), self.theme.c("text_on_primary")
+        return "transparent", self.theme.c("text_primary")
+
+    def _apply_row_selection(self) -> None:
+        for path, row in self._row_widgets.items():
+            fg, text = self._row_colors(path == self._selected_entry_path)
+            row.configure(fg_color=fg)
+            for child in row.winfo_children():
+                if isinstance(child, ctk.CTkLabel):
+                    child.configure(text_color=text)
+
     def _clear_list(self) -> None:
+        self._row_widgets.clear()
+        self._selected_entry_path = None
         for child in self.list_frame.winfo_children():
             child.destroy()
 
@@ -136,27 +153,60 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
             prefix = "[DIR] " if entry["is_dir"] else "[FILE] "
             size = entry.get("size", 0)
             if entry["is_dir"]:
-                label = f"{prefix}{entry['name']}/"
+                label_text = f"{prefix}{entry['name']}/"
             elif size >= 1024 * 1024:
-                label = f"{prefix}{entry['name']}  ({size / (1024 * 1024):.1f} MB)"
+                label_text = f"{prefix}{entry['name']}  ({size / (1024 * 1024):.1f} MB)"
             elif size > 0:
-                label = f"{prefix}{entry['name']}  ({size:,} bytes)"
+                label_text = f"{prefix}{entry['name']}  ({size:,} bytes)"
             else:
-                label = f"{prefix}{entry['name']}"
-            row = ctk.CTkButton(
-                self.list_frame,
-                text=label,
-                anchor="w",
-                fg_color="transparent",
-                text_color=self.theme.c("text_primary"),
-                hover_color=self.theme.c("surface_hover"),
-                command=lambda e=entry: self._on_row_click(e),
-            )
+                label_text = f"{prefix}{entry['name']}"
+
+            fg, text = self._row_colors(False)
+            row = ctk.CTkFrame(self.list_frame, fg_color=fg, corner_radius=4, cursor="hand2")
             row.grid(row=idx, column=0, sticky="ew", pady=1)
-            row.bind("<Double-Button-1>", lambda _ev, e=entry: self._on_row_double_click(e))
+            row.grid_columnconfigure(0, weight=1)
+
+            label = ctk.CTkLabel(
+                row,
+                text=label_text,
+                anchor="w",
+                text_color=text,
+                font=ctk.CTkFont(size=13),
+            )
+            label.grid(row=0, column=0, sticky="ew", padx=8, pady=4)
+
+            path = entry["path"]
+            self._row_widgets[path] = row
+
+            def bind_row(widget, ent: dict) -> None:
+                widget.bind("<Button-1>", lambda _ev, e=ent: self._on_row_click(e))
+                widget.bind("<Double-Button-1>", lambda _ev, e=ent: self._on_row_double_click(e))
+                widget.bind(
+                    "<Enter>",
+                    lambda _ev, p=path: self._on_row_enter(p) if p != self._selected_entry_path else None,
+                )
+                widget.bind(
+                    "<Leave>",
+                    lambda _ev, p=path: self._on_row_leave(p) if p != self._selected_entry_path else None,
+                )
+
+            bind_row(row, entry)
+            bind_row(label, entry)
+
+    def _on_row_enter(self, path: str) -> None:
+        row = self._row_widgets.get(path)
+        if row and path != self._selected_entry_path:
+            row.configure(fg_color=self.theme.c("bg_card_hover"))
+
+    def _on_row_leave(self, path: str) -> None:
+        row = self._row_widgets.get(path)
+        if row and path != self._selected_entry_path:
+            row.configure(fg_color="transparent")
 
     def _on_row_click(self, entry: dict) -> None:
         self._selected_path = entry["path"]
+        self._selected_entry_path = entry["path"]
+        self._apply_row_selection()
         self.status_label.configure(text=f"Selected: {self._selected_path}")
         if self._on_selection_changed:
             self._on_selection_changed(self._selected_path)

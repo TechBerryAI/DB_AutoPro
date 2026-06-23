@@ -15,9 +15,9 @@ class StatusFooterBar(ctk.CTkFrame):
             master,
             height=32,
             corner_radius=0,
-            fg_color=theme.c("bg_sidebar"),
+            fg_color=theme.c("bg_card") if theme.is_light else theme.c("bg_sidebar"),
             border_width=1,
-            border_color=theme.c("border_subtle"),
+            border_color=theme.c("border") if theme.is_light else theme.c("border_subtle"),
             **kwargs,
         )
         self.theme = theme
@@ -66,3 +66,12 @@ class StatusFooterBar(ctk.CTkFrame):
             self._labels["sessions"].configure(text=f"Sessions {sessions}")
         if last_refresh:
             self._labels["refresh"].configure(text=f"Refreshed {last_refresh}")
+
+    def apply_theme(self, theme: ThemeManager) -> None:
+        self.theme = theme
+        self.configure(
+            fg_color=theme.c("bg_card") if theme.is_light else theme.c("bg_sidebar"),
+            border_color=theme.c("border") if theme.is_light else theme.c("border_subtle"),
+        )
+        for lbl in self._labels.values():
+            lbl.configure(text_color=theme.c("text_muted"))

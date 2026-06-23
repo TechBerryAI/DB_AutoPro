@@ -55,7 +55,8 @@ class DashboardView(BaseView):
         self._db_version = "—"
         self._active_sessions = "—"
         self._build_ui()
-        self.refresh()
+        if kwargs.pop("initial_refresh", True):
+            self.refresh()
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -87,6 +88,7 @@ class DashboardView(BaseView):
             corner_radius=8,
             fg_color=self.theme.c("primary"),
             hover_color=self.theme.c("primary_hover"),
+            text_color=self.theme.c("text_on_primary"),
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self.refresh,
         )
@@ -325,15 +327,73 @@ class DashboardView(BaseView):
             if db_type == "mysql":
                 rows = connector.execute_query("SHOW STATUS LIKE 'Threads_connected'")
                 return str(rows[0]["Value"]) if rows else "—"
+            if db_type == "mongodb":
+                client = connector._get_client()
+                try:
+                    status = client.admin.command("serverStatus")
+                    current = status.get("connections", {}).get("current")
+                    return str(current) if current is not None else "—"
+                finally:
+                    client.close()
         except Exception:
             pass
         return "—"
 
+    def _live_connection_count(self) -> int | None:
+        sessions = self._query_active_sessions()
+        if sessions == "—":
+            return None
+        try:
+            return int(sessions)
+        except ValueError:
+            return None
+
+    def _backup_stats_context(self) -> dict:
+        from backend.models.schemas import DatabaseType
+        from desktop.connection_store import load_saved_servers
+
+        profile = self.get_active_profile()
+        local_dir: str | None = None
+        remote_dir = "/mnt/backup"
+        list_remote = False
+        db_type: DatabaseType | None = None
+
+        if self.connection:
+            db_type = self.connection.db_type
+            lookup = self.connection.saved_name or self.connection.name
+            for server in load_saved_servers():
+                if server.name == lookup and server.db_type == db_type.value:
+                    if server.local_output_dir:
+                        local_dir = server.local_output_dir
+                    if server.remote_backup_dir:
+                        remote_dir = server.remote_backup_dir
+                    break
+            if self.connection.remote_backup_dir:
+                remote_dir = self.connection.remote_backup_dir
+            if db_type == DatabaseType.MONGODB and self.connection.ssh_enabled:
+                list_remote = True
+
+        return {
+            "profile": profile,
+            "db_type": db_type,
+            "list_remote": list_remote,
+            "remote_dir": remote_dir,
+            "local_dir": local_dir,
+        }
+
     def refresh(self) -> None:
         try:
-            stats = self.monitoring.get_dashboard_stats()
-            trends = self.monitoring.get_kpi_trends()
-            storage_pct = self.monitoring.get_storage_usage_percent()
+            ctx = self._backup_stats_context()
+            active_connections = self._live_connection_count()
+            stats = self.monitoring.get_dashboard_stats(
+                **ctx,
+                active_connections=active_connections,
+            )
+            trends = self.monitoring.get_kpi_trends(
+                **ctx,
+                active_connections=active_connections,
+            )
+            storage_pct = self.monitoring.get_storage_usage_percent(**ctx)
 
             mapping = {
                 "total_backups": str(stats.total_backups),
@@ -354,9 +414,19 @@ class DashboardView(BaseView):
                     text=f"↓  {stats.failed_backups} failed this period",
                     text_color=self.theme.c("error"),
                 )
-            elif stats.total_backups and stats.successful_backups == stats.total_backups:
+            elif stats.successful_backups and stats.total_backups:
+                success_rate = round(
+                    (stats.successful_backups / (stats.successful_backups + stats.failed_backups)) * 100
+                    if (stats.successful_backups + stats.failed_backups) > 0
+                    else 100.0
+                )
                 self._kpi_trends["successful_backups"].configure(
-                    text="↑  100% success rate",
+                    text=f"↑  {success_rate:.0f}% success rate",
+                    text_color=self.theme.c("success"),
+                )
+            elif stats.successful_backups and not stats.total_backups:
+                self._kpi_trends["successful_backups"].configure(
+                    text=f"↑  {stats.successful_backups} completed",
                     text_color=self.theme.c("success"),
                 )
 
@@ -419,7 +489,7 @@ class DashboardView(BaseView):
             self._update_gauge("connections", conn_pct, str(conn_count))
 
             if self._chart_updater:
-                self._chart_updater(self.monitoring.get_backup_history_chart())
+                self._chart_updater(self.monitoring.get_backup_history_chart(**ctx))
 
             self._update_activity(self.monitoring.get_recent_activity())
 

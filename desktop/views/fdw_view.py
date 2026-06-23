@@ -67,7 +67,7 @@ class FDWView(BaseView):
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.grid(row=row, column=0, padx=20, pady=10, sticky="w")
         row += 1
-        ctk.CTkButton(btn_frame, text="Setup FDW", command=self._setup, width=120).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Setup FDW", command=self._setup_fdw, width=120).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="Validate", command=self._validate, width=120).pack(side="left", padx=5)
 
         self.results = ctk.CTkTextbox(self, height=200)
@@ -86,7 +86,7 @@ class FDWView(BaseView):
             schema_name=schema if schema else None,
         )
 
-    def _setup(self) -> None:
+    def _setup_fdw(self) -> None:
         def task():
             try:
                 result = self.service.setup_complete_fdw(self._build_request())

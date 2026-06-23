@@ -36,6 +36,11 @@ NAV_ITEMS = [
 
 SIDEBAR_WIDTH = 280
 
+# Disconnect always uses strong red (same in light and dark mode).
+DISCONNECT_BTN_FG = "#7f1d1d"
+DISCONNECT_BTN_HOVER = "#ef4444"
+DISCONNECT_BTN_TEXT = "#fecaca"
+
 
 class DatabaseAutomationApp(ctk.CTk):
     """Database Automation Pro desktop application."""
@@ -45,11 +50,22 @@ class DatabaseAutomationApp(ctk.CTk):
         setup_logging()
         self.connection = connection
         self.disconnect_requested = False
-        self.theme_manager = ThemeManager("dark")
+        self.theme_manager = ThemeManager()
         self.views: dict[str, ctk.CTkFrame] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
         self._t = self.theme_manager
         self._db_panel: SidebarDatabasePanel | None = None
+        self._active_nav = "dashboard"
+        self._brand_title: ctk.CTkLabel | None = None
+        self._brand_subtitle: ctk.CTkLabel | None = None
+        self._nav_header: ctk.CTkLabel | None = None
+        self._theme_btn: ctk.CTkButton | None = None
+        self._conn_card: ctk.CTkFrame | None = None
+        self._conn_name_label: ctk.CTkLabel | None = None
+        self._conn_host_label: ctk.CTkLabel | None = None
+        self._conn_disconnect_btn: ctk.CTkButton | None = None
+        self._sidebar_conn_slot: ctk.CTkFrame | None = None
+        self._theme_switching = False
 
         self.title(APP_NAME)
         self.configure(fg_color=self._t.c("bg_app"))
@@ -84,22 +100,26 @@ class DatabaseAutomationApp(ctk.CTk):
             width=SIDEBAR_WIDTH,
             corner_radius=0,
             fg_color=self._t.c("bg_sidebar"),
-            border_width=0,
+            border_width=1,
+            border_color=self._t.sc("border") if self._t.is_light else self._t.c("border_subtle"),
         )
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
+        self.sidebar.grid_rowconfigure(2, weight=1)
+        self.sidebar.grid_columnconfigure(0, weight=1)
 
-        # Bottom: navigation (packed first so it stays anchored)
+        # Row 3: navigation (pinned to bottom)
         nav_container = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        nav_container.pack(side="bottom", fill="x", padx=10, pady=(0, 14))
+        nav_container.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 14))
 
-        ctk.CTkLabel(
+        self._nav_header = ctk.CTkLabel(
             nav_container,
             text="NAVIGATION",
             font=ctk.CTkFont(size=10, weight="bold"),
-            text_color=self._t.c("text_muted"),
+            text_color=self._t.sc("text_muted"),
             anchor="w",
-        ).pack(anchor="w", padx=10, pady=(0, 6))
+        )
+        self._nav_header.pack(anchor="w", padx=10, pady=(0, 6))
 
         for key, label, _ in NAV_ITEMS:
             icon = NAV_ICONS.get(key, "•")
@@ -110,43 +130,73 @@ class DatabaseAutomationApp(ctk.CTk):
                 height=32,
                 corner_radius=8,
                 fg_color="transparent",
-                text_color=self._t.c("text_secondary"),
-                hover_color=self._t.c("bg_card_hover"),
+                text_color=self._t.sc("text_secondary") if self._t.is_light else self._t.c("nav_idle_text"),
+                hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
                 font=ctk.CTkFont(size=13),
                 command=lambda k=key: self.navigate(k),
             )
             btn.pack(fill="x", pady=2)
             self.nav_buttons[key] = btn
 
-        # Top: brand + connection
-        brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        brand.pack(side="top", fill="x", padx=18, pady=(16, 8))
+        # Row 2: databases (scrollable, expands)
+        db_wrap = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        db_wrap.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        db_wrap.grid_rowconfigure(0, weight=1)
+        db_wrap.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            brand,
+        self._db_panel = SidebarDatabasePanel(db_wrap, self._t)
+        self._db_panel.grid(row=0, column=0, sticky="nsew")
+
+        # Row 1: connection card slot (fixed height area)
+        self._sidebar_conn_slot = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self._sidebar_conn_slot.grid(row=1, column=0, sticky="ew")
+
+        # Row 0: brand header
+        brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        brand.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 8))
+
+        title_row = ctk.CTkFrame(brand, fg_color="transparent")
+        title_row.pack(fill="x")
+
+        title_block = ctk.CTkFrame(title_row, fg_color="transparent")
+        title_block.pack(side="left", fill="x", expand=True)
+
+        self._brand_title = ctk.CTkLabel(
+            title_block,
             text=APP_NAME,
             font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=self._t.c("text_primary"),
+            text_color=self._t.sc("text_primary"),
             anchor="w",
-        ).pack(anchor="w")
+        )
+        self._brand_title.pack(anchor="w")
 
-        ctk.CTkLabel(
-            brand,
+        self._brand_subtitle = ctk.CTkLabel(
+            title_block,
             text="Enterprise DB Operations",
             font=ctk.CTkFont(size=11),
-            text_color=self._t.c("text_muted"),
+            text_color=self._t.sc("text_muted"),
             anchor="w",
-        ).pack(anchor="w", pady=(2, 0))
+        )
+        self._brand_subtitle.pack(anchor="w", pady=(2, 0))
+
+        self._theme_btn = ctk.CTkButton(
+            title_row,
+            text=self._theme_button_label(),
+            width=40,
+            height=36,
+            corner_radius=8,
+            fg_color=self._t.sc("bg_card"),
+            hover_color=self._t.sc("bg_hover"),
+            border_width=1,
+            border_color=self._t.sc("border"),
+            text_color=self._t.sc("text_primary"),
+            font=ctk.CTkFont(size=16),
+            command=self._toggle_theme,
+        )
+        self._theme_btn.pack(side="right", padx=(8, 0))
 
         if self.connection:
             self._build_connection_card()
-
-        # Middle: databases (fills space between top and nav)
-        db_wrap = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        db_wrap.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 8))
-
-        self._db_panel = SidebarDatabasePanel(db_wrap, self._t)
-        self._db_panel.pack(fill="both", expand=True)
 
         self.content = ctk.CTkFrame(self, corner_radius=0, fg_color=self._t.c("bg_content"))
         self.content.grid(row=0, column=1, sticky="nsew")
@@ -194,16 +244,22 @@ class DatabaseAutomationApp(ctk.CTk):
 
     def _build_connection_card(self) -> None:
         assert self.connection is not None
+        assert self._sidebar_conn_slot is not None
+
+        for child in self._sidebar_conn_slot.winfo_children():
+            child.destroy()
+
         meta = DB_ICON_META.get(self.connection.db_type, {"abbrev": "DB", "color": "#3b82f6"})
 
         card = ctk.CTkFrame(
-            self.sidebar,
+            self._sidebar_conn_slot,
             corner_radius=10,
-            fg_color=self._t.c("bg_card"),
+            fg_color=self._t.sc("bg_card"),
             border_width=1,
-            border_color=self._t.c("border"),
+            border_color=self._t.sc("border"),
         )
-        card.pack(side="top", fill="x", padx=14, pady=(0, 8))
+        card.pack(fill="x", padx=14, pady=(0, 8))
+        self._conn_card = card
 
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=12, pady=(12, 6))
@@ -221,33 +277,52 @@ class DatabaseAutomationApp(ctk.CTk):
         info = ctk.CTkFrame(row, fg_color="transparent")
         info.pack(side="left", fill="x", expand=True, padx=(10, 0))
 
-        ctk.CTkLabel(
+        self._conn_name_label = ctk.CTkLabel(
             info,
             text=self.connection.name,
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self._t.c("text_primary"),
+            text_color=self._t.sc("text_primary"),
             anchor="w",
-        ).pack(anchor="w")
+        )
+        self._conn_name_label.pack(anchor="w")
 
-        ctk.CTkLabel(
+        self._conn_host_label = ctk.CTkLabel(
             info,
             text=f"{self.connection.host}:{self.connection.port}",
             font=ctk.CTkFont(size=11),
-            text_color=self._t.c("text_muted"),
+            text_color=self._t.sc("text_muted"),
             anchor="w",
-        ).pack(anchor="w")
+        )
+        self._conn_host_label.pack(anchor="w")
 
-        ctk.CTkButton(
+        self._conn_disconnect_btn = ctk.CTkButton(
             card,
             text="Disconnect",
             height=30,
             corner_radius=6,
-            fg_color=self._t.c("error_muted"),
-            hover_color=self._t.c("error"),
-            text_color="#fecaca",
+            fg_color=DISCONNECT_BTN_FG,
+            hover_color=DISCONNECT_BTN_HOVER,
+            text_color=DISCONNECT_BTN_TEXT,
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self._disconnect,
-        ).pack(fill="x", padx=12, pady=(4, 12))
+        )
+        self._conn_disconnect_btn.pack(fill="x", padx=12, pady=(4, 12))
+
+    def _style_connection_card(self) -> None:
+        if not self._conn_card:
+            return
+        t = self._t
+        self._conn_card.configure(fg_color=t.sc("bg_card"), border_color=t.sc("border"))
+        if self._conn_name_label:
+            self._conn_name_label.configure(text_color=t.sc("text_primary"))
+        if self._conn_host_label:
+            self._conn_host_label.configure(text_color=t.sc("text_muted"))
+        if self._conn_disconnect_btn:
+            self._conn_disconnect_btn.configure(
+                fg_color=DISCONNECT_BTN_FG,
+                hover_color=DISCONNECT_BTN_HOVER,
+                text_color=DISCONNECT_BTN_TEXT,
+            )
 
     def refresh_server_databases(self) -> None:
         if self._db_panel:
@@ -259,22 +334,26 @@ class DatabaseAutomationApp(ctk.CTk):
     def update_status_footer(self, **kwargs) -> None:
         self.status_footer.update(**kwargs)
 
-    def navigate(self, key: str) -> None:
+    def _style_navigation(self, key: str) -> None:
         t = self._t
         for k, btn in self.nav_buttons.items():
             if k == key:
                 btn.configure(
-                    fg_color=t.c("primary_muted"),
-                    text_color=t.c("text_primary"),
+                    fg_color=t.sc("nav_active") if t.is_light else t.c("primary_muted"),
+                    text_color=t.c("nav_active_text"),
                     border_width=1,
                     border_color=t.c("primary"),
                 )
             else:
                 btn.configure(
                     fg_color="transparent",
-                    text_color=t.c("text_secondary"),
+                    text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
                     border_width=0,
                 )
+
+    def navigate(self, key: str, *, log: bool = True, view_extra: dict | None = None) -> None:
+        self._active_nav = key
+        self._style_navigation(key)
 
         for view in self.views.values():
             view.grid_forget()
@@ -286,6 +365,8 @@ class DatabaseAutomationApp(ctk.CTk):
                         "log_callback": self.append_log,
                         "connection": self.connection,
                     }
+                    if view_extra:
+                        kwargs.update(view_extra)
                     if view_cls is DashboardView:
                         kwargs["navigate_callback"] = self.navigate
                         kwargs["status_callback"] = self.update_status_footer
@@ -302,7 +383,8 @@ class DatabaseAutomationApp(ctk.CTk):
         else:
             self.views[key].grid(row=0, column=0, sticky="nsew")
 
-        self.append_log(f"Navigated to {key}")
+        if log:
+            self.append_log(f"Navigated to {key}")
 
     def _disconnect(self) -> None:
         if self.connection:
@@ -310,5 +392,83 @@ class DatabaseAutomationApp(ctk.CTk):
         self.disconnect_requested = True
         self.destroy()
 
-    def _on_theme_change(self, theme_name: str) -> None:
-        self.append_log(f"Theme changed to {theme_name}")
+    def _theme_button_label(self) -> str:
+        return "☀" if self._t.current == "dark" else "🌙"
+
+    def _toggle_theme(self) -> None:
+        if getattr(self, "_theme_switching", False):
+            return
+        self._theme_switching = True
+        if self._theme_btn:
+            self._theme_btn.configure(state="disabled")
+        new_theme = self.theme_manager.toggle()
+        self._t = self.theme_manager
+        self._apply_theme(new_theme)
+
+    def _apply_theme(self, theme_name: str) -> None:
+        t = self._t
+        self.configure(fg_color=t.c("bg_app"))
+        self.sidebar.configure(
+            fg_color=t.c("bg_sidebar"),
+            border_color=t.sc("border") if t.is_light else t.c("border_subtle"),
+        )
+        self.content.configure(fg_color=t.c("bg_content"))
+        self.view_container.configure(fg_color=t.c("bg_content"))
+        self._vertical_split.configure(bg=t.c("border_subtle"))
+
+        if self._brand_title:
+            self._brand_title.configure(text_color=t.sc("text_primary"))
+        if self._brand_subtitle:
+            self._brand_subtitle.configure(text_color=t.sc("text_muted"))
+        if self._nav_header:
+            self._nav_header.configure(text_color=t.sc("text_muted"))
+        if self._theme_btn:
+            self._theme_btn.configure(
+                text=self._theme_button_label(),
+                fg_color=t.sc("bg_card"),
+                hover_color=t.sc("bg_hover"),
+                border_color=t.sc("border"),
+                text_color=t.sc("text_primary"),
+            )
+        if self._conn_card:
+            self._style_connection_card()
+
+        self._style_navigation(self._active_nav)
+        for btn in self.nav_buttons.values():
+            btn.configure(
+                hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
+            )
+
+        self.execution_log.apply_theme(t)
+        self.status_footer.apply_theme(t)
+        if self._db_panel:
+            self._db_panel.apply_theme(t)
+
+        current = self._active_nav
+        for view in list(self.views.values()):
+            view.destroy()
+        self.views.clear()
+
+        self.update_idletasks()
+        self.after(1, lambda: self._finish_theme_switch(theme_name, current))
+
+    def _finish_theme_switch(self, theme_name: str, current: str) -> None:
+        try:
+            view_extra: dict = {}
+            if current == "dashboard":
+                view_extra["initial_refresh"] = False
+            self.navigate(current, log=False, view_extra=view_extra)
+            self.append_log(f"Theme switched to {theme_name}")
+
+            if current == "dashboard":
+                dash = self.views.get("dashboard")
+                if dash:
+                    self.after(300, dash.refresh)
+            self.after(150, self.refresh_server_databases)
+        finally:
+            self._theme_switching = False
+            if self._theme_btn:
+                self._theme_btn.configure(state="normal")
+
+    def _on_theme_change(self) -> None:
+        self._toggle_theme()

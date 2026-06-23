@@ -44,7 +44,15 @@ def kpi_card(
     top = ctk.CTkFrame(body, fg_color="transparent")
     top.pack(fill="x")
 
-    icon_bg = ctk.CTkFrame(top, width=32, height=32, corner_radius=8, fg_color=theme.c("bg_elevated"))
+    icon_bg = ctk.CTkFrame(
+        top,
+        width=32,
+        height=32,
+        corner_radius=8,
+        fg_color=theme.c("bg_elevated"),
+        border_width=1 if theme.is_light else 0,
+        border_color=theme.c("border"),
+    )
     icon_bg.pack(side="left")
     icon_bg.pack_propagate(False)
     ctk.CTkLabel(icon_bg, text=icon, font=ctk.CTkFont(size=15), text_color=accent).place(relx=0.5, rely=0.5, anchor="center")
@@ -154,7 +162,13 @@ def gauge_metric(
     color: str,
 ) -> tuple[ctk.CTkProgressBar, ctk.CTkLabel]:
     """Compact gauge-style metric for monitoring widgets."""
-    frame = ctk.CTkFrame(parent, fg_color=theme.c("bg_elevated"), corner_radius=10)
+    frame = ctk.CTkFrame(
+        parent,
+        fg_color=theme.c("bg_elevated"),
+        corner_radius=10,
+        border_width=1 if theme.is_light else 0,
+        border_color=theme.c("border"),
+    )
     frame.pack(fill="x", pady=6)
 
     inner = ctk.CTkFrame(frame, fg_color="transparent")
@@ -197,7 +211,13 @@ def mini_bar_chart(
     height: int = 100,
 ) -> tuple[tk.Canvas, Callable[[list[dict]], None]]:
     """Bar chart canvas; updater accepts [{label, count}, ...]."""
-    card = ctk.CTkFrame(parent, fg_color=theme.c("bg_elevated"), corner_radius=10)
+    card = ctk.CTkFrame(
+        parent,
+        fg_color=theme.c("bg_elevated"),
+        corner_radius=10,
+        border_width=1 if theme.is_light else 0,
+        border_color=theme.c("border"),
+    )
     card.pack(fill="both", expand=True)
 
     if title:
@@ -268,7 +288,13 @@ def timeline_item(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) -> Non
     rail.pack(side="left", fill="y")
     ctk.CTkLabel(rail, text="●", font=ctk.CTkFont(size=10), text_color=dot_color).pack(anchor="n", pady=(2, 0))
 
-    content = ctk.CTkFrame(row, fg_color=theme.c("bg_elevated"), corner_radius=8)
+    content = ctk.CTkFrame(
+        row,
+        fg_color=theme.c("bg_elevated"),
+        corner_radius=8,
+        border_width=1 if theme.is_light else 0,
+        border_color=theme.c("border"),
+    )
     content.pack(side="left", fill="x", expand=True)
 
     top = ctk.CTkFrame(content, fg_color="transparent")
@@ -316,15 +342,30 @@ def quick_action_button(
     primary: bool = False,
 ) -> ctk.CTkButton:
     """Styled quick-action button."""
+    if primary:
+        fg = theme.c("primary")
+        hover = theme.c("primary_hover")
+        txt = theme.c("text_on_primary")
+        border_w = 0
+        border_c = theme.c("primary")
+    else:
+        fg = theme.c("bg_card") if theme.is_light else theme.c("bg_elevated")
+        hover = theme.c("bg_card_hover")
+        txt = theme.c("text_secondary")
+        border_w = 1 if theme.is_light else 0
+        border_c = theme.c("border")
+
     return ctk.CTkButton(
         parent,
         text=f"{icon}  {text}",
         command=command,
         height=38,
         corner_radius=8,
-        fg_color=theme.c("primary") if primary else theme.c("bg_elevated"),
-        hover_color=theme.c("primary_hover") if primary else theme.c("bg_card_hover"),
-        text_color=theme.c("text_primary"),
+        fg_color=fg,
+        hover_color=hover,
+        border_width=border_w,
+        border_color=border_c,
+        text_color=txt,
         font=ctk.CTkFont(size=12, weight="bold" if primary else "normal"),
         anchor="center",
     )

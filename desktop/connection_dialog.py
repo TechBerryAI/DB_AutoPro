@@ -523,16 +523,61 @@ class ConnectionDialog(ctk.CTk):
             anchor="w",
         ).grid(row=row, column=0, sticky="w", pady=6)
 
-    def _select_db_type(self, db_type: DatabaseType) -> None:
-        self._db_type_var.set(db_type.value)
+    def _find_saved_for_type(self, db_type: DatabaseType) -> SavedServer | None:
+        for server in load_saved_servers():
+            if server.db_type == db_type.value:
+                return server
+        return None
+
+    def _apply_db_type_tiles(self, db_type: DatabaseType) -> None:
         accent = DB_ICON_META[db_type]["color"]
         for value, tile in self._db_type_tiles.items():
             if value == db_type.value:
                 tile.configure(border_color=accent, fg_color="#eff6ff")
             else:
                 tile.configure(border_color=COLOR_CARD_BORDER, fg_color="#f8fafc")
-        self._apply_db_defaults(db_type)
+
+    def _select_db_type(self, db_type: DatabaseType) -> None:
+        self._db_type_var.set(db_type.value)
+        self._apply_db_type_tiles(db_type)
+
+        saved = self._find_saved_for_type(db_type)
+        if saved:
+            self._load_saved_server(saved)
+            return
+
+        self._selected_saved = None
+        self._highlight_saved_selection()
+        self._apply_engine_profile(db_type)
         self._update_mongodb_fields(db_type)
+        self._set_status(f"{DB_ICON_META[db_type]['label']} defaults applied.", "info")
+
+    def _apply_engine_profile(self, db_type: DatabaseType) -> None:
+        """Reset the form to standard defaults for a database engine."""
+        defaults = DB_DEFAULTS[db_type]
+        self.connection_name_entry.delete(0, "end")
+        self.host_entry.delete(0, "end")
+        self.host_entry.insert(0, "localhost")
+        self.port_entry.delete(0, "end")
+        self.port_entry.insert(0, str(defaults["port"]))
+        self.user_entry.delete(0, "end")
+        self.user_entry.insert(0, str(defaults["username"]))
+        self.password_entry.delete(0, "end")
+        self.database_entry.delete(0, "end")
+        self.database_entry.insert(0, str(defaults["database"]))
+        self.auth_database_entry.delete(0, "end")
+        self.ssh_enabled_var.set(False)
+        self._sync_ssh_fields()
+
+        def clear_ssh() -> None:
+            self.ssh_host_entry.delete(0, "end")
+            self.ssh_port_entry.delete(0, "end")
+            self.ssh_port_entry.insert(0, "22")
+            self.linux_user_entry.delete(0, "end")
+            self.linux_password_entry.delete(0, "end")
+
+        self._with_ssh_fields_enabled(clear_ssh)
+        self._sync_ssh_fields()
 
     def _update_mongodb_fields(self, db_type: DatabaseType) -> None:
         is_mongo = db_type == DatabaseType.MONGODB
@@ -551,15 +596,6 @@ class ConnectionDialog(ctk.CTk):
             self.hint_label.configure(
                 text="Oracle: use Service name (ORCL, XEPDB1). Other engines use database name defaults."
             )
-
-    def _apply_db_defaults(self, db_type: DatabaseType) -> None:
-        defaults = DB_DEFAULTS[db_type]
-        self.port_entry.delete(0, "end")
-        self.port_entry.insert(0, str(defaults["port"]))
-        self.user_entry.delete(0, "end")
-        self.user_entry.insert(0, str(defaults["username"]))
-        self.database_entry.delete(0, "end")
-        self.database_entry.insert(0, str(defaults["database"]))
 
     def _refresh_saved_list(self) -> None:
         for widget in self.saved_list.winfo_children():
@@ -588,39 +624,68 @@ class ConnectionDialog(ctk.CTk):
                 fg_color=COLOR_SIDEBAR_ACTIVE if active else COLOR_SIDEBAR_HOVER,
             )
             item.pack(fill="x", pady=3)
-            item.bind("<Button-1>", lambda _e, s=server: self._load_saved_server(s))
 
             badge = ctk.CTkFrame(item, width=32, height=32, corner_radius=6, fg_color=meta["color"])
             badge.pack(side="left", padx=(10, 8), pady=10)
             badge.pack_propagate(False)
-            badge.bind("<Button-1>", lambda _e, s=server: self._load_saved_server(s))
-            ctk.CTkLabel(
+            badge_label = ctk.CTkLabel(
                 badge,
                 text=meta["abbrev"],
                 font=ctk.CTkFont(size=10, weight="bold"),
                 text_color="white",
-            ).place(relx=0.5, rely=0.5, anchor="center")
+            )
+            badge_label.place(relx=0.5, rely=0.5, anchor="center")
 
             text_col = ctk.CTkFrame(item, fg_color="transparent")
             text_col.pack(side="left", fill="x", expand=True, pady=10)
-            text_col.bind("<Button-1>", lambda _e, s=server: self._load_saved_server(s))
 
-            ctk.CTkLabel(
+            name_label = ctk.CTkLabel(
                 text_col,
                 text=server.name,
                 font=ctk.CTkFont(size=13, weight="bold"),
                 text_color="white",
                 anchor="w",
-            ).pack(anchor="w")
-            ctk.CTkLabel(
+            )
+            name_label.pack(anchor="w")
+            detail_label = ctk.CTkLabel(
                 text_col,
                 text=f"{meta['label']} · {server.host}",
                 font=ctk.CTkFont(size=11),
                 text_color="#cbd5e1",
                 anchor="w",
-            ).pack(anchor="w")
+            )
+            detail_label.pack(anchor="w")
 
+            self._wire_saved_item(item, server, root=True)
             self._saved_list_buttons[server.name] = item
+
+    def _wire_saved_item(self, widget, server: SavedServer, *, root: bool = False) -> None:
+        """Make every part of a saved-connection row respond to a single click."""
+
+        def activate(_event=None) -> str:
+            self._load_saved_server(server)
+            return "break"
+
+        try:
+            widget.configure(cursor="hand2")
+        except Exception:
+            pass
+
+        widget.bind("<Button-1>", activate)
+
+        if root:
+            def on_enter(_event=None) -> None:
+                if self._selected_saved != server.name:
+                    widget.configure(fg_color="#475569")
+
+            def on_leave(_event=None) -> None:
+                self._highlight_saved_selection()
+
+            widget.bind("<Enter>", on_enter)
+            widget.bind("<Leave>", on_leave)
+
+        for child in widget.winfo_children():
+            self._wire_saved_item(child, server, root=False)
 
     def _highlight_saved_selection(self) -> None:
         for name, item in self._saved_list_buttons.items():
@@ -643,8 +708,9 @@ class ConnectionDialog(ctk.CTk):
 
     def _load_saved_server(self, server: SavedServer) -> None:
         self._selected_saved = server.name
-        self._fill_form(server)
         self._highlight_saved_selection()
+        self.update_idletasks()
+        self._fill_form(server)
         self._set_status(f"Loaded '{server.name}'.", "info")
 
     def _get_connection_name(self) -> str:
@@ -675,7 +741,11 @@ class ConnectionDialog(ctk.CTk):
         )
 
     def _fill_form(self, server: SavedServer) -> None:
-        self._select_db_type(DatabaseType(server.db_type))
+        db_type = DatabaseType(server.db_type)
+        self._db_type_var.set(db_type.value)
+        self._apply_db_type_tiles(db_type)
+        self._update_mongodb_fields(db_type)
+
         self.connection_name_entry.delete(0, "end")
         self.connection_name_entry.insert(0, server.name)
         self.host_entry.delete(0, "end")

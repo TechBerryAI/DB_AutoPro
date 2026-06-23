@@ -10,18 +10,6 @@ import customtkinter as ctk
 from desktop.theme import ThemeManager
 
 LEVELS = ("ALL", "INFO", "SUCCESS", "WARNING", "ERROR")
-LEVEL_COLORS = {
-    "INFO": "#94a3b8",
-    "SUCCESS": "#22c55e",
-    "WARNING": "#f59e0b",
-    "ERROR": "#ef4444",
-}
-LEVEL_BADGE_BG = {
-    "INFO": "#1e293b",
-    "SUCCESS": "#14532d",
-    "WARNING": "#78350f",
-    "ERROR": "#7f1d1d",
-}
 
 
 @dataclass
@@ -35,12 +23,16 @@ class ExecutionLogPanel(ctk.CTkFrame):
     """Color-coded execution log with filter, search, and auto-scroll."""
 
     def __init__(self, master, theme: ThemeManager, **kwargs) -> None:
-        super().__init__(master, fg_color=theme.c("bg_sidebar"), **kwargs)
+        super().__init__(master, fg_color=self._panel_bg(theme), border_width=1, border_color=theme.c("border"), **kwargs)
         self.theme = theme
         self._entries: list[LogEntry] = []
         self._auto_scroll = ctk.BooleanVar(value=True)
         self._build_ui()
         self._configure_tags()
+
+    @staticmethod
+    def _panel_bg(theme: ThemeManager) -> str:
+        return theme.c("bg_card")
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -102,8 +94,11 @@ class ExecutionLogPanel(ctk.CTkFrame):
             width=60,
             height=28,
             corner_radius=6,
-            fg_color=self.theme.c("bg_elevated"),
+            fg_color=self.theme.c("bg_card"),
             hover_color=self.theme.c("bg_card_hover"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+            text_color=self.theme.c("text_secondary"),
             font=ctk.CTkFont(size=11),
             command=self.clear,
         )
@@ -112,8 +107,9 @@ class ExecutionLogPanel(ctk.CTkFrame):
         self._text = ctk.CTkTextbox(
             self,
             font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color=self.theme.c("bg_elevated"),
-            border_width=0,
+            fg_color=self.theme.c("bg_card"),
+            border_width=1,
+            border_color=self.theme.c("border"),
             text_color=self.theme.c("text_secondary"),
             activate_scrollbars=True,
         )
@@ -122,15 +118,33 @@ class ExecutionLogPanel(ctk.CTkFrame):
 
     def _configure_tags(self) -> None:
         tb = self._text._textbox
-        for level, color in LEVEL_COLORS.items():
+        for level in ("INFO", "SUCCESS", "WARNING", "ERROR"):
+            color = self.theme.log_level_color(level)
             tb.tag_configure(level, foreground=color)
             tb.tag_configure(f"badge_{level}", foreground=color)
         tb.tag_configure("timestamp", foreground=self.theme.c("text_muted"))
-        tb.tag_configure("message", foreground=self.theme.c("text_secondary"))
+        tb.tag_configure("message", foreground=self.theme.c("text_primary"))
+
+    def apply_theme(self, theme: ThemeManager) -> None:
+        self.theme = theme
+        self.configure(fg_color=self._panel_bg(theme), border_color=theme.c("border"))
+        self._filter.configure(
+            fg_color=theme.c("bg_elevated"),
+            border_color=theme.c("border"),
+            button_color=theme.c("bg_card_hover"),
+            dropdown_fg_color=theme.c("bg_card"),
+        )
+        self._search.configure(fg_color=theme.c("bg_elevated"), border_color=theme.c("border"))
+        self._text.configure(
+            fg_color=theme.c("bg_card"),
+            border_color=theme.c("border"),
+            text_color=theme.c("text_secondary"),
+        )
+        self._configure_tags()
 
     def add_entry(self, message: str, level: str = "INFO") -> None:
         level = level.upper()
-        if level not in LEVEL_COLORS:
+        if level not in ("INFO", "SUCCESS", "WARNING", "ERROR"):
             level = "INFO"
         entry = LogEntry(datetime.now().strftime("%H:%M:%S"), level, message)
         self._entries.append(entry)
