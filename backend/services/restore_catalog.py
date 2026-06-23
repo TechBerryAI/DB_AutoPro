@@ -1,0 +1,115 @@
+"""Restore command descriptions for the desktop UI."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from backend.connectors.base import resolve_connection
+from backend.models.schemas import BackupCategory, BackupMethod, DatabaseType, RestoreRequest
+from backend.services.mongo_restore import format_mongorestore_preview, plan_mongorestore
+from backend.services.mongo_tools import resolve_local_mongo_tool
+from backend.services.ssh_client import ssh_options_from_connection
+
+_METHOD_LABELS: dict[BackupMethod, str] = {
+    BackupMethod.MONGORESTORE: "mongorestore (logical BSON import)",
+    BackupMethod.PG_DUMP: "psql (SQL import)",
+    BackupMethod.MYSQLDUMP: "mysql (SQL import)",
+}
+
+
+def restore_method_label(method: BackupMethod) -> str:
+    return _METHOD_LABELS.get(method, method.value)
+
+
+_RESTORE_METHODS: dict[tuple[DatabaseType, BackupCategory], list[BackupMethod]] = {
+    (DatabaseType.MONGODB, BackupCategory.LOGICAL): [BackupMethod.MONGORESTORE],
+    (DatabaseType.POSTGRESQL, BackupCategory.LOGICAL): [BackupMethod.PG_DUMP],
+    (DatabaseType.MYSQL, BackupCategory.LOGICAL): [BackupMethod.MYSQLDUMP],
+}
+
+
+def restore_methods_for(
+    db_type: DatabaseType, category: BackupCategory
+) -> list[BackupMethod]:
+    return list(_RESTORE_METHODS.get((db_type, category), []))
+
+
+def _is_remote_restore_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return normalized.startswith("/") or normalized.startswith("mnt/")
+
+
+def _local_mongorestore_bin(request: RestoreRequest) -> str:
+    conn = resolve_connection(request.profile)
+    opts = conn.extra_options or {}
+    preferred = request.remote_binary_path or opts.get("mongorestore_path")
+    if not preferred and opts.get("mongodump_path"):
+        preferred = str(opts["mongodump_path"]).replace("mongodump", "mongorestore")
+    try:
+        return resolve_local_mongo_tool("mongorestore", preferred)
+    except FileNotFoundError:
+        return "mongorestore"
+
+
+def _mongodb_uses_server_restore(request: RestoreRequest) -> bool:
+    if request.db_type != DatabaseType.MONGODB:
+        return False
+    if not request.use_remote_exec:
+        return False
+    conn = resolve_connection(request.profile)
+    return bool(ssh_options_from_connection(conn))
+
+
+def describe_restore_command(request: RestoreRequest) -> str:
+    """Human-readable mongorestore / restore command preview."""
+    conn = resolve_connection(request.profile)
+    opts = conn.extra_options or {}
+    auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
+    mongo_host = opts.get("mongo_host") or conn.host
+    mongo_port = int(opts.get("mongo_port", conn.port))
+    backup_dir = request.backup_path or "<restore source>"
+
+    if request.db_type != DatabaseType.MONGODB:
+        return f"Restore from {backup_dir} into {request.db_type.value}"
+
+    mongorestore = (
+        request.remote_binary_path
+        or opts.get("mongorestore_path")
+        or "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongorestore"
+    )
+
+    try:
+        plan = plan_mongorestore(request, Path(request.backup_path))
+    except Exception as exc:
+        return str(exc)
+
+    uses_server = _mongodb_uses_server_restore(request)
+    preview_host = mongo_host if uses_server else conn.host
+    preview_port = mongo_port if uses_server else conn.port
+    preview_bin = mongorestore if uses_server else _local_mongorestore_bin(request)
+
+    preview = format_mongorestore_preview(
+        mongorestore_bin=preview_bin,
+        host=str(preview_host),
+        port=preview_port,
+        username=conn.username,
+        auth_database=str(auth_db),
+        plan=plan,
+    )
+
+    if not uses_server:
+        return preview
+
+    ssh_user = opts.get("linux_username", "linux_user")
+    ssh_host = opts.get("ssh_host") or mongo_host
+
+    if request.remote_source_dir and _is_remote_restore_path(request.remote_source_dir):
+        if plan.source_path and not plan.uses_archive_flags:
+            preview = preview.replace(plan.source_path, request.remote_source_dir)
+        return f"ssh {ssh_user}@{ssh_host} → {preview}"
+
+    return (
+        f"ssh {ssh_user}@{ssh_host} → upload restore source, then run on Linux server:\n"
+        f"{preview}\n"
+        f"Local upload source: {backup_dir}"
+    )

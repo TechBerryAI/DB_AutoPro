@@ -292,8 +292,16 @@ class BackupService:
         opts = conn.extra_options or {}
         auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
         db = self._mongo_target_database(request)
+        from backend.services.mongo_tools import resolve_local_mongo_tool
+
+        preferred = request.remote_binary_path or opts.get("mongodump_path")
+        try:
+            mongodump_bin = resolve_local_mongo_tool("mongodump", preferred)
+        except FileNotFoundError as exc:
+            shutil.rmtree(dump_dir, ignore_errors=True)
+            raise _cli_not_found_error("mongodump") from exc
         cmd = [
-            "mongodump",
+            mongodump_bin,
             "--host", conn.host,
             "--port", str(conn.port),
             "--username", conn.username,
