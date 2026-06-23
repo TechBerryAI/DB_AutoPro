@@ -28,12 +28,20 @@ class BackupCategory(str, Enum):
     PHYSICAL = "physical"
 
 
+class MongoRestoreScope(str, Enum):
+    ALL_DATABASES = "all_databases"
+    SPECIFIC_DATABASE = "specific_database"
+    SINGLE_COLLECTION = "single_collection"
+    ARCHIVE = "archive"
+
+
 class BackupMethod(str, Enum):
     PG_DUMP = "pg_dump"
     PG_DUMPALL = "pg_dumpall"
     PG_BASEBACKUP = "pg_basebackup"
     MYSQLDUMP = "mysqldump"
     MONGODUMP = "mongodump"
+    MONGORESTORE = "mongorestore"
     MSSQL_BACKUP = "mssql_backup"
     ORACLE_EXPDP = "expdp"
 
@@ -98,7 +106,14 @@ class RestoreRequest(BaseModel):
     db_type: DatabaseType = DatabaseType.POSTGRESQL
     backup_path: str
     database: str | None = None
+    collection: str | None = None
+    mongo_restore_scope: MongoRestoreScope | None = None
+    gzip_archive: bool = False
     validate_backup: bool = True
+    use_remote_exec: bool = False
+    remote_binary_path: str | None = None
+    remote_source_dir: str | None = None
+    drop_existing: bool = False
 
 
 class PatchRequest(BaseModel):

@@ -209,6 +209,98 @@ def build_mongodump_remote_command(
     return cmd
 
 
+def build_mongorestore_remote_command(
+    *,
+    mongorestore_path: str,
+    mongo_host: str,
+    mongo_port: int,
+    username: str,
+    password: str,
+    auth_database: str,
+    input_dir: str,
+    database: str | None = None,
+    collection: str | None = None,
+    drop_existing: bool = False,
+    extra_args: list[str] | None = None,
+) -> str:
+    """Build a shell-safe mongorestore command for execution on the Linux server."""
+    cmd = (
+        f"{shlex.quote(mongorestore_path)} "
+        f"--host {shlex.quote(mongo_host)} "
+        f"--port {mongo_port} "
+    )
+    if username:
+        cmd += (
+            f"--username {shlex.quote(username)} "
+            f"--password {shlex.quote(password)} "
+            f"--authenticationDatabase {shlex.quote(auth_database)} "
+        )
+    if drop_existing and database:
+        cmd += "--drop "
+    if database:
+        cmd += f"--db {shlex.quote(database)} "
+    if collection:
+        cmd += f"--collection {shlex.quote(collection)} "
+    extra_args = extra_args or []
+    has_archive = any(arg.startswith("--archive=") for arg in extra_args)
+    for arg in extra_args:
+        cmd += f"{shlex.quote(arg)} "
+    if not has_archive:
+        cmd += shlex.quote(input_dir)
+    return cmd
+
+
+def resolve_remote_mongorestore_path(ssh: dict[str, Any], preferred_path: str | None = None) -> str:
+    """Locate a working mongorestore binary on the Linux server over SSH."""
+    if preferred_path and preferred_path.strip():
+        preferred = preferred_path.strip()
+        if "mongodump" in preferred:
+            preferred = preferred.replace("mongodump", "mongorestore")
+        candidates = [preferred]
+    else:
+        candidates = []
+
+    default_glob = "/mnt/mongodb-database-tools-*/bin/mongorestore"
+    if default_glob not in candidates:
+        candidates.append(default_glob)
+
+    kwargs = _ssh_kwargs(ssh)
+    for candidate in candidates:
+        if "*" in candidate:
+            cmd = f"ls -1 {candidate} 2>/dev/null | head -n 1"
+        else:
+            cmd = f"test -x {shlex.quote(candidate)} && echo {shlex.quote(candidate)}"
+        exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=30, **kwargs)
+        if exit_code != 0:
+            continue
+        for line in stdout.splitlines():
+            path = line.strip()
+            if path:
+                return path
+
+    discovery_cmds = (
+        "command -v mongorestore 2>/dev/null",
+        "ls -1 /mnt/mongodb-database-tools-*/bin/mongorestore 2>/dev/null | head -n 1",
+        "find /mnt /usr /opt -maxdepth 6 -name mongorestore -type f -perm -111 2>/dev/null | head -n 1",
+    )
+    for cmd in discovery_cmds:
+        exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=45, **kwargs)
+        if exit_code != 0:
+            continue
+        for line in stdout.splitlines():
+            path = line.strip()
+            if path:
+                return path
+
+    tried = preferred_path or "(not set)"
+    raise RuntimeError(
+        "mongorestore was not found on the Linux server.\n"
+        f"Tried path: {tried}\n"
+        "Install MongoDB Database Tools on the server, or set the correct "
+        "'Mongorestore binary' path in Restore."
+    )
+
+
 def flatten_mongodump_output(output_dir: Path, database: str) -> None:
     """Move collection files from output_dir/database/ into output_dir/."""
     nested = output_dir / database
@@ -268,6 +360,35 @@ def _open_ssh_client(ssh: dict[str, Any]):
     return client
 
 
+def list_remote_directory(ssh: dict[str, Any], remote_path: str) -> list[dict[str, Any]]:
+    """List files and folders in a remote Linux directory via SFTP."""
+    path = remote_path.rstrip("/") or "/"
+    client = _open_ssh_client(ssh)
+    try:
+        sftp = client.open_sftp()
+        entries: list[dict[str, Any]] = []
+        for attr in sftp.listdir_attr(path):
+            name = attr.filename
+            if name in (".", ".."):
+                continue
+            full_path = f"{path}/{name}"
+            is_dir = stat.S_ISDIR(attr.st_mode)
+            entries.append({
+                "name": name,
+                "path": full_path,
+                "is_dir": is_dir,
+                "size": attr.st_size,
+            })
+        entries.sort(key=lambda item: (not item["is_dir"], item["name"].lower()))
+        return entries
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Remote path not found: {path}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Could not list remote directory {path}: {exc}") from exc
+    finally:
+        client.close()
+
+
 def _sftp_download_tree(sftp, remote_path: str, local_path: Path) -> None:
     local_path.mkdir(parents=True, exist_ok=True)
     for entry in sftp.listdir_attr(remote_path):
@@ -277,6 +398,45 @@ def _sftp_download_tree(sftp, remote_path: str, local_path: Path) -> None:
             _sftp_download_tree(sftp, remote_item, local_item)
         else:
             sftp.get(remote_item, str(local_item))
+
+
+def _sftp_upload_tree(sftp, local_path: Path, remote_path: str) -> None:
+    try:
+        sftp.mkdir(remote_path)
+    except OSError:
+        pass
+    for item in local_path.iterdir():
+        remote_item = f"{remote_path.rstrip('/')}/{item.name}"
+        if item.is_dir():
+            _sftp_upload_tree(sftp, item, remote_item)
+        else:
+            sftp.put(str(item), remote_item)
+
+
+def upload_remote_directory(ssh: dict[str, Any], local_path: Path, remote_path: str) -> None:
+    """Upload a local directory tree to a remote folder via SFTP."""
+    client = _open_ssh_client(ssh)
+    try:
+        sftp = client.open_sftp()
+        _sftp_upload_tree(sftp, local_path, remote_path)
+    finally:
+        client.close()
+
+
+def upload_remote_file(ssh: dict[str, Any], local_path: Path, remote_path: str) -> None:
+    """Upload a single local file to a remote path via SFTP."""
+    client = _open_ssh_client(ssh)
+    try:
+        sftp = client.open_sftp()
+        remote_parent = remote_path.rsplit("/", 1)[0]
+        if remote_parent:
+            try:
+                sftp.mkdir(remote_parent)
+            except OSError:
+                pass
+        sftp.put(str(local_path), remote_path)
+    finally:
+        client.close()
 
 
 def download_remote_directory(ssh: dict[str, Any], remote_path: str, local_path: Path) -> None:

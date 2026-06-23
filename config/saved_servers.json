@@ -37,8 +37,8 @@
       "mongodump_path": "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongodump",
       "remote_backup_dir": "/mnt/backup",
       "local_output_dir": "backups",
-      "backup_folder_name": "",
-      "backup_collection": "departments"
+      "backup_folder_name": "dummy_db_backup",
+      "backup_collection": "orders"
     }
   ]
 }
