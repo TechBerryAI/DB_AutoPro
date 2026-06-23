@@ -341,13 +341,7 @@ class BackupView(BaseView):
             hover_color=self.theme.c("primary_hover"),
         ).pack(side="left", padx=(0, 10))
 
-        ctk.CTkButton(
-            btn_frame,
-            text="Apply Retention",
-            command=self._apply_retention,
-            width=140,
-            height=38,
-        ).pack(side="left", padx=(0, 10))
+        # Apply Retention — disabled in UI for now; backend apply_retention_policy() kept for future use.
 
         ctk.CTkButton(
             btn_frame,
@@ -601,11 +595,6 @@ class BackupView(BaseView):
                 self.log(f"Backup failed: {exc}", "ERROR")
 
         threading.Thread(target=task, daemon=True).start()
-
-    def _apply_retention(self) -> None:
-        deleted = self.service.apply_retention_policy()
-        self.results.insert("end", f"Retention: deleted {deleted} old backups\n")
-        self.log(f"Retention applied: {deleted} deleted")
 
     def _list_backups(self) -> None:
         list_remote = self._is_remote_backup()

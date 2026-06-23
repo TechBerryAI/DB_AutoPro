@@ -92,7 +92,5 @@ class SettingsView(BaseView):
         ).pack(side="left")
 
     def _toggle_theme(self) -> None:
-        new_theme = self.theme.toggle()
-        self.log(f"Theme switched to: {new_theme}")
         if self.theme_toggle_callback:
-            self.theme_toggle_callback(new_theme)
+            self.theme_toggle_callback()

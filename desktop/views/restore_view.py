@@ -110,7 +110,9 @@ class RestoreView(BaseView):
 
         active_type = self.get_active_db_type()
         ctk.CTkLabel(form, text="Database Type:").grid(row=0, column=0, padx=16, pady=10, sticky="w")
-        self.db_type = ctk.CTkComboBox(form, values=self.DB_TYPES)
+        self.db_type = ctk.CTkComboBox(
+            form, values=self.DB_TYPES, command=self._on_db_type_changed
+        )
         self.db_type.set(active_type.value)
         self.db_type.grid(row=0, column=1, padx=16, pady=10, sticky="ew")
         if self.connection:
@@ -132,6 +134,13 @@ class RestoreView(BaseView):
         )
         self.category_seg.set("Logical")
         self.category_seg.grid(row=0, column=0, sticky="w")
+
+        self.category_logical_label = ctk.CTkLabel(
+            type_frame,
+            text="Logical",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+        )
 
         self.category_hint = ctk.CTkLabel(
             type_frame,
@@ -392,7 +401,24 @@ class RestoreView(BaseView):
             return self.get_active_db_type()
         return DatabaseType(self.db_type.get())
 
+    def _on_db_type_changed(self, _value: str | None = None) -> None:
+        self._sync_category_controls()
+        self._sync_mongo_fields()
+        self._refresh_methods()
+
+    def _sync_category_controls(self) -> None:
+        if self._is_mongodb_session():
+            self._category = BackupCategory.LOGICAL
+            self.category_seg.grid_remove()
+            self.category_logical_label.grid(row=0, column=0, sticky="w")
+            self.category_hint.configure(text=category_description(BackupCategory.LOGICAL))
+        else:
+            self.category_logical_label.grid_remove()
+            self.category_seg.grid(row=0, column=0, sticky="w")
+
     def _on_category_changed(self, value: str) -> None:
+        if self._is_mongodb_session():
+            return
         self._category = BackupCategory.PHYSICAL if value == "Physical" else BackupCategory.LOGICAL
         self.category_hint.configure(text=category_description(self._category))
         self._refresh_methods()
@@ -474,6 +500,7 @@ class RestoreView(BaseView):
         return self.database.get().strip() or None
 
     def _sync_mongo_fields(self) -> None:
+        self._sync_category_controls()
         is_mongo = self._is_mongodb_session()
         scope = self._selected_scope() if is_mongo else None
         remote_on = self._is_remote_restore()

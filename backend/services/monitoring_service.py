@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
-from datetime import datetime, timezone
+import shlex
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import psutil
 
-from backend.connectors.base import get_connector
+from backend.connectors.base import get_connector, resolve_connection
 from backend.core.config import get_settings
 from backend.core.logging import get_logger
 from backend.models.schemas import DashboardStats, DatabaseType, HealthCheckResult
@@ -86,27 +89,180 @@ class MonitoringService:
             "platform": platform.platform(),
         }
 
-    def get_dashboard_stats(self) -> DashboardStats:
-        """Aggregate statistics for dashboard display."""
-        backups = self.backup_service.list_backups()
-        backup_dir = Path(self.settings.backup.output_dir)
-        storage_used = sum(
-            f.stat().st_size for f in backup_dir.rglob("*") if f.is_file()
-        ) / (1024 * 1024) if backup_dir.exists() else 0.0
+    def _iter_audit_records(self) -> list[dict[str, Any]]:
+        audit_path = Path(self.settings.logging.audit_log_path)
+        if not audit_path.exists():
+            return []
+        records: list[dict[str, Any]] = []
+        for line in audit_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return records
 
-        last_backup = None
-        if backups:
-            last_backup = datetime.fromisoformat(backups[0]["created_at"])
+    def _backup_audit_stats(
+        self, db_type: DatabaseType | None = None
+    ) -> tuple[int, int, datetime | None]:
+        """Count successful and failed backup operations from the audit log."""
+        success = 0
+        failed = 0
+        last_success: datetime | None = None
+
+        for record in self._iter_audit_records():
+            data = record.get("data", {})
+            if data.get("action") != "backup":
+                continue
+
+            details = data.get("details") or {}
+            if db_type:
+                rec_db = details.get("db_type")
+                if rec_db and rec_db != db_type.value:
+                    continue
+
+            status = str(data.get("status", "")).lower()
+            ts_raw = record.get("timestamp", "")
+            ts: datetime | None = None
+            if ts_raw:
+                try:
+                    ts = datetime.fromisoformat(str(ts_raw))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    ts = None
+
+            if status == "success":
+                success += 1
+                if ts and (last_success is None or ts > last_success):
+                    last_success = ts
+            elif status == "failed":
+                failed += 1
+
+        return success, failed, last_success
+
+    def _list_backups_for_context(
+        self,
+        *,
+        profile: str = "default",
+        db_type: DatabaseType | None = None,
+        list_remote: bool = False,
+        remote_dir: str | None = None,
+        local_dir: str | None = None,
+    ) -> list[dict]:
+        if list_remote and db_type == DatabaseType.MONGODB:
+            return self.backup_service.list_backups(
+                profile,
+                local_dir=local_dir,
+                remote_dir=remote_dir,
+                list_remote=True,
+            )
+        return self.backup_service.list_local_backups(local_dir)
+
+    def _storage_used_mb(
+        self,
+        *,
+        profile: str = "default",
+        list_remote: bool = False,
+        remote_dir: str | None = None,
+        local_dir: str | None = None,
+        backups: list[dict] | None = None,
+    ) -> float:
+        if list_remote:
+            try:
+                from backend.services.ssh_client import run_ssh_command, ssh_options_from_connection
+
+                conn = resolve_connection(profile)
+                ssh = ssh_options_from_connection(conn)
+                if ssh:
+                    root = remote_dir or ssh.get("remote_backup_dir", "/mnt/backup")
+                    cmd = f"du -sb {shlex.quote(root.rstrip('/'))} 2>/dev/null | cut -f1"
+                    _code, stdout, _stderr = run_ssh_command(
+                        ssh_host=ssh["ssh_host"],
+                        fallback_host=ssh["fallback_host"],
+                        ssh_port=ssh["ssh_port"],
+                        username=ssh["username"],
+                        password=ssh["password"],
+                        command=cmd,
+                    )
+                    bytes_used = int(stdout.strip() or "0")
+                    if bytes_used > 0:
+                        return round(bytes_used / (1024 * 1024), 2)
+            except Exception as exc:
+                logger.warning("Remote backup storage query failed: %s", exc)
+
+            if backups:
+                total = sum(int(b.get("size_bytes") or 0) for b in backups)
+                if total > 0:
+                    return round(total / (1024 * 1024), 2)
+            return 0.0
+
+        scan_dir = self.backup_service._resolve_local_backup_dir(local_dir)
+        if not scan_dir.exists():
+            return 0.0
+        used = sum(f.stat().st_size for f in scan_dir.rglob("*") if f.is_file())
+        return round(used / (1024 * 1024), 2)
+
+    def _latest_backup_time(self, backups: list[dict], audit_last: datetime | None) -> datetime | None:
+        last_backup: datetime | None = None
+        for backup in backups:
+            created_raw = backup.get("created_at")
+            if not created_raw:
+                continue
+            try:
+                created = datetime.fromisoformat(str(created_raw))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if last_backup is None or created > last_backup:
+                    last_backup = created
+            except ValueError:
+                continue
+        if audit_last and (last_backup is None or audit_last > last_backup):
+            return audit_last
+        return last_backup
+
+    def get_dashboard_stats(
+        self,
+        *,
+        profile: str = "default",
+        db_type: DatabaseType | None = None,
+        list_remote: bool = False,
+        remote_dir: str | None = None,
+        local_dir: str | None = None,
+        active_connections: int | None = None,
+    ) -> DashboardStats:
+        """Aggregate statistics for dashboard display."""
+        backups = self._list_backups_for_context(
+            profile=profile,
+            db_type=db_type,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+        )
+        audit_success, audit_failed, audit_last = self._backup_audit_stats(db_type)
+        storage_used = self._storage_used_mb(
+            profile=profile,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+            backups=backups,
+        )
 
         return DashboardStats(
             total_backups=len(backups),
-            successful_backups=len(backups),
-            failed_backups=0,
+            successful_backups=audit_success,
+            failed_backups=audit_failed,
             pending_operations=0,
-            last_backup=last_backup,
-            database_connections=len(self.settings.connections),
+            last_backup=self._latest_backup_time(backups, audit_last),
+            database_connections=(
+                active_connections
+                if active_connections is not None
+                else len(self.settings.connections)
+            ),
             patch_count=len(self.patch_service.get_history()),
-            storage_used_mb=round(storage_used, 2),
+            storage_used_mb=storage_used,
         )
 
     def get_backup_report(self) -> dict:
@@ -118,57 +274,55 @@ class MonitoringService:
         }
 
     def get_audit_logs(self, limit: int = 100) -> list:
-        audit_path = Path(self.settings.logging.audit_log_path)
-        if not audit_path.exists():
-            return []
-        lines = audit_path.read_text(encoding="utf-8").strip().split("\n")
+        lines = [
+            json.dumps(record, ensure_ascii=False)
+            for record in self._iter_audit_records()
+        ]
         return lines[-limit:]
 
     def get_recent_activity(self, limit: int = 12) -> list[dict]:
         """Parse audit log into timeline events."""
-        import json
-
         events: list[dict] = []
-        for line in reversed(self.get_audit_logs(limit * 2)):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                extra = data.get("data", {})
-                ts = data.get("timestamp", "")
-                if isinstance(ts, str) and "T" in ts:
-                    ts = ts.split("T")[1][:8]
-                events.append({
-                    "time": ts,
-                    "action": extra.get("action", data.get("message", "event")),
-                    "status": extra.get("status", "info"),
-                    "resource": extra.get("resource", ""),
-                    "user": extra.get("user", "system"),
-                })
-            except json.JSONDecodeError:
-                events.append({
-                    "time": "",
-                    "action": line[:80],
-                    "status": "info",
-                    "resource": "",
-                    "user": "system",
-                })
+        for record in reversed(self._iter_audit_records()):
+            extra = record.get("data", {})
+            ts = record.get("timestamp", "")
+            if isinstance(ts, str) and "T" in ts:
+                ts = ts.split("T")[1][:8]
+            events.append({
+                "time": ts,
+                "action": extra.get("action", record.get("message", "event")),
+                "status": extra.get("status", "info"),
+                "resource": extra.get("resource", ""),
+                "user": extra.get("user", "system"),
+            })
             if len(events) >= limit:
                 break
         return events
 
-    def get_backup_history_chart(self, days: int = 7) -> list[dict]:
+    def get_backup_history_chart(
+        self,
+        days: int = 7,
+        *,
+        profile: str = "default",
+        db_type: DatabaseType | None = None,
+        list_remote: bool = False,
+        remote_dir: str | None = None,
+        local_dir: str | None = None,
+    ) -> list[dict]:
         """Daily backup counts for the last N days."""
-        from datetime import timedelta
-
-        backups = self.backup_service.list_backups()
+        backups = self._list_backups_for_context(
+            profile=profile,
+            db_type=db_type,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+        )
         today = datetime.now(timezone.utc).date()
         counts = {today - timedelta(days=i): 0 for i in range(days - 1, -1, -1)}
 
         for backup in backups:
             try:
-                created = datetime.fromisoformat(backup["created_at"])
+                created = datetime.fromisoformat(str(backup["created_at"]))
                 if created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
                 day = created.date()
@@ -177,25 +331,61 @@ class MonitoringService:
             except (KeyError, ValueError):
                 continue
 
+        # Include successful backup operations without inventory timestamps.
+        if not any(counts.values()):
+            now = datetime.now(timezone.utc)
+            week_start = now - timedelta(days=days)
+            for record in self._iter_audit_records():
+                data = record.get("data", {})
+                if data.get("action") != "backup" or data.get("status") != "success":
+                    continue
+                details = data.get("details") or {}
+                if db_type and details.get("db_type") and details.get("db_type") != db_type.value:
+                    continue
+                try:
+                    created = datetime.fromisoformat(str(record.get("timestamp", "")))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if created < week_start:
+                    continue
+                day = created.date()
+                if day in counts:
+                    counts[day] += 1
+
         return [
             {"label": d.strftime("%a"), "count": counts[d], "date": d.isoformat()}
             for d in sorted(counts.keys())
         ]
 
-    def get_kpi_trends(self) -> dict[str, dict]:
+    def get_kpi_trends(
+        self,
+        *,
+        profile: str = "default",
+        db_type: DatabaseType | None = None,
+        list_remote: bool = False,
+        remote_dir: str | None = None,
+        local_dir: str | None = None,
+        active_connections: int | None = None,
+    ) -> dict[str, dict]:
         """Week-over-week trend comparisons for KPI metrics."""
-        from datetime import timedelta
-
-        backups = self.backup_service.list_backups()
+        backups = self._list_backups_for_context(
+            profile=profile,
+            db_type=db_type,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+        )
         now = datetime.now(timezone.utc)
         week_ago = now - timedelta(days=7)
         two_weeks = now - timedelta(days=14)
 
-        def count_in_range(items, start, end, date_key="created_at"):
+        def count_in_range(items: list[dict], start: datetime, end: datetime) -> int:
             n = 0
             for item in items:
                 try:
-                    dt = datetime.fromisoformat(item[date_key])
+                    dt = datetime.fromisoformat(str(item["created_at"]))
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     if start <= dt < end:
@@ -204,8 +394,30 @@ class MonitoringService:
                     pass
             return n
 
+        def audit_count_in_range(start: datetime, end: datetime, status: str) -> int:
+            n = 0
+            for record in self._iter_audit_records():
+                data = record.get("data", {})
+                if data.get("action") != "backup" or data.get("status") != status:
+                    continue
+                details = data.get("details") or {}
+                if db_type and details.get("db_type") and details.get("db_type") != db_type.value:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(str(record.get("timestamp", "")))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if start <= dt < end:
+                    n += 1
+            return n
+
         this_week = count_in_range(backups, week_ago, now)
         last_week = count_in_range(backups, two_weeks, week_ago)
+        if this_week == 0 and last_week == 0:
+            this_week = audit_count_in_range(week_ago, now, "success")
+            last_week = audit_count_in_range(two_weeks, week_ago, "success")
 
         def trend(current: int, previous: int) -> dict:
             if previous == 0:
@@ -216,7 +428,11 @@ class MonitoringService:
                 direction = "up" if pct > 0 else ("down" if pct < 0 else "flat")
             return {"current": current, "previous": previous, "pct": round(pct, 1), "direction": direction}
 
+        success_this = audit_count_in_range(week_ago, now, "success")
+        success_last = audit_count_in_range(two_weeks, week_ago, "success")
+
         patch_history = self.patch_service.get_history()
+
         def patch_dt(entry):
             dt = entry.executed_at
             return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
@@ -224,12 +440,22 @@ class MonitoringService:
         patches_this = sum(1 for p in patch_history if patch_dt(p) >= week_ago)
         patches_last = sum(1 for p in patch_history if two_weeks <= patch_dt(p) < week_ago)
 
-        backup_dir = Path(self.settings.backup.output_dir)
-        storage_mb = sum(f.stat().st_size for f in backup_dir.rglob("*") if f.is_file()) / (1024 * 1024) if backup_dir.exists() else 0.0
+        storage_mb = self._storage_used_mb(
+            profile=profile,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+            backups=backups,
+        )
+        conn_count = (
+            active_connections
+            if active_connections is not None
+            else len(self.settings.connections)
+        )
 
         return {
             "total_backups": trend(this_week, last_week),
-            "successful_backups": trend(this_week, last_week),
+            "successful_backups": trend(success_this, success_last),
             "patch_count": trend(patches_this, patches_last),
             "storage_used_mb": {
                 "current": round(storage_mb, 1),
@@ -237,14 +463,31 @@ class MonitoringService:
                 "pct": 0.0,
                 "direction": "flat",
             },
-            "database_connections": {"current": len(self.settings.connections), "previous": len(self.settings.connections), "pct": 0.0, "direction": "flat"},
+            "database_connections": {
+                "current": conn_count,
+                "previous": conn_count,
+                "pct": 0.0,
+                "direction": "flat",
+            },
             "pending_operations": {"current": 0, "previous": 0, "pct": 0.0, "direction": "flat"},
         }
 
-    def get_storage_usage_percent(self, max_mb: float = 10240.0) -> float:
+    def get_storage_usage_percent(
+        self,
+        max_mb: float = 10240.0,
+        *,
+        profile: str = "default",
+        db_type: DatabaseType | None = None,
+        list_remote: bool = False,
+        remote_dir: str | None = None,
+        local_dir: str | None = None,
+    ) -> float:
         """Backup storage as percentage of configured capacity (default 10 GB)."""
-        backup_dir = Path(self.settings.backup.output_dir)
-        if not backup_dir.exists():
-            return 0.0
-        used = sum(f.stat().st_size for f in backup_dir.rglob("*") if f.is_file()) / (1024 * 1024)
+        _ = db_type
+        used = self._storage_used_mb(
+            profile=profile,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+        )
         return min(100.0, (used / max_mb) * 100) if max_mb > 0 else 0.0

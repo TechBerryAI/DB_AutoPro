@@ -591,7 +591,11 @@ class BackupService:
             return []
 
         remote_root = remote_dir or ssh.get("remote_backup_dir", "/mnt/backup")
-        list_cmd = f"ls -1dt {_shlex.quote(remote_root.rstrip('/'))}/* 2>/dev/null || true"
+        quoted_root = _shlex.quote(remote_root.rstrip("/"))
+        list_cmd = (
+            f"find {quoted_root} -mindepth 1 -maxdepth 1 "
+            f"\\( -type d -o -type f \\) -printf '%T@ %s %p\\n' 2>/dev/null | sort -rn"
+        )
         exit_code, stdout, _stderr = run_ssh_command(
             ssh_host=ssh["ssh_host"],
             fallback_host=ssh["fallback_host"],
@@ -605,15 +609,26 @@ class BackupService:
 
         backups: list[dict] = []
         for line in stdout.splitlines():
-            path = line.strip()
-            if not path or path == f"{remote_root.rstrip('/')}/*":
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=2)
+            if len(parts) < 3:
+                continue
+            try:
+                mtime = float(parts[0])
+                size_bytes = int(parts[1])
+            except ValueError:
+                continue
+            path = parts[2].strip()
+            if not path:
                 continue
             name = path.rstrip("/").split("/")[-1]
             backups.append({
                 "name": name,
                 "path": path,
-                "size_bytes": 0,
-                "created_at": "",
+                "size_bytes": size_bytes,
+                "created_at": datetime.fromtimestamp(mtime).isoformat(),
                 "remote": True,
             })
         return backups
