@@ -15,7 +15,7 @@ import psutil
 from backend.connectors.base import get_connector, resolve_connection
 from backend.core.config import get_settings
 from backend.core.logging import get_logger
-from backend.models.schemas import DashboardStats, DatabaseType, HealthCheckResult
+from backend.models.schemas import DashboardStats, DatabaseType, HealthCheckResult, OperationStatus
 from backend.services.backup_service import BackupService
 from backend.services.patch_service import PatchService
 
@@ -143,6 +143,62 @@ class MonitoringService:
 
         return success, failed, last_success
 
+    def count_audit_today(
+        self,
+        actions: tuple[str, ...] = ("backup", "restore"),
+        db_type: DatabaseType | None = None,
+    ) -> tuple[int, int]:
+        """Count success/failed audit entries for today (local calendar day)."""
+        success = 0
+        failed = 0
+        today = datetime.now().astimezone().date()
+
+        for record in self._iter_audit_records():
+            data = record.get("data", {})
+            action = str(data.get("action", "")).lower()
+            if action not in actions:
+                continue
+
+            details = data.get("details") or {}
+            if db_type:
+                rec_db = details.get("db_type")
+                if rec_db and rec_db != db_type.value:
+                    continue
+
+            ts_raw = record.get("timestamp", "")
+            try:
+                ts = datetime.fromisoformat(str(ts_raw))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.astimezone()
+            except ValueError:
+                continue
+
+            if ts.date() != today:
+                continue
+
+            status = str(data.get("status", "")).lower()
+            if status == "success":
+                success += 1
+            elif status == "failed":
+                failed += 1
+
+        return success, failed
+
+    def count_live_jobs(self) -> tuple[int, int]:
+        """Return (running, pending) in-memory backup/restore operations."""
+        from backend.services import backup_service, restore_service
+
+        running = 0
+        pending = 0
+        for module in (backup_service, restore_service):
+            for op in getattr(module, "_operations", {}).values():
+                if op.status == OperationStatus.RUNNING:
+                    running += 1
+                elif op.status == OperationStatus.PENDING:
+                    pending += 1
+        return running, pending
+
     def _list_backups_for_context(
         self,
         *,
@@ -242,6 +298,7 @@ class MonitoringService:
             local_dir=local_dir,
         )
         audit_success, audit_failed, audit_last = self._backup_audit_stats(db_type)
+        running, pending = self.count_live_jobs()
         storage_used = self._storage_used_mb(
             profile=profile,
             list_remote=list_remote,
@@ -254,7 +311,7 @@ class MonitoringService:
             total_backups=len(backups),
             successful_backups=audit_success,
             failed_backups=audit_failed,
-            pending_operations=0,
+            pending_operations=running + pending,
             last_backup=self._latest_backup_time(backups, audit_last),
             database_connections=(
                 active_connections

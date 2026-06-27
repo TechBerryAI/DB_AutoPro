@@ -33,11 +33,12 @@ ENTRY_HEIGHT = 36
 ICON_TILE = 88
 
 
-class ConnectionDialog(ctk.CTk):
-    """Full-screen database connection manager shown before the main app."""
+class ConnectionDialog(ctk.CTkToplevel):
+    """Database connection manager shown inside the main application session."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent: ctk.CTk | None = None) -> None:
+        super().__init__(parent)
+        self._parent = parent
         self.connection_result: ConnectionResult | None = None
         self._db_type_var = ctk.StringVar(value=DatabaseType.POSTGRESQL.value)
         self._connecting = False
@@ -51,11 +52,15 @@ class ConnectionDialog(ctk.CTk):
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("blue")
 
-        self.title(APP_NAME)
+        self.title(f"{APP_NAME} — Connect")
         self.configure(fg_color=COLOR_BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self._apply_fullscreen()
+        if parent is not None:
+            self._apply_embedded(parent)
+        else:
+            self.title(APP_NAME)
+            self._apply_fullscreen()
         self._build_ui()
         self._refresh_saved_list()
         self._select_db_type(DatabaseType.POSTGRESQL)
@@ -72,6 +77,20 @@ class ConnectionDialog(ctk.CTk):
             except Exception:
                 w, h = self.winfo_screenwidth(), self.winfo_screenheight()
                 self.geometry(f"{w}x{h}+0+0")
+
+    def _apply_embedded(self, parent: ctk.CTk) -> None:
+        """Open as a modal overlay within the main application window."""
+        self.transient(parent)
+        self.update_idletasks()
+        parent.update_idletasks()
+        width = max(parent.winfo_width(), 1024)
+        height = max(parent.winfo_height(), 680)
+        x = parent.winfo_rootx()
+        y = parent.winfo_rooty()
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        if sys.platform == "win32":
+            self.state("zoomed")
+        self.minsize(1024, 680)
 
     def _build_ui(self) -> None:
         self.grid_rowconfigure(1, weight=1)
@@ -938,10 +957,19 @@ class ConnectionDialog(ctk.CTk):
 
     def _on_close(self) -> None:
         self.connection_result = None
+        try:
+            self.grab_release()
+        except Exception:
+            pass
         self.destroy()
 
     @staticmethod
-    def show() -> ConnectionResult | None:
-        dialog = ConnectionDialog()
-        dialog.mainloop()
+    def show(parent: ctk.CTk | None = None) -> ConnectionResult | None:
+        dialog = ConnectionDialog(parent)
+        if parent is not None:
+            dialog.grab_set()
+            dialog.focus_force()
+            parent.wait_window(dialog)
+        else:
+            dialog.mainloop()
         return dialog.connection_result

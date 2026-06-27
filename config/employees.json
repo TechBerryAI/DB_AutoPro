@@ -1,0 +1,31 @@
+{
+  "employees": [
+    {
+      "username": "admin",
+      "full_name": "Administrator",
+      "hashed_password": "$2b$12$jLh4i9C4ZuiA6EpjhWLB3ejqKSRMmyznM4ggmSxNKX7LOcZcO0feC",
+      "role": "admin",
+      "email": "",
+      "active": true,
+      "created_at": "2026-06-27T05:40:00.823615+00:00"
+    },
+    {
+      "username": "Riya",
+      "full_name": "Riya",
+      "hashed_password": "$2b$12$0Q2qial2okcUt5HLHeBkyujTEGpJbDUS/myeNhGM7RAC7UEvHYG7y",
+      "role": "operator",
+      "email": "rg857383@gmail.com",
+      "active": true,
+      "created_at": "2026-06-27T05:43:30.244640+00:00"
+    },
+    {
+      "username": "testuser99",
+      "full_name": "Test",
+      "hashed_password": "$2b$12$BrGz7ishsQ7gvLtQ97sfEuWEg1qnLKsL03dP915FWeDzGL4EbXjny",
+      "role": "operator",
+      "email": "",
+      "active": true,
+      "created_at": "2026-06-27T05:54:36.533941+00:00"
+    }
+  ]
+}
