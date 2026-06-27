@@ -58,6 +58,29 @@ class SavedServer:
             backup_collection=data.get("backup_collection", ""),
         )
 
+    def to_connection_result(self):
+        """Build a runtime connection from this saved profile."""
+        from desktop.connection import ConnectionResult
+
+        return ConnectionResult(
+            name=self.name,
+            db_type=DatabaseType(self.db_type),
+            host=self.host,
+            port=self.port,
+            username=self.username,
+            password=self.password,
+            database=self.database,
+            saved_name=self.name,
+            auth_database=self.auth_database or None,
+            ssh_enabled=self.ssh_enabled,
+            linux_username=self.linux_username,
+            linux_password=self.linux_password,
+            ssh_host=self.ssh_host or None,
+            ssh_port=self.ssh_port,
+            mongodump_path=self.mongodump_path,
+            remote_backup_dir=self.remote_backup_dir,
+        )
+
 
 def load_saved_servers() -> list[SavedServer]:
     if not STORE_PATH.exists():

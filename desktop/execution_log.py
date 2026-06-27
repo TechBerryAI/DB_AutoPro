@@ -19,16 +19,45 @@ class LogEntry:
     message: str
 
 
+class ExecutionLogStore:
+    """Shared in-memory log buffer used by the app and the Logs view."""
+
+    MAX_ENTRIES = 500
+
+    def __init__(self) -> None:
+        self.entries: list[LogEntry] = []
+
+    def add(self, message: str, level: str = "INFO") -> LogEntry:
+        level = level.upper()
+        if level not in ("INFO", "SUCCESS", "WARNING", "ERROR"):
+            level = "INFO"
+        entry = LogEntry(datetime.now().strftime("%H:%M:%S"), level, message)
+        self.entries.append(entry)
+        if len(self.entries) > self.MAX_ENTRIES:
+            self.entries[:] = self.entries[-self.MAX_ENTRIES :]
+        return entry
+
+    def clear(self) -> None:
+        self.entries.clear()
+
+
 class ExecutionLogPanel(ctk.CTkFrame):
     """Color-coded execution log with filter, search, and auto-scroll."""
 
-    def __init__(self, master, theme: ThemeManager, **kwargs) -> None:
+    def __init__(
+        self,
+        master,
+        theme: ThemeManager,
+        store: ExecutionLogStore | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(master, fg_color=self._panel_bg(theme), border_width=1, border_color=theme.c("border"), **kwargs)
         self.theme = theme
-        self._entries: list[LogEntry] = []
+        self.store = store or ExecutionLogStore()
         self._auto_scroll = ctk.BooleanVar(value=True)
         self._build_ui()
         self._configure_tags()
+        self._render()
 
     @staticmethod
     def _panel_bg(theme: ThemeManager) -> str:
@@ -143,17 +172,11 @@ class ExecutionLogPanel(ctk.CTkFrame):
         self._configure_tags()
 
     def add_entry(self, message: str, level: str = "INFO") -> None:
-        level = level.upper()
-        if level not in ("INFO", "SUCCESS", "WARNING", "ERROR"):
-            level = "INFO"
-        entry = LogEntry(datetime.now().strftime("%H:%M:%S"), level, message)
-        self._entries.append(entry)
-        if len(self._entries) > 500:
-            self._entries = self._entries[-500:]
+        self.store.add(message, level)
         self._render()
 
     def clear(self) -> None:
-        self._entries.clear()
+        self.store.clear()
         self._render()
 
     def _render(self) -> None:
@@ -164,7 +187,7 @@ class ExecutionLogPanel(ctk.CTkFrame):
         self._text.delete("1.0", "end")
 
         tb = self._text._textbox
-        for entry in self._entries:
+        for entry in self.store.entries:
             if filter_level != "ALL" and entry.level != filter_level:
                 continue
             if query and query not in entry.message.lower() and query not in entry.level.lower():

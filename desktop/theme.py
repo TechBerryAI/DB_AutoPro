@@ -163,21 +163,46 @@ class ThemeManager:
         return self.c(fallback)
 
 
-def load_saved_theme() -> str:
+def _load_ui_prefs() -> dict:
     try:
         if THEME_PREF_PATH.exists():
             data = json.loads(THEME_PREF_PATH.read_text(encoding="utf-8"))
-            theme = data.get("theme", "dark")
-            if theme in THEMES:
-                return theme
+            if isinstance(data, dict):
+                return data
     except (OSError, json.JSONDecodeError, TypeError):
         pass
+    return {}
+
+
+def _save_ui_prefs(data: dict) -> None:
+    try:
+        THEME_PREF_PATH.parent.mkdir(parents=True, exist_ok=True)
+        THEME_PREF_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_saved_theme() -> str:
+    theme = _load_ui_prefs().get("theme", "dark")
+    if theme in THEMES:
+        return theme
     return "dark"
 
 
 def save_theme(name: str) -> None:
-    try:
-        THEME_PREF_PATH.parent.mkdir(parents=True, exist_ok=True)
-        THEME_PREF_PATH.write_text(json.dumps({"theme": name}, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    data = _load_ui_prefs()
+    data["theme"] = name
+    _save_ui_prefs(data)
+
+
+def load_last_username() -> str:
+    return str(_load_ui_prefs().get("last_username", "")).strip()
+
+
+def save_last_username(username: str) -> None:
+    name = username.strip()
+    if not name:
+        return
+    data = _load_ui_prefs()
+    data["last_username"] = name
+    _save_ui_prefs(data)

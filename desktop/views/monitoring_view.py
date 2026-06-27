@@ -12,10 +12,20 @@ from desktop.views.base_view import BaseView
 class MonitoringView(BaseView):
     """Health checks, audit logs, and backup reports."""
 
-    def __init__(self, master, theme: ThemeManager, log_callback=None, **kwargs) -> None:
+    def __init__(self, master, theme: ThemeManager, log_callback=None, auto_action: str | None = None, **kwargs) -> None:
         super().__init__(master, theme, log_callback, **kwargs)
         self.service = MonitoringService()
+        self._auto_action = auto_action
         self._build_ui()
+        if auto_action:
+            actions = {
+                "audit": self._audit_logs,
+                "report": self._backup_report,
+                "health": self._health_check,
+            }
+            callback = actions.get(auto_action)
+            if callback:
+                self.after(150, callback)
 
     def _build_ui(self) -> None:
         row = 0
