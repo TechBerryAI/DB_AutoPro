@@ -14,11 +14,10 @@ class StatusFooterBar(ctk.CTkFrame):
     def __init__(self, master, theme: ThemeManager, **kwargs) -> None:
         super().__init__(
             master,
-            height=40,
+            height=44,
             corner_radius=0,
             fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-            border_width=1,
-            border_color=theme.c("border"),
+            border_width=0,
             **kwargs,
         )
         self.theme = theme
@@ -27,8 +26,9 @@ class StatusFooterBar(ctk.CTkFrame):
 
     def _build_ui(self) -> None:
         self.grid_propagate(False)
+        ctk.CTkFrame(self, height=1, fg_color=self.theme.c("border")).pack(fill="x")
         inner = ctk.CTkFrame(self, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=18, pady=6)
+        inner.pack(fill="both", expand=True, padx=22, pady=8)
 
         fields = [
             ("connection", "● Disconnected"),
@@ -44,7 +44,7 @@ class StatusFooterBar(ctk.CTkFrame):
                 font=font(self.theme, 11),
                 text_color=self.theme.c("text_muted"),
             )
-            lbl.pack(side="left", padx=(0, 22))
+            lbl.pack(side="left", padx=(0, 24))
             self._labels[key] = lbl
 
     def update(
@@ -73,7 +73,6 @@ class StatusFooterBar(ctk.CTkFrame):
         self.theme = theme
         self.configure(
             fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-            border_color=theme.c("border"),
         )
         for lbl in self._labels.values():
             lbl.configure(text_color=theme.c("text_muted"))

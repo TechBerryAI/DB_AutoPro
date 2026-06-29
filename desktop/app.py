@@ -105,7 +105,7 @@ class DatabaseAutomationApp(ctk.CTk):
         )
         self._sidebar.grid(row=0, column=0, sticky="nsew")
 
-        self.content = ctk.CTkFrame(self, corner_radius=0, fg_color=self._t.c("bg_content"))
+        self.content = ctk.CTkFrame(self, corner_radius=0, fg_color=self._t.c("bg_content"), border_width=1, border_color=self._t.c("border_subtle"))
         self.content.grid(row=0, column=1, sticky="nsew")
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(0, weight=1)
