@@ -26,6 +26,24 @@
       "email": "",
       "active": true,
       "created_at": "2026-06-27T05:54:36.533941+00:00"
+    },
+    {
+      "username": "Ganesh45",
+      "full_name": "Ganesh Gupta",
+      "hashed_password": "$2b$12$B47CaI3cPUYWJtxyFSRFRO/htj.9u/gqtq9maI40FjG/vyAWk4qWW",
+      "role": "operator",
+      "email": "ganeshgupta461745@gmail.com",
+      "active": true,
+      "created_at": "2026-06-27T06:36:25.853333+00:00"
+    },
+    {
+      "username": "ganesh4617",
+      "full_name": "Ganesh",
+      "hashed_password": "$2b$12$hRpoIpE9dbCGdnT22bbVAuskg2YDS.igt83fyIFMZ2J8x/i/F18o.",
+      "role": "operator",
+      "email": "",
+      "active": true,
+      "created_at": "2026-06-27T06:51:23.525627+00:00"
     }
   ]
 }

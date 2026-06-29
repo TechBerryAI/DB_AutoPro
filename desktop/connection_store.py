@@ -34,6 +34,7 @@ class SavedServer:
     local_output_dir: str = ""
     backup_folder_name: str = ""
     backup_collection: str = ""
+    owner_username: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> SavedServer:
@@ -56,6 +57,7 @@ class SavedServer:
             local_output_dir=data.get("local_output_dir", ""),
             backup_folder_name=data.get("backup_folder_name", ""),
             backup_collection=data.get("backup_collection", ""),
+            owner_username=data.get("owner_username", ""),
         )
 
     def to_connection_result(self):
@@ -82,7 +84,7 @@ class SavedServer:
         )
 
 
-def load_saved_servers() -> list[SavedServer]:
+def _load_all_servers() -> list[SavedServer]:
     if not STORE_PATH.exists():
         return []
     try:
@@ -92,21 +94,55 @@ def load_saved_servers() -> list[SavedServer]:
         return []
 
 
+def _server_belongs_to_user(server: SavedServer, owner_username: str) -> bool:
+    owner = (server.owner_username or "").strip().lower()
+    user = owner_username.strip().lower()
+    if not owner:
+        # Legacy entries without an owner are visible to admin only.
+        return user == "admin"
+    return owner == user
+
+
+def load_saved_servers(owner_username: str | None = None) -> list[SavedServer]:
+    servers = _load_all_servers()
+    if not owner_username:
+        return servers
+    return [s for s in servers if _server_belongs_to_user(s, owner_username)]
+
+
 def save_servers(servers: list[SavedServer]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {"servers": [asdict(server) for server in servers]}
     STORE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def upsert_server(server: SavedServer) -> None:
-    servers = [s for s in load_saved_servers() if s.name != server.name]
+def upsert_server(server: SavedServer, owner_username: str | None = None) -> None:
+    if owner_username and not server.owner_username:
+        server.owner_username = owner_username
+    owner_key = (server.owner_username or owner_username or "").strip().lower()
+    servers = [
+        s
+        for s in _load_all_servers()
+        if not (
+            s.name == server.name
+            and (s.owner_username or "").strip().lower() == owner_key
+        )
+    ]
     servers.append(server)
     save_servers(servers)
 
 
-def remove_server(name: str) -> bool:
-    servers = load_saved_servers()
-    filtered = [s for s in servers if s.name != name]
+def remove_server(name: str, owner_username: str | None = None) -> bool:
+    servers = _load_all_servers()
+    if owner_username:
+        user = owner_username.strip().lower()
+        filtered = [
+            s
+            for s in servers
+            if not (s.name == name and _server_belongs_to_user(s, user))
+        ]
+    else:
+        filtered = [s for s in servers if s.name != name]
     if len(filtered) == len(servers):
         return False
     save_servers(filtered)
