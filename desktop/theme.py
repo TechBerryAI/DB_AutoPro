@@ -9,70 +9,79 @@ import customtkinter as ctk
 
 THEME_PREF_PATH = Path(__file__).resolve().parent.parent / "config" / "ui_preferences.json"
 
-RADIUS = {"sm": 8, "md": 12, "lg": 16, "xl": 20, "pill": 999}
+RADIUS = {"sm": 10, "md": 14, "lg": 18, "xl": 24, "pill": 999}
 
-# Ultra-modern realistic palette — depth, glass panels, refined accents
+# Ultra-modern realistic palette — layered depth, glass surfaces, refined accents
 THEMES = {
     "dark": {
         "appearance_mode": "dark",
         "color_theme": "blue",
-        "bg_app": "#05070c",
-        "bg_sidebar": "#080c14",
-        "bg_content": "#0a0f18",
-        "bg_card": "#111827",
-        "bg_card_hover": "#172033",
-        "bg_elevated": "#1a2438",
-        "bg_input": "#0c121c",
-        "bg_glass": "#141c2b",
-        "bg_list": "#0e1522",
-        "border": "#243044",
-        "border_subtle": "#151d2b",
-        "border_focus": "#3b82f6",
-        "primary": "#4f8cff",
-        "primary_hover": "#3b7cf0",
-        "primary_muted": "#1a2d52",
-        "primary_glow": "#2563eb33",
-        "text_primary": "#f1f5f9",
-        "text_secondary": "#94a3b8",
-        "text_muted": "#64748b",
+        "bg_app": "#030508",
+        "bg_sidebar": "#070b12",
+        "bg_content": "#0a0e16",
+        "bg_card": "#0f1520",
+        "bg_card_hover": "#151d2c",
+        "bg_elevated": "#121a28",
+        "bg_input": "#0a1018",
+        "bg_glass": "#111827",
+        "bg_list": "#0c121c",
+        "border": "#1e2a3d",
+        "border_subtle": "#141c28",
+        "border_focus": "#5b9aff",
+        "primary": "#5b9aff",
+        "primary_hover": "#4a8ef5",
+        "primary_muted": "#152847",
+        "primary_glow": "#3b82f640",
+        "text_primary": "#f8fafc",
+        "text_secondary": "#9aa8bc",
+        "text_muted": "#6b7a90",
         "text_on_primary": "#ffffff",
-        "success": "#34d399",
-        "success_muted": "#064e3b",
-        "warning": "#fbbf24",
-        "warning_muted": "#78350f",
-        "error": "#f87171",
-        "error_muted": "#450a0a",
-        "destructive_bg": "#7f1d1d",
+        "success": "#3dd68c",
+        "success_muted": "#0d3d2a",
+        "warning": "#f5c451",
+        "warning_muted": "#4a3410",
+        "error": "#ff6b6b",
+        "error_muted": "#4a1515",
+        "destructive_bg": "#8b2222",
         "destructive_hover": "#ef4444",
         "destructive_text": "#fecaca",
-        "accent": "#6366f1",
-        "accent_secondary": "#8b5cf6",
-        "metric_blue": "#4f8cff",
-        "metric_blue_bg": "#1a2d52",
-        "metric_purple": "#a78bfa",
-        "metric_purple_bg": "#2e1f5e",
-        "metric_green": "#34d399",
-        "metric_green_bg": "#064e3b",
-        "metric_red": "#f87171",
-        "metric_red_bg": "#450a0a",
-        "metric_amber": "#fbbf24",
-        "metric_amber_bg": "#78350f",
+        "accent": "#818cf8",
+        "accent_secondary": "#a78bfa",
+        "metric_blue": "#5b9aff",
+        "metric_blue_bg": "#152847",
+        "metric_purple": "#b4a0ff",
+        "metric_purple_bg": "#2a1f4a",
+        "metric_green": "#3dd68c",
+        "metric_green_bg": "#0d3d2a",
+        "metric_red": "#ff6b6b",
+        "metric_red_bg": "#4a1515",
+        "metric_amber": "#f5c451",
+        "metric_amber_bg": "#4a3410",
         "nav_active_text": "#ffffff",
-        "nav_idle_text": "#94a3b8",
-        "nav_indicator": "#4f8cff",
-        "log_info": "#94a3b8",
-        "log_success": "#34d399",
-        "log_warning": "#fbbf24",
-        "log_error": "#f87171",
-        "terminal_bg": "#060a12",
-        "bg_primary": "#05070c",
-        "bg_secondary": "#111827",
-        "bg_sidebar_legacy": "#080c14",
+        "nav_idle_text": "#8b9bb0",
+        "nav_indicator": "#5b9aff",
+        "log_info": "#9aa8bc",
+        "log_success": "#3dd68c",
+        "log_warning": "#f5c451",
+        "log_error": "#ff6b6b",
+        "terminal_bg": "#050810",
+        "sidebar_border": "#141c28",
+        "sidebar_text_primary": "#f1f5f9",
+        "sidebar_text_secondary": "#94a3b8",
+        "sidebar_text_muted": "#64748b",
+        "sidebar_bg_card": "#0f1520",
+        "sidebar_bg_hover": "#151d2c",
+        "sidebar_bg_list": "#0a0e16",
+        "sidebar_nav_active": "#152847",
+        "sidebar_nav_hover": "#121a28",
+        "bg_primary": "#030508",
+        "bg_secondary": "#0f1520",
+        "bg_sidebar_legacy": "#070b12",
     },
     "light": {
         "appearance_mode": "light",
         "color_theme": "blue",
-        "bg_app": "#e8ecf3",
+        "bg_app": "#e4eaf2",
         "bg_content": "#eef2f8",
         "bg_card": "#ffffff",
         "bg_card_hover": "#f8fafc",
@@ -80,8 +89,8 @@ THEMES = {
         "bg_input": "#ffffff",
         "bg_glass": "#ffffff",
         "bg_list": "#f1f5f9",
-        "border": "#d4dce8",
-        "border_subtle": "#e8edf4",
+        "border": "#cdd6e3",
+        "border_subtle": "#e2e8f0",
         "border_focus": "#2563eb",
         "primary": "#2563eb",
         "primary_hover": "#1d4ed8",
@@ -130,13 +139,14 @@ THEMES = {
         "sidebar_bg_list": "#0c1220",
         "sidebar_nav_active": "#2563eb",
         "sidebar_nav_hover": "#1e293b",
-        "bg_primary": "#e8ecf3",
+        "bg_primary": "#e4eaf2",
         "bg_secondary": "#ffffff",
         "bg_sidebar_legacy": "#0f172a",
     },
 }
 
 _SIDEBAR_FALLBACKS: dict[str, str] = {
+    "bg_sidebar": "bg_sidebar",
     "bg_list": "bg_list",
     "bg_card": "bg_card",
     "bg_hover": "bg_card_hover",
@@ -159,6 +169,10 @@ class ThemeManager:
         self.colors = THEMES[self.current]
         ctk.set_appearance_mode(self.colors["appearance_mode"])
         ctk.set_default_color_theme(self.colors["color_theme"])
+        try:
+            ctk.set_widget_scaling(1.0)
+        except Exception:
+            pass
 
     def toggle(self) -> str:
         self.current = "light" if self.current == "dark" else "dark"
@@ -200,9 +214,7 @@ class ThemeManager:
 
     def sc(self, key: str) -> str:
         fallback = _SIDEBAR_FALLBACKS.get(key, key)
-        if self.is_light:
-            return self.colors.get(f"sidebar_{key}", self.c(fallback))
-        return self.c(fallback)
+        return self.colors.get(f"sidebar_{key}", self.c(fallback))
 
 
 def _load_ui_prefs() -> dict:

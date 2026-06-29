@@ -5,12 +5,19 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from desktop.constants import APP_NAME
-from desktop.design_system import font, primary_button, secondary_button, text_input
+from desktop.design_system import font, ghost_button, primary_button, text_input
 from desktop.employee_store import EmployeeSession, authenticate_employee, register_employee
 from desktop.theme import ThemeManager, load_saved_theme, save_last_username, load_last_username
 
 ENTRY_HEIGHT = 44
-CARD_WIDTH = 520
+BODY_PAD = 32
+CARD_MIN_WIDTH = 480
+CARD_MAX_WIDTH = 520
+_MODE_SIZES = {
+    "login": (560, 560),
+    "register": (560, 880),
+    "success": (560, 520),
+}
 
 
 class AuthDialog(ctk.CTk):
@@ -21,60 +28,124 @@ class AuthDialog(ctk.CTk):
         self.session: EmployeeSession | None = None
         self._mode = "login"
         self._prefill_username: str = ""
+        self._wraplength = 440
         self.theme = ThemeManager(load_saved_theme())
 
         self.title(f"{APP_NAME} — Login")
         self.configure(fg_color=self.theme.c("bg_app"))
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_shell()
         self._show_login()
-        self._center_window(580, 500)
+        self.bind("<Map>", self._on_map, add="+")
+        self.bind("<Configure>", self._on_resize, add="+")
 
-    def _center_window(self, width: int, height: int) -> None:
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() - width) // 2
-        y = (self.winfo_screenheight() - height) // 2
+    def _on_map(self, _event=None) -> None:
+        self.after(0, self._fit_window)
+
+    def _on_resize(self, event=None) -> None:
+        if event is not None and event.widget is not self:
+            return
+        self._sync_layout_widths()
+
+    def _fit_window(self) -> None:
+        """Size and center the window for the current auth mode."""
+        if not self.winfo_exists():
+            return
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        mode_w, mode_h = _MODE_SIZES.get(self._mode, (560, 560))
+        width = max(mode_w, CARD_MIN_WIDTH + 80)
+        width = min(width, int(screen_w * 0.96))
+        height = min(mode_h, max(480, screen_h - 40))
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(CARD_MIN_WIDTH + 40, 480)
+        self.update_idletasks()
+        self._sync_layout_widths()
+
+    def _sync_layout_widths(self) -> None:
+        if not self.winfo_exists():
+            return
+        card_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, self.winfo_width() - 56))
+        self._wraplength = max(320, card_w - (BODY_PAD * 2) - 16)
+        try:
+            self.card.configure(width=card_w)
+        except Exception:
+            pass
+        self.status_label.configure(wraplength=self._wraplength)
+        for widget in self.form_frame.winfo_children():
+            if isinstance(widget, ctk.CTkLabel):
+                try:
+                    widget.configure(wraplength=self._wraplength)
+                except Exception:
+                    pass
+
+    def _schedule_fit(self) -> None:
+        self.after(0, self._fit_window)
+        self.after(120, self._fit_window)
+
+    def _center_window(self, _width: int, _height: int) -> None:
+        self._schedule_fit()
 
     def _build_shell(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        outer = ctk.CTkFrame(self, fg_color="transparent")
-        outer.grid(row=0, column=0, padx=28, pady=28)
+        canvas = ctk.CTkFrame(self, fg_color=self.theme.c("bg_app"), corner_radius=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        canvas.grid_columnconfigure(0, weight=1)
+        canvas.grid_columnconfigure(1, weight=0)
+        canvas.grid_columnconfigure(2, weight=1)
+        canvas.grid_rowconfigure(0, weight=1)
+        canvas.grid_rowconfigure(1, weight=0)
+        canvas.grid_rowconfigure(2, weight=1)
+
+        glow_left = ctk.CTkFrame(
+            canvas, width=240, height=240, corner_radius=120, fg_color=self.theme.c("primary_muted")
+        )
+        glow_left.place(relx=0.05, rely=0.08, anchor="center")
+        glow_right = ctk.CTkFrame(
+            canvas, width=180, height=180, corner_radius=90, fg_color=self.theme.c("bg_elevated")
+        )
+        glow_right.place(relx=0.95, rely=0.92, anchor="center")
 
         self.card = ctk.CTkFrame(
-            outer,
-            width=CARD_WIDTH,
+            canvas,
             fg_color=self.theme.c("bg_glass") if not self.theme.is_light else self.theme.c("bg_card"),
-            corner_radius=self.theme.radius("lg"),
+            corner_radius=self.theme.radius("xl"),
             border_width=1,
             border_color=self.theme.c("border"),
         )
-        self.card.pack()
-        self.card.grid_columnconfigure(1, weight=1)
+        self.card.grid(row=1, column=1, sticky="n", padx=20, pady=20)
+        self.card.grid_columnconfigure(0, weight=1)
+        self.card.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkFrame(self.card, height=4, corner_radius=0, fg_color=self.theme.c("primary")).pack(fill="x")
+        accent_row = ctk.CTkFrame(self.card, fg_color="transparent")
+        accent_row.grid(row=0, column=0, sticky="ew")
+        ctk.CTkFrame(accent_row, height=4, corner_radius=0, fg_color=self.theme.c("primary")).pack(fill="x")
+        ctk.CTkFrame(accent_row, height=1, fg_color=self.theme.c("accent")).pack(fill="x")
 
         self.body = ctk.CTkFrame(self.card, fg_color="transparent")
-        self.body.pack(fill="both", expand=True, padx=36, pady=32)
-        self.body.grid_columnconfigure(1, weight=1)
+        self.body.grid(row=1, column=0, sticky="nsew", padx=BODY_PAD, pady=BODY_PAD)
+        self.body.grid_columnconfigure(0, weight=1)
+        self.body.grid_rowconfigure(0, weight=1)
 
         self.form_frame = ctk.CTkFrame(self.body, fg_color="transparent")
-        self.form_frame.pack(fill="both", expand=True)
-        self.form_frame.grid_columnconfigure(1, weight=1)
+        self.form_frame.grid(row=0, column=0, sticky="nsew")
+        self.form_frame.grid_columnconfigure(0, weight=1)
 
         self.status_label = ctk.CTkLabel(
             self.body,
             text="",
             font=font(self.theme, 12),
             text_color=self.theme.c("text_muted"),
-            wraplength=CARD_WIDTH - 72,
+            wraplength=self._wraplength,
             justify="left",
         )
-        self.status_label.pack(anchor="w", pady=(12, 0))
+        self.status_label.grid(row=1, column=0, sticky="ew", pady=(12, 0))
 
     def _clear_form(self) -> None:
         for child in self.form_frame.winfo_children():
@@ -84,10 +155,12 @@ class AuthDialog(ctk.CTk):
         ctk.CTkLabel(
             self.form_frame,
             text=title,
-            font=font(self.theme, 26, weight="bold"),
+            font=font(self.theme, 24, weight="bold"),
             text_color=self.theme.c("text_primary"),
             anchor="w",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+            wraplength=self._wraplength,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 4))
 
         ctk.CTkLabel(
             self.form_frame,
@@ -95,32 +168,34 @@ class AuthDialog(ctk.CTk):
             font=font(self.theme, 13),
             text_color=self.theme.c("text_muted"),
             anchor="w",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 24))
+            wraplength=self._wraplength,
+            justify="left",
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 20))
 
     def _labeled_entry(self, row: int, label: str, *, placeholder: str) -> ctk.CTkEntry:
         ctk.CTkLabel(
             self.form_frame,
             text=label,
-            font=font(self.theme, 13),
+            font=font(self.theme, 13, weight="bold"),
             text_color=self.theme.c("text_primary"),
             anchor="w",
-        ).grid(row=row, column=0, sticky="w", padx=(0, 16), pady=8)
+        ).grid(row=row, column=0, sticky="ew", pady=(8, 4))
 
         entry = text_input(self.form_frame, self.theme, placeholder=placeholder, height=ENTRY_HEIGHT)
-        entry.grid(row=row, column=1, sticky="ew", pady=8)
+        entry.grid(row=row + 1, column=0, sticky="ew", pady=(0, 4))
         return entry
 
     def _labeled_password_entry(self, row: int, label: str, *, placeholder: str) -> ctk.CTkEntry:
         ctk.CTkLabel(
             self.form_frame,
             text=label,
-            font=font(self.theme, 13),
+            font=font(self.theme, 13, weight="bold"),
             text_color=self.theme.c("text_primary"),
             anchor="w",
-        ).grid(row=row, column=0, sticky="w", padx=(0, 16), pady=8)
+        ).grid(row=row, column=0, sticky="ew", pady=(8, 4))
 
         field_row = ctk.CTkFrame(self.form_frame, fg_color="transparent")
-        field_row.grid(row=row, column=1, sticky="ew", pady=8)
+        field_row.grid(row=row + 1, column=0, sticky="ew", pady=(0, 4))
         field_row.grid_columnconfigure(0, weight=1)
 
         entry = text_input(field_row, self.theme, placeholder=placeholder, height=ENTRY_HEIGHT, show="•")
@@ -129,7 +204,7 @@ class AuthDialog(ctk.CTk):
         toggle = ctk.CTkButton(
             field_row,
             text="Show",
-            width=52,
+            width=56,
             height=ENTRY_HEIGHT,
             fg_color=self.theme.c("bg_elevated"),
             hover_color=self.theme.c("bg_card_hover"),
@@ -164,36 +239,30 @@ class AuthDialog(ctk.CTk):
         self._header(APP_NAME, "Sign in to manage remote database automation")
 
         self.login_user = self._labeled_entry(2, "Username", placeholder="Username")
-        self.login_pass = self._labeled_password_entry(3, "Password", placeholder="Password")
+        self.login_pass = self._labeled_password_entry(4, "Password", placeholder="Password")
 
         username = (prefill_username or self._prefill_username or load_last_username()).strip()
         if username:
             self.login_user.insert(0, username)
             self._prefill_username = ""
 
-        login_btn = primary_button(
+        primary_button(
             self.form_frame, self.theme, text="Login", command=self._on_login, height=46
-        )
-        login_btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(20, 8))
+        ).grid(row=6, column=0, sticky="ew", pady=(20, 8))
 
-        switch = ctk.CTkButton(
+        ghost_button(
             self.form_frame,
+            self.theme,
             text="Don't have an account? Register",
-            height=34,
-            fg_color="transparent",
-            hover_color=self.theme.c("primary_muted"),
-            text_color=self.theme.c("primary"),
-            font=font(self.theme, 13),
             command=self._show_register,
-        )
-        switch.grid(row=5, column=0, columnspan=2, sticky="ew")
+        ).grid(row=7, column=0, sticky="ew", pady=(4, 0))
 
         self.bind("<Return>", lambda _e: self._on_login())
         if username:
             self.login_pass.focus_set()
         else:
             self.login_user.focus_set()
-        self._center_window(580, 460)
+        self._schedule_fit()
 
     def _show_registration_success(self, full_name: str, username: str) -> None:
         self._mode = "success"
@@ -206,7 +275,7 @@ class AuthDialog(ctk.CTk):
             text="✓",
             font=font(self.theme, 48, weight="bold"),
             text_color=self.theme.c("success"),
-        ).grid(row=0, column=0, columnspan=2, pady=(8, 12))
+        ).grid(row=0, column=0, pady=(8, 12))
 
         ctk.CTkLabel(
             self.form_frame,
@@ -214,7 +283,7 @@ class AuthDialog(ctk.CTk):
             font=font(self.theme, 24, weight="bold"),
             text_color=self.theme.c("text_primary"),
             anchor="center",
-        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
         ctk.CTkLabel(
             self.form_frame,
@@ -226,8 +295,8 @@ class AuthDialog(ctk.CTk):
             font=font(self.theme, 13),
             text_color=self.theme.c("text_muted"),
             justify="center",
-            wraplength=CARD_WIDTH - 72,
-        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 24))
+            wraplength=self._wraplength,
+        ).grid(row=2, column=0, sticky="ew", pady=(0, 24))
 
         primary_button(
             self.form_frame,
@@ -235,10 +304,10 @@ class AuthDialog(ctk.CTk):
             text="Go to Login",
             command=lambda: self._show_login(prefill_username=username),
             height=46,
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        ).grid(row=3, column=0, sticky="ew", pady=(0, 8))
 
         self.unbind("<Return>")
-        self._center_window(580, 440)
+        self._schedule_fit()
 
     def _show_register(self) -> None:
         self._mode = "register"
@@ -248,29 +317,25 @@ class AuthDialog(ctk.CTk):
         self._header("Create account", "Register as an employee to access Database Automation Pro")
 
         self.reg_name = self._labeled_entry(2, "Full name", placeholder="Your name")
-        self.reg_user = self._labeled_entry(3, "Username", placeholder="Choose a username")
-        self.reg_email = self._labeled_entry(4, "Email", placeholder="name@company.com (optional)")
-        self.reg_pass = self._labeled_password_entry(5, "Password", placeholder="At least 6 characters")
-        self.reg_confirm = self._labeled_password_entry(6, "Confirm", placeholder="Re-enter password")
+        self.reg_user = self._labeled_entry(4, "Username", placeholder="Choose a username")
+        self.reg_email = self._labeled_entry(6, "Email", placeholder="name@company.com (optional)")
+        self.reg_pass = self._labeled_password_entry(8, "Password", placeholder="At least 6 characters")
+        self.reg_confirm = self._labeled_password_entry(10, "Confirm password", placeholder="Re-enter password")
 
         primary_button(
             self.form_frame, self.theme, text="Register", command=self._on_register, height=46
-        ).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(20, 8))
+        ).grid(row=12, column=0, sticky="ew", pady=(20, 8))
 
-        ctk.CTkButton(
+        ghost_button(
             self.form_frame,
+            self.theme,
             text="Already have an account? Sign in",
-            height=34,
-            fg_color="transparent",
-            hover_color=self.theme.c("primary_muted"),
-            text_color=self.theme.c("primary"),
-            font=font(self.theme, 13),
             command=self._show_login,
-        ).grid(row=8, column=0, columnspan=2, sticky="ew")
+        ).grid(row=13, column=0, sticky="ew", pady=(4, 8))
 
         self.bind("<Return>", lambda _e: self._on_register())
         self.reg_name.focus_set()
-        self._center_window(580, 600)
+        self._schedule_fit()
 
     def _on_login(self) -> None:
         username = self.login_user.get().strip()
@@ -298,7 +363,7 @@ class AuthDialog(ctk.CTk):
 
         save_last_username(session.username)
         self.session = session
-        self.destroy()
+        self._safe_destroy()
 
     def _on_register(self) -> None:
         full_name = self.reg_name.get().strip()
@@ -343,10 +408,29 @@ class AuthDialog(ctk.CTk):
 
     def _on_close(self) -> None:
         self.session = None
-        self.destroy()
+        self._safe_destroy()
+
+    @staticmethod
+    def _cancel_pending_callbacks(widget) -> None:
+        try:
+            for after_id in widget.tk.call("after", "info"):
+                try:
+                    widget.after_cancel(after_id)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            AuthDialog._cancel_pending_callbacks(child)
+
+    def _safe_destroy(self) -> None:
+        self._cancel_pending_callbacks(self)
+        super().destroy()
 
     @staticmethod
     def show() -> EmployeeSession | None:
         dialog = AuthDialog()
+        dialog.update_idletasks()
+        dialog._fit_window()
         dialog.mainloop()
         return dialog.session

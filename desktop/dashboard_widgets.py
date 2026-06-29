@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Callable
-
 import customtkinter as ctk
 
-from desktop.design_system import font, status_chip
+from desktop.design_system import font, glass_surface, status_chip
 from desktop.theme import ThemeManager
 
 
@@ -19,20 +17,38 @@ def section_block(
 ) -> ctk.CTkFrame:
     """Titled dashboard section with inner content area."""
     wrap = ctk.CTkFrame(parent, fg_color="transparent")
-    wrap.pack(fill="x", pady=(0, 20))
+    wrap.pack(fill="x", pady=(0, 24))
 
     header = ctk.CTkFrame(wrap, fg_color="transparent")
-    header.pack(fill="x", pady=(0, 12))
-    ctk.CTkFrame(header, width=4, height=22, corner_radius=2, fg_color=theme.c("primary")).pack(side="left", padx=(0, 10))
+    header.pack(fill="x", pady=(0, 14))
+
+    accent_col = ctk.CTkFrame(header, width=4, fg_color="transparent")
+    accent_col.pack(side="left", fill="y", padx=(0, 14))
+    ctk.CTkFrame(accent_col, width=4, height=28, corner_radius=3, fg_color=theme.c("primary")).pack(anchor="n")
+    ctk.CTkFrame(accent_col, width=4, height=10, corner_radius=3, fg_color=theme.c("accent")).pack(anchor="n", pady=(4, 0))
+
     col = ctk.CTkFrame(header, fg_color="transparent")
     col.pack(side="left", fill="x", expand=True)
-    ctk.CTkLabel(col, text=title, font=font(theme, 18, weight="bold"), text_color=theme.c("text_primary"), anchor="w").pack(anchor="w")
+    ctk.CTkLabel(
+        col,
+        text=title,
+        font=font(theme, 20, weight="bold"),
+        text_color=theme.c("text_primary"),
+        anchor="w",
+    ).pack(anchor="w")
     if subtitle:
-        ctk.CTkLabel(col, text=subtitle, font=font(theme, 12), text_color=theme.c("text_muted"), anchor="w").pack(anchor="w", pady=(2, 0))
+        ctk.CTkLabel(
+            col,
+            text=subtitle,
+            font=font(theme, 12),
+            text_color=theme.c("text_muted"),
+            anchor="w",
+        ).pack(anchor="w", pady=(4, 0))
+
+    ctk.CTkFrame(wrap, height=1, fg_color=theme.c("border_subtle")).pack(fill="x", pady=(0, 16))
 
     body = ctk.CTkFrame(wrap, fg_color="transparent")
     body.pack(fill="x")
-    body._section_body = body  # type: ignore[attr-defined]
     return body
 
 
@@ -51,21 +67,17 @@ def analytics_card(
     *,
     accent: str | None = None,
 ) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
-    card = ctk.CTkFrame(
-        parent,
-        corner_radius=theme.radius("lg"),
-        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-        border_width=1,
-        border_color=theme.c("border"),
-    )
-    if accent:
-        ctk.CTkFrame(card, height=3, corner_radius=0, fg_color=accent).pack(fill="x")
-    inner = ctk.CTkFrame(card, fg_color="transparent")
-    inner.pack(fill="both", expand=True, padx=18, pady=16)
-    ctk.CTkLabel(inner, text=title.upper(), font=font(theme, 10, weight="bold"), text_color=theme.c("text_muted"), anchor="w").pack(anchor="w", pady=(0, 12))
+    shell, inner = glass_surface(parent, theme, accent=accent, hover=True)
+    ctk.CTkLabel(
+        inner,
+        text=title.upper(),
+        font=font(theme, 10, weight="bold"),
+        text_color=theme.c("text_muted"),
+        anchor="w",
+    ).pack(anchor="w", padx=20, pady=(18, 10))
     content = ctk.CTkFrame(inner, fg_color="transparent")
-    content.pack(fill="both", expand=True)
-    return card, content
+    content.pack(fill="both", expand=True, padx=20, pady=(0, 18))
+    return shell, content
 
 
 def gauge_row(
@@ -81,7 +93,7 @@ def gauge_row(
     ctk.CTkLabel(top, text=label, font=font(theme, 12), text_color=theme.c("text_secondary"), anchor="w").pack(side="left")
     val = ctk.CTkLabel(top, text="—", font=font(theme, 12, weight="bold"), text_color=theme.c("text_primary"))
     val.pack(side="right")
-    bar = ctk.CTkProgressBar(row, height=8, corner_radius=4, progress_color=color, fg_color=theme.c("bg_elevated"))
+    bar = ctk.CTkProgressBar(row, height=8, corner_radius=5, progress_color=color, fg_color=theme.c("bg_elevated"))
     bar.pack(fill="x", pady=(6, 0))
     bar.set(0)
     return bar, val
@@ -103,12 +115,19 @@ def resource_gauge(
         border_width=1,
         border_color=theme.c("border_subtle"),
     )
-    card.pack(fill="x", pady=5)
+    card.pack(fill="x", pady=6)
 
     inner = ctk.CTkFrame(card, fg_color="transparent")
-    inner.pack(fill="x", padx=14, pady=12)
+    inner.pack(fill="x", padx=16, pady=14)
 
-    header = ctk.CTkFrame(inner, fg_color="transparent")
+    accent_row = ctk.CTkFrame(inner, fg_color="transparent")
+    accent_row.pack(fill="x")
+    ctk.CTkFrame(accent_row, width=3, height=36, corner_radius=2, fg_color=color).pack(side="left", padx=(0, 12))
+
+    body = ctk.CTkFrame(accent_row, fg_color="transparent")
+    body.pack(side="left", fill="x", expand=True)
+
+    header = ctk.CTkFrame(body, fg_color="transparent")
     header.pack(fill="x")
 
     title = f"{icon}  {label}" if icon else label
@@ -123,24 +142,24 @@ def resource_gauge(
     value_label = ctk.CTkLabel(
         header,
         text="—",
-        font=font(theme, 20, weight="bold"),
+        font=font(theme, 22, weight="bold"),
         text_color=theme.c("text_primary"),
     )
     value_label.pack(side="right")
 
     detail_label = ctk.CTkLabel(
-        inner,
+        body,
         text="Collecting…",
         font=font(theme, 10),
         text_color=theme.c("text_muted"),
         anchor="w",
     )
-    detail_label.pack(anchor="w", pady=(6, 10))
+    detail_label.pack(anchor="w", pady=(8, 12))
 
     bar = ctk.CTkProgressBar(
-        inner,
-        height=7,
-        corner_radius=4,
+        body,
+        height=8,
+        corner_radius=5,
         progress_color=color,
         fg_color=theme.c("bg_card") if not theme.is_light else theme.c("border_subtle"),
     )
@@ -154,17 +173,25 @@ def host_stat_row(
     theme: ThemeManager,
     label: str,
 ) -> ctk.CTkLabel:
-    row = ctk.CTkFrame(parent, fg_color="transparent")
-    row.pack(fill="x", pady=4)
+    row = ctk.CTkFrame(
+        parent,
+        fg_color=theme.c("bg_elevated"),
+        corner_radius=theme.radius("sm"),
+        border_width=1,
+        border_color=theme.c("border_subtle"),
+    )
+    row.pack(fill="x", pady=3)
+    inner = ctk.CTkFrame(row, fg_color="transparent")
+    inner.pack(fill="x", padx=12, pady=8)
     ctk.CTkLabel(
-        row,
+        inner,
         text=label,
         font=font(theme, 11),
         text_color=theme.c("text_muted"),
         anchor="w",
     ).pack(side="left")
     value = ctk.CTkLabel(
-        row,
+        inner,
         text="—",
         font=font(theme, 11, weight="bold"),
         text_color=theme.c("text_primary"),
@@ -202,15 +229,14 @@ def metric_inline(
 
 
 def recent_activity_row(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) -> None:
-    """Compact activity row: timestamp + action (matches sidebar recent activity style)."""
     row = ctk.CTkFrame(
         parent,
         fg_color=theme.c("bg_elevated"),
-        corner_radius=theme.radius("sm"),
+        corner_radius=theme.radius("md"),
         border_width=1,
         border_color=theme.c("border_subtle"),
     )
-    row.pack(fill="x", pady=3)
+    row.pack(fill="x", pady=4)
     action = str(event.get("action", "event")).replace("_", " ").title()
     time_txt = str(event.get("time", ""))
     ctk.CTkLabel(
@@ -219,7 +245,7 @@ def recent_activity_row(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) 
         font=font(theme, 12),
         text_color=theme.c("text_primary"),
         anchor="w",
-    ).pack(anchor="w", padx=14, pady=10)
+    ).pack(anchor="w", padx=16, pady=12)
 
 
 def alert_row(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) -> None:
@@ -228,13 +254,13 @@ def alert_row(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) -> None:
     row = ctk.CTkFrame(
         parent,
         fg_color=theme.c("bg_elevated"),
-        corner_radius=theme.radius("sm"),
+        corner_radius=theme.radius("md"),
         border_width=1,
         border_color=theme.c("border_subtle"),
     )
-    row.pack(fill="x", pady=3)
+    row.pack(fill="x", pady=4)
     inner = ctk.CTkFrame(row, fg_color="transparent")
-    inner.pack(fill="x", padx=12, pady=8)
+    inner.pack(fill="x", padx=14, pady=10)
     ctk.CTkLabel(
         inner,
         text=str(event.get("action", "event")).replace("_", " ").title(),
@@ -251,4 +277,4 @@ def alert_row(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) -> None:
             font=font(theme, 11),
             text_color=theme.c("text_muted"),
             anchor="w",
-        ).pack(anchor="w", padx=12, pady=(0, 8))
+        ).pack(anchor="w", padx=14, pady=(0, 10))

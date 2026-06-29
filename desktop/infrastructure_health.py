@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from desktop.dashboard_widgets import analytics_card, panel_grid
-from desktop.design_system import font
+from desktop.dashboard_widgets import panel_grid
+from desktop.design_system import font, glass_surface
 from desktop.theme import ThemeManager
 
 
@@ -13,9 +13,9 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
     """Live connection health: servers, databases, backup, replication."""
 
     ROWS = [
-        ("servers", "Servers Online"),
-        ("databases", "Databases Healthy"),
-        ("backup", "Backup Status"),
+        ("servers", "Saved Server Profiles"),
+        ("databases", "Database Connection"),
+        ("backup", "Backup Status (Today)"),
         ("replication", "Replication Status"),
     ]
 
@@ -29,16 +29,25 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
 
     def _build(self) -> None:
         grid = panel_grid(self, self.theme, columns=1)
-        card, content = analytics_card(
+        shell, content = glass_surface(
             grid,
             self.theme,
-            "Infrastructure Health",
             accent=self.theme.c("primary"),
+            radius="lg",
         )
-        card.pack(fill="x", pady=4)
+        shell.pack(fill="x", pady=4)
+        ctk.CTkLabel(
+            content,
+            text="SERVICE STATUS",
+            font=font(self.theme, 10, weight="bold"),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        ).pack(anchor="w", padx=20, pady=(16, 8))
+        inner = ctk.CTkFrame(content, fg_color="transparent")
+        inner.pack(fill="x", padx=20, pady=(0, 16))
 
         for key, label in self.ROWS:
-            row = ctk.CTkFrame(content, fg_color="transparent")
+            row = ctk.CTkFrame(inner, fg_color="transparent")
             row.pack(fill="x", pady=8)
 
             ctk.CTkLabel(
@@ -119,15 +128,15 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
 
     def _health_color(self, token: str) -> str:
         token_l = token.lower()
-        if token_l in ("online", "healthy", "ok"):
+        if token_l in ("online", "healthy", "ok", "connected", "compliant"):
             return self.theme.c("success")
-        if token_l == "offline":
+        if token_l in ("offline", "disconnected"):
             return self.theme.c("error")
-        if token_l == "warning":
+        if token_l in ("warning", "failed", "attention"):
             return self.theme.c("warning")
-        if token_l in ("critical", "failed"):
+        if token_l in ("critical",):
             return self.theme.c("error")
-        if token_l in ("idle", "n/a"):
+        if token_l in ("idle", "n/a", "none", "saved"):
             return self.theme.c("text_muted")
         return self.theme.c("text_secondary")
 
@@ -142,9 +151,9 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
         raw = (text or "").strip()
         raw_l = raw.lower()
 
-        if raw_l in ("offline", "0 online") or raw.startswith("0 "):
+        if raw_l in ("offline", "disconnected", "0 online") or raw.startswith("0 "):
             prefix.configure(text="")
-            status.configure(text="Offline", text_color=self.theme.c("error"))
+            status.configure(text=raw or "Offline", text_color=self.theme.c("error"))
             self._stop_blink(key)
             dot.configure(fg_color=self.theme.c("error"))
             return
@@ -160,7 +169,25 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
             if blink_when_online:
                 self._start_blink(key)
             else:
+                self._stop_blink(key)
                 dot.configure(fg_color=self.theme.c("success"))
+            return
+
+        if "connected" in raw_l:
+            prefix.configure(text="")
+            status.configure(text=raw, text_color=self.theme.c("success"))
+            if blink_when_online:
+                self._start_blink(key)
+            else:
+                self._stop_blink(key)
+                dot.configure(fg_color=self.theme.c("success"))
+            return
+
+        if "saved" in raw_l:
+            prefix.configure(text="")
+            status.configure(text=raw, text_color=self.theme.c("text_secondary"))
+            self._stop_blink(key)
+            dot.configure(fg_color=self.theme.c("primary"))
             return
 
         if blink_when_online:
@@ -170,21 +197,10 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
 
         prefix.configure(text="")
         token = raw.split()[0] if raw else ""
-        status.configure(text=raw, text_color=self._health_color(token))
-
-    def update_from_connection(self, connected: bool) -> None:
-        """Refresh all rows from active connection state."""
-        servers_status = "1 Online" if connected else "Offline"
-        db_status = "Online" if connected else "Offline"
-        self.update_health(
-            servers=servers_status,
-            databases=db_status,
-            backup="OK" if connected else "Idle",
-            replication="N/A" if not connected else "OK",
-        )
+        status.configure(text=raw or "—", text_color=self._health_color(token))
 
     def update_health(self, *, servers: str, databases: str, backup: str, replication: str) -> None:
-        self._set_health_row("servers", servers, blink_when_online=True)
-        self._set_health_row("databases", databases)
+        self._set_health_row("servers", servers)
+        self._set_health_row("databases", databases, blink_when_online=True)
         self._set_health_row("backup", backup)
         self._set_health_row("replication", replication)
