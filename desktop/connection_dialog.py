@@ -9,36 +9,30 @@ import customtkinter as ctk
 
 from backend.models.schemas import DatabaseType
 from desktop.connection import ConnectionResult, DB_DEFAULTS, test_connection
+from desktop.connection_audit import log_connection_attempt
 from desktop.connection_store import SavedServer, load_saved_servers, remove_server, upsert_server
+from desktop.theme import ThemeManager
 from desktop.constants import APP_NAME
 from desktop.db_icons import DB_ICON_META
 
-# Layout tokens
-COLOR_BG = "#eef1f6"
-COLOR_SIDEBAR = "#1e293b"
-COLOR_SIDEBAR_HOVER = "#334155"
-COLOR_SIDEBAR_ACTIVE = "#2563eb"
-COLOR_CARD = "#ffffff"
-COLOR_CARD_BORDER = "#dde3ec"
-COLOR_TEXT = "#0f172a"
-COLOR_MUTED = "#64748b"
-COLOR_PRIMARY = "#2563eb"
-COLOR_PRIMARY_HOVER = "#1d4ed8"
-COLOR_SUCCESS = "#059669"
-COLOR_ERROR = "#dc2626"
-COLOR_WARNING = "#d97706"
-
+# Layout tokens (defaults; overridden per theme in __init__)
 SIDEBAR_WIDTH = 300
-ENTRY_HEIGHT = 36
+ENTRY_HEIGHT = 38
 ICON_TILE = 88
 
 
 class ConnectionDialog(ctk.CTkToplevel):
     """Database connection manager shown inside the main application session."""
 
-    def __init__(self, parent: ctk.CTk | None = None) -> None:
+    def __init__(self, parent: ctk.CTk | None = None, owner_username: str | None = None) -> None:
         super().__init__(parent)
         self._parent = parent
+        self._owner_username = owner_username
+        if parent is not None and hasattr(parent, "theme_manager"):
+            self._theme = parent.theme_manager
+        else:
+            self._theme = ThemeManager()
+        self._bind_dialog_colors()
         self.connection_result: ConnectionResult | None = None
         self._db_type_var = ctk.StringVar(value=DatabaseType.POSTGRESQL.value)
         self._connecting = False
@@ -49,11 +43,11 @@ class ConnectionDialog(ctk.CTkToplevel):
         self._password_visible = False
         self._linux_password_visible = False
 
-        ctk.set_appearance_mode("light")
-        ctk.set_default_color_theme("blue")
+        ctk.set_appearance_mode(self._theme.colors["appearance_mode"])
+        ctk.set_default_color_theme(self._theme.colors["self.COLOR_theme"])
 
         self.title(f"{APP_NAME} — Connect")
-        self.configure(fg_color=COLOR_BG)
+        self.configure(fg_color=self.COLOR_BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if parent is not None:
@@ -64,6 +58,22 @@ class ConnectionDialog(ctk.CTkToplevel):
         self._build_ui()
         self._refresh_saved_list()
         self._select_db_type(DatabaseType.POSTGRESQL)
+
+    def _bind_dialog_colors(self) -> None:
+        t = self._theme
+        self.COLOR_BG = t.c("bg_content")
+        self.COLOR_SIDEBAR = t.sc("bg_sidebar")
+        self.COLOR_SIDEBAR_HOVER = t.sc("bg_hover")
+        self.COLOR_SIDEBAR_ACTIVE = t.sc("nav_active")
+        self.COLOR_CARD = t.c("bg_card")
+        self.COLOR_CARD_BORDER = t.c("border")
+        self.COLOR_TEXT = t.c("text_primary")
+        self.COLOR_MUTED = t.c("text_muted")
+        self.COLOR_PRIMARY = t.c("primary")
+        self.COLOR_PRIMARY_HOVER = t.c("primary_hover")
+        self.COLOR_SUCCESS = t.c("success")
+        self.COLOR_ERROR = t.c("error")
+        self.COLOR_WARNING = t.c("warning")
 
     def _apply_fullscreen(self) -> None:
         self.update_idletasks()
@@ -103,7 +113,7 @@ class ConnectionDialog(ctk.CTkToplevel):
         self.bind("<Return>", lambda _e: self._on_connect())
 
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, height=64, corner_radius=0, fg_color=COLOR_CARD, border_width=1, border_color=COLOR_CARD_BORDER)
+        header = ctk.CTkFrame(self, height=64, corner_radius=0, fg_color=self.COLOR_CARD, border_width=1, border_color=self.COLOR_CARD_BORDER)
         header.grid(row=0, column=0, columnspan=2, sticky="ew")
         header.grid_propagate(False)
 
@@ -111,18 +121,18 @@ class ConnectionDialog(ctk.CTkToplevel):
             header,
             text=APP_NAME,
             font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=COLOR_TEXT,
+            text_color=self.COLOR_TEXT,
         ).pack(side="left", padx=24, pady=16)
 
         ctk.CTkLabel(
             header,
             text="Configure and connect to your database",
             font=ctk.CTkFont(size=13),
-            text_color=COLOR_MUTED,
+            text_color=self.COLOR_MUTED,
         ).pack(side="left", padx=(4, 0), pady=16)
 
     def _build_sidebar(self) -> None:
-        sidebar = ctk.CTkFrame(self, width=SIDEBAR_WIDTH, corner_radius=0, fg_color=COLOR_SIDEBAR)
+        sidebar = ctk.CTkFrame(self, width=SIDEBAR_WIDTH, corner_radius=0, fg_color=self.COLOR_SIDEBAR)
         sidebar.grid(row=1, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
 
@@ -141,7 +151,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             top,
             text="+  New Connection",
             height=36,
-            fg_color=COLOR_SIDEBAR_HOVER,
+            fg_color=self.COLOR_SIDEBAR_HOVER,
             hover_color="#475569",
             anchor="center",
             command=self._new_connection,
@@ -176,7 +186,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             text="💾  Save Connection",
             height=38,
             corner_radius=8,
-            fg_color=COLOR_SIDEBAR_HOVER,
+            fg_color=self.COLOR_SIDEBAR_HOVER,
             hover_color="#475569",
             anchor="center",
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -197,7 +207,7 @@ class ConnectionDialog(ctk.CTkToplevel):
         ).pack(fill="x")
 
     def _build_main_panel(self) -> None:
-        main = ctk.CTkFrame(self, fg_color=COLOR_BG, corner_radius=0)
+        main = ctk.CTkFrame(self, fg_color=self.COLOR_BG, corner_radius=0)
         main.grid(row=1, column=1, sticky="nsew", padx=24, pady=20)
         main.grid_rowconfigure(0, weight=1)
         main.grid_columnconfigure(0, weight=1)
@@ -213,20 +223,20 @@ class ConnectionDialog(ctk.CTkToplevel):
         footer.grid(row=1, column=0, sticky="ew", pady=(16, 0))
         footer.grid_columnconfigure(0, weight=1)
 
-        self.status_frame = ctk.CTkFrame(footer, corner_radius=8, fg_color="#f8fafc", border_width=1, border_color=COLOR_CARD_BORDER)
+        self.status_frame = ctk.CTkFrame(footer, corner_radius=8, fg_color="#f8fafc", border_width=1, border_color=self.COLOR_CARD_BORDER)
         self.status_frame.grid(row=0, column=0, sticky="ew", pady=(0, 14))
 
         status_inner = ctk.CTkFrame(self.status_frame, fg_color="transparent")
         status_inner.pack(fill="x", padx=14, pady=10)
 
-        self.status_indicator = ctk.CTkLabel(status_inner, text="●", font=ctk.CTkFont(size=14), text_color=COLOR_MUTED)
+        self.status_indicator = ctk.CTkLabel(status_inner, text="●", font=ctk.CTkFont(size=14), text_color=self.COLOR_MUTED)
         self.status_indicator.pack(side="left", padx=(0, 8))
 
         self.status_label = ctk.CTkLabel(
             status_inner,
             text="Enter connection details, then test or connect.",
             font=ctk.CTkFont(size=12),
-            text_color=COLOR_MUTED,
+            text_color=self.COLOR_MUTED,
             anchor="w",
             justify="left",
             wraplength=700,
@@ -243,8 +253,8 @@ class ConnectionDialog(ctk.CTkToplevel):
             height=40,
             fg_color="transparent",
             border_width=1,
-            border_color=COLOR_CARD_BORDER,
-            text_color=COLOR_TEXT,
+            border_color=self.COLOR_CARD_BORDER,
+            text_color=self.COLOR_TEXT,
             hover_color="#e2e8f0",
             command=self._on_test,
         )
@@ -256,8 +266,8 @@ class ConnectionDialog(ctk.CTkToplevel):
             width=180,
             height=44,
             font=ctk.CTkFont(size=15, weight="bold"),
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_PRIMARY_HOVER,
+            fg_color=self.COLOR_PRIMARY,
+            hover_color=self.COLOR_PRIMARY_HOVER,
             command=self._on_connect,
         )
         self.connect_btn.pack(side="left")
@@ -266,9 +276,9 @@ class ConnectionDialog(ctk.CTkToplevel):
         card = ctk.CTkFrame(
             parent,
             corner_radius=12,
-            fg_color=COLOR_CARD,
+            fg_color=self.COLOR_CARD,
             border_width=1,
-            border_color=COLOR_CARD_BORDER,
+            border_color=self.COLOR_CARD_BORDER,
         )
         card.pack(fill="x", pady=(0, 16))
 
@@ -276,7 +286,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             card,
             text=title.upper(),
             font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLOR_MUTED,
+            text_color=self.COLOR_MUTED,
         ).pack(anchor="w", padx=20, pady=(16, 12))
 
         body = ctk.CTkFrame(card, fg_color="transparent")
@@ -310,7 +320,7 @@ class ConnectionDialog(ctk.CTkToplevel):
                 corner_radius=10,
                 fg_color="#f8fafc",
                 border_width=2,
-                border_color=COLOR_CARD_BORDER,
+                border_color=self.COLOR_CARD_BORDER,
             )
             tile.grid(row=0, column=index, padx=(0, 10) if index < len(DatabaseType) - 1 else 0, sticky="n")
             tile.pack_propagate(False)
@@ -324,7 +334,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             badge.pack(pady=(0, 6))
             badge.bind("<Button-1>", lambda _e, dt=db_type: self._select_db_type(dt))
 
-            label = ctk.CTkLabel(inner, text=meta["label"], font=ctk.CTkFont(size=11), text_color=COLOR_TEXT)
+            label = ctk.CTkLabel(inner, text=meta["label"], font=ctk.CTkFont(size=11), text_color=self.COLOR_TEXT)
             label.pack()
             label.bind("<Button-1>", lambda _e, dt=db_type: self._select_db_type(dt))
 
@@ -354,7 +364,7 @@ class ConnectionDialog(ctk.CTkToplevel):
         self.host_entry = ctk.CTkEntry(host_row, height=ENTRY_HEIGHT, placeholder_text="localhost")
         self.host_entry.insert(0, "localhost")
         self.host_entry.grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(host_row, text="Port", font=ctk.CTkFont(size=12), text_color=COLOR_MUTED).grid(row=0, column=1, padx=(12, 6))
+        ctk.CTkLabel(host_row, text="Port", font=ctk.CTkFont(size=12), text_color=self.COLOR_MUTED).grid(row=0, column=1, padx=(12, 6))
         self.port_entry = ctk.CTkEntry(host_row, width=90, height=ENTRY_HEIGHT)
         self.port_entry.insert(0, "5432")
         self.port_entry.grid(row=0, column=2)
@@ -377,9 +387,9 @@ class ConnectionDialog(ctk.CTkToplevel):
             height=ENTRY_HEIGHT,
             fg_color="#f1f5f9",
             hover_color="#e2e8f0",
-            text_color=COLOR_TEXT,
+            text_color=self.COLOR_TEXT,
             border_width=1,
-            border_color=COLOR_CARD_BORDER,
+            border_color=self.COLOR_CARD_BORDER,
             font=ctk.CTkFont(size=16),
             command=self._toggle_password_visibility,
         )
@@ -393,7 +403,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             body,
             text="Auth database",
             font=ctk.CTkFont(size=12),
-            text_color=COLOR_TEXT,
+            text_color=self.COLOR_TEXT,
             width=130,
             anchor="w",
         )
@@ -409,7 +419,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             body,
             text="Oracle: use Service name (ORCL, XEPDB1). Other engines use database name defaults.",
             font=ctk.CTkFont(size=11),
-            text_color=COLOR_MUTED,
+            text_color=self.COLOR_MUTED,
             wraplength=560,
             justify="left",
         )
@@ -460,9 +470,9 @@ class ConnectionDialog(ctk.CTkToplevel):
             height=ENTRY_HEIGHT,
             fg_color="#f1f5f9",
             hover_color="#e2e8f0",
-            text_color=COLOR_TEXT,
+            text_color=self.COLOR_TEXT,
             border_width=1,
-            border_color=COLOR_CARD_BORDER,
+            border_color=self.COLOR_CARD_BORDER,
             font=ctk.CTkFont(size=16),
             command=self._toggle_linux_password_visibility,
         )
@@ -475,7 +485,7 @@ class ConnectionDialog(ctk.CTkToplevel):
                 "The app opens an SSH tunnel, then connects with the DB username/password below."
             ),
             font=ctk.CTkFont(size=11),
-            text_color=COLOR_MUTED,
+            text_color=self.COLOR_MUTED,
             wraplength=560,
             justify="left",
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
@@ -537,13 +547,13 @@ class ConnectionDialog(ctk.CTkToplevel):
             parent,
             text=text,
             font=ctk.CTkFont(size=12),
-            text_color=COLOR_TEXT,
+            text_color=self.COLOR_TEXT,
             width=130,
             anchor="w",
         ).grid(row=row, column=0, sticky="w", pady=6)
 
     def _find_saved_for_type(self, db_type: DatabaseType) -> SavedServer | None:
-        for server in load_saved_servers():
+        for server in load_saved_servers(self._owner_username):
             if server.db_type == db_type.value:
                 return server
         return None
@@ -554,7 +564,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             if value == db_type.value:
                 tile.configure(border_color=accent, fg_color="#eff6ff")
             else:
-                tile.configure(border_color=COLOR_CARD_BORDER, fg_color="#f8fafc")
+                tile.configure(border_color=self.COLOR_CARD_BORDER, fg_color="#f8fafc")
 
     def _select_db_type(self, db_type: DatabaseType) -> None:
         self._db_type_var.set(db_type.value)
@@ -621,7 +631,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             widget.destroy()
         self._saved_list_buttons.clear()
 
-        servers = load_saved_servers()
+        servers = load_saved_servers(self._owner_username)
         if not servers:
             ctk.CTkLabel(
                 self.saved_list,
@@ -640,7 +650,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             item = ctk.CTkFrame(
                 self.saved_list,
                 corner_radius=8,
-                fg_color=COLOR_SIDEBAR_ACTIVE if active else COLOR_SIDEBAR_HOVER,
+                fg_color=self.COLOR_SIDEBAR_ACTIVE if active else self.COLOR_SIDEBAR_HOVER,
             )
             item.pack(fill="x", pady=3)
 
@@ -708,7 +718,7 @@ class ConnectionDialog(ctk.CTkToplevel):
 
     def _highlight_saved_selection(self) -> None:
         for name, item in self._saved_list_buttons.items():
-            item.configure(fg_color=COLOR_SIDEBAR_ACTIVE if name == self._selected_saved else COLOR_SIDEBAR_HOVER)
+            item.configure(fg_color=self.COLOR_SIDEBAR_ACTIVE if name == self._selected_saved else self.COLOR_SIDEBAR_HOVER)
 
     def _new_connection(self) -> None:
         self._selected_saved = None
@@ -820,7 +830,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             ssh_host=connection.ssh_host or "",
             ssh_port=connection.ssh_port,
         )
-        upsert_server(server)
+        upsert_server(server, self._owner_username)
         self._selected_saved = name
         self.connection_name_entry.delete(0, "end")
         self.connection_name_entry.insert(0, name)
@@ -837,7 +847,7 @@ class ConnectionDialog(ctk.CTkToplevel):
             self._set_status("Select a saved connection to delete.", "warning")
             return
         name = self._selected_saved
-        if remove_server(name):
+        if remove_server(name, self._owner_username):
             self._selected_saved = None
             self._refresh_saved_list()
             self._new_connection()
@@ -847,10 +857,10 @@ class ConnectionDialog(ctk.CTkToplevel):
 
     def _set_status(self, message: str, level: str = "info") -> None:
         colors = {
-            "info": (COLOR_MUTED, "#f8fafc"),
-            "warning": (COLOR_WARNING, "#fffbeb"),
-            "error": (COLOR_ERROR, "#fef2f2"),
-            "success": (COLOR_SUCCESS, "#ecfdf5"),
+            "info": (self.COLOR_MUTED, "#f8fafc"),
+            "warning": (self.COLOR_WARNING, "#fffbeb"),
+            "error": (self.COLOR_ERROR, "#fef2f2"),
+            "success": (self.COLOR_SUCCESS, "#ecfdf5"),
         }
         text_color, bg = colors.get(level, colors["info"])
         self.status_indicator.configure(text_color=text_color)
@@ -954,6 +964,12 @@ class ConnectionDialog(ctk.CTkToplevel):
                 self.after(300, self.destroy)
         else:
             self._set_status(message, "error")
+            log_connection_attempt(
+                self._owner_username,
+                connection,
+                success=False,
+                error=message,
+            )
 
     def _on_close(self) -> None:
         self.connection_result = None
@@ -964,8 +980,11 @@ class ConnectionDialog(ctk.CTkToplevel):
         self.destroy()
 
     @staticmethod
-    def show(parent: ctk.CTk | None = None) -> ConnectionResult | None:
-        dialog = ConnectionDialog(parent)
+    def show(
+        parent: ctk.CTk | None = None,
+        owner_username: str | None = None,
+    ) -> ConnectionResult | None:
+        dialog = ConnectionDialog(parent, owner_username=owner_username)
         if parent is not None:
             dialog.grab_set()
             dialog.focus_force()

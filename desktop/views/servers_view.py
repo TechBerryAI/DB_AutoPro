@@ -7,6 +7,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from desktop.connection_store import SavedServer, load_saved_servers
+from desktop.design_system import destructive_button, primary_button
 from desktop.theme import ThemeManager
 from desktop.ui_components import panel_card, section_header
 from desktop.views.base_view import BaseView
@@ -67,24 +68,20 @@ class ServersView(BaseView):
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.pack(fill="x")
 
-        ctk.CTkButton(
+        primary_button(
             actions,
+            self.theme,
             text="Connect to Server",
-            height=40,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color=self.theme.c("primary"),
-            hover_color=self.theme.c("primary_hover"),
             command=self._connect,
+            height=42,
         ).pack(side="left", padx=(0, 10))
 
-        self._disconnect_btn = ctk.CTkButton(
+        self._disconnect_btn = destructive_button(
             actions,
+            self.theme,
             text="Disconnect",
-            height=40,
-            fg_color="#7f1d1d",
-            hover_color="#ef4444",
-            text_color="#fecaca",
             command=self._disconnect,
+            height=42,
         )
         self._disconnect_btn.pack(side="left")
 
@@ -101,7 +98,7 @@ class ServersView(BaseView):
                 text=(
                     f"Connected to {self.connection.name}\n"
                     f"{self.connection.db_type.value.upper()} · "
-                    f"{self.connection.host}:{self.connection.port} · "
+                    f"{self.connection.endpoint_label} · "
                     f"{self.connection.database}"
                 ),
                 text_color=self.theme.c("text_primary"),
@@ -118,7 +115,7 @@ class ServersView(BaseView):
             child.destroy()
         self._connect_buttons.clear()
 
-        servers = load_saved_servers()
+        servers = load_saved_servers(self.owner_username)
         if not servers:
             ctk.CTkLabel(
                 self._saved_frame,
@@ -133,7 +130,9 @@ class ServersView(BaseView):
             row = ctk.CTkFrame(
                 self._saved_frame,
                 fg_color=self.theme.c("bg_elevated"),
-                corner_radius=8,
+                corner_radius=self.theme.radius("md"),
+                border_width=1,
+                border_color=self.theme.c("border_subtle"),
             )
             row.pack(fill="x", pady=4)
 

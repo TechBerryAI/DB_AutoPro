@@ -7,6 +7,7 @@ import customtkinter as ctk
 from backend.core.config import get_settings
 from desktop.constants import APP_NAME
 from desktop.theme import ThemeManager
+from desktop.design_system import primary_button
 from desktop.ui_components import section_header
 from desktop.views.base_view import BaseView
 
@@ -79,16 +80,13 @@ class SettingsView(BaseView):
             font=ctk.CTkFont(size=13),
             text_color=self.theme.c("text_secondary"),
         ).pack(side="left", padx=(0, 12))
-        ctk.CTkButton(
+        primary_button(
             theme_frame,
+            self.theme,
             text="Toggle Dark / Light",
             command=self._toggle_theme,
-            width=160,
-            height=36,
-            corner_radius=8,
-            fg_color=self.theme.c("primary"),
-            hover_color=self.theme.c("primary_hover"),
-            font=ctk.CTkFont(size=13, weight="bold"),
+            width=180,
+            height=40,
         ).pack(side="left")
 
     def _toggle_theme(self) -> None:

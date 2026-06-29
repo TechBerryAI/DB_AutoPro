@@ -39,19 +39,37 @@ class ConnectionResult:
     ssh_port: int = 22
     mongodump_path: str = ""
     remote_backup_dir: str = ""
+    display_host: str | None = None
+    display_port: int | None = None
 
     @property
     def summary(self) -> str:
         return (
             f"{self.name}  |  {self.db_type.value}  |  "
-            f"{self.host}:{self.port}  |  {self.database}"
+            f"{self.endpoint_label}  |  {self.database}"
         )
 
+    @property
+    def endpoint_label(self) -> str:
+        return f"{self.endpoint_host}:{self.endpoint_port}"
+
+    @property
+    def endpoint_host(self) -> str:
+        return self.display_host or self.host
+
+    @property
+    def endpoint_port(self) -> int:
+        return self.display_port if self.display_port is not None else self.port
+
     def _extra_options(self) -> dict:
+        remote_host = self.endpoint_host
+        remote_port = self.endpoint_port
         opts: dict = {
             "connect_timeout": 10,
-            "mongo_host": self.host,
-            "mongo_port": self.port,
+            "mongo_host": remote_host,
+            "mongo_port": remote_port,
+            "db_host": remote_host,
+            "db_port": remote_port,
         }
         if self.db_type == DatabaseType.MONGODB and self.auth_database:
             opts["auth_source"] = self.auth_database

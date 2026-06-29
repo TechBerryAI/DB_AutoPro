@@ -6,6 +6,8 @@ import json
 import os
 import platform
 import shlex
+import socket
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,34 @@ from backend.services.patch_service import PatchService
 
 logger = get_logger("services.monitoring")
 
+_NETWORK_BAR_CAP_BPS = 10 * 1024 * 1024  # 10 MB/s reference for utilization bar
+
+
+def _disk_usage_path() -> str:
+    if platform.system() == "Windows":
+        return os.environ.get("SystemDrive", "C:") + os.sep
+    return "/"
+
+
+def _format_uptime(seconds: float) -> str:
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _format_bytes_per_sec(bps: float) -> str:
+    if bps < 1024:
+        return f"{bps:.0f} B/s"
+    if bps < 1024 * 1024:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps / (1024 * 1024):.1f} MB/s"
+
 
 class MonitoringService:
     """Provides health checks, metrics, and dashboard statistics."""
@@ -29,6 +59,8 @@ class MonitoringService:
         self.settings = get_settings()
         self.backup_service = BackupService()
         self.patch_service = PatchService()
+        self._net_sample: tuple[float, int, int] | None = None
+        self._cpu_ready = False
 
     def health_check(self) -> list[HealthCheckResult]:
         """Run health checks on application and configured databases."""
@@ -71,20 +103,75 @@ class MonitoringService:
         return results
 
     def get_system_metrics(self) -> dict:
-        """Collect system resource metrics."""
-        disk = psutil.disk_usage("/")
+        """Collect live system resource metrics from the local host."""
+        disk_path = _disk_usage_path()
+        disk = psutil.disk_usage(disk_path)
+        memory = psutil.virtual_memory()
+        now = time.time()
+
+        if not self._cpu_ready:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            self._cpu_ready = True
+        else:
+            cpu_percent = psutil.cpu_percent(interval=None)
+
+        freq = psutil.cpu_freq()
+        cpu_freq_mhz = round(freq.current, 0) if freq and freq.current else None
+
+        counters = psutil.net_io_counters()
+        sent_bps = 0.0
+        recv_bps = 0.0
+        if counters and self._net_sample is not None:
+            elapsed = max(now - self._net_sample[0], 0.001)
+            sent_bps = max(0.0, (counters.bytes_sent - self._net_sample[1]) / elapsed)
+            recv_bps = max(0.0, (counters.bytes_recv - self._net_sample[2]) / elapsed)
+        if counters:
+            self._net_sample = (now, counters.bytes_sent, counters.bytes_recv)
+
+        total_bps = sent_bps + recv_bps
+        throughput_pct = min(100.0, (total_bps / _NETWORK_BAR_CAP_BPS) * 100) if total_bps else 0.0
+
+        boot_ts = psutil.boot_time()
+        uptime_seconds = max(0.0, now - boot_ts)
+        hostname = socket.gethostname()
+        os_label = f"{platform.system()} {platform.release()}"
+
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "cpu_percent": cpu_percent,
+            "cpu_count": psutil.cpu_count(logical=True) or 0,
+            "cpu_freq_mhz": cpu_freq_mhz,
             "memory": {
-                "total_mb": round(psutil.virtual_memory().total / (1024 * 1024), 2),
-                "used_mb": round(psutil.virtual_memory().used / (1024 * 1024), 2),
-                "percent": psutil.virtual_memory().percent,
+                "total_mb": round(memory.total / (1024 * 1024), 2),
+                "used_mb": round(memory.used / (1024 * 1024), 2),
+                "available_mb": round(memory.available / (1024 * 1024), 2),
+                "percent": memory.percent,
             },
             "disk": {
+                "path": disk_path,
                 "total_gb": round(disk.total / (1024 ** 3), 2),
                 "used_gb": round(disk.used / (1024 ** 3), 2),
+                "free_gb": round(disk.free / (1024 ** 3), 2),
                 "percent": disk.percent,
+            },
+            "network": {
+                "bytes_sent": counters.bytes_sent if counters else 0,
+                "bytes_recv": counters.bytes_recv if counters else 0,
+                "sent_bps": round(sent_bps, 1),
+                "recv_bps": round(recv_bps, 1),
+                "total_bps": round(total_bps, 1),
+                "throughput_pct": round(throughput_pct, 1),
+                "sent_label": _format_bytes_per_sec(sent_bps),
+                "recv_label": _format_bytes_per_sec(recv_bps),
+                "total_label": _format_bytes_per_sec(total_bps),
+            },
+            "host": {
+                "hostname": hostname,
+                "os": os_label,
+                "uptime_seconds": round(uptime_seconds),
+                "uptime_label": _format_uptime(uptime_seconds),
+                "boot_time": datetime.fromtimestamp(boot_ts, tz=timezone.utc).isoformat(),
+                "process_count": len(psutil.pids()),
             },
             "platform": platform.platform(),
         }
@@ -147,17 +234,24 @@ class MonitoringService:
         self,
         actions: tuple[str, ...] = ("backup", "restore"),
         db_type: DatabaseType | None = None,
+        user: str | None = None,
     ) -> tuple[int, int]:
         """Count success/failed audit entries for today (local calendar day)."""
         success = 0
         failed = 0
         today = datetime.now().astimezone().date()
+        user_key = user.strip().lower() if user else None
 
         for record in self._iter_audit_records():
             data = record.get("data", {})
             action = str(data.get("action", "")).lower()
             if action not in actions:
                 continue
+
+            if user_key:
+                rec_user = str(data.get("user", "")).strip().lower()
+                if rec_user != user_key:
+                    continue
 
             details = data.get("details") or {}
             if db_type:

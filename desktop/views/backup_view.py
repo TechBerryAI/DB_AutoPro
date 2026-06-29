@@ -84,7 +84,7 @@ class BackupView(BaseView):
         if not self.connection:
             return None
         lookup = self.connection.saved_name or self.connection.name
-        for server in load_saved_servers():
+        for server in load_saved_servers(self.owner_username):
             if server.name == lookup and server.db_type == DatabaseType.MONGODB.value:
                 return server
         return None
@@ -101,7 +101,7 @@ class BackupView(BaseView):
         server.backup_folder_name = self.backup_folder_entry.get().strip()
         coll = self._selected_collection()
         server.backup_collection = coll or ""
-        upsert_server(server)
+        upsert_server(server, self.owner_username)
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
