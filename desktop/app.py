@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import sys
-import threading
 
 import customtkinter as ctk
 
 from backend.core.config import get_settings
-from desktop.connection import ConnectionResult, apply_connection, test_connection
-from desktop.connection_store import SavedServer
-from desktop.connection_dialog import ConnectionDialog
+from desktop.connection import ConnectionResult, apply_connection
 from backend.core.logging import setup_logging
 from desktop.ssh_tunnel import close_ssh_tunnel, open_ssh_tunnel
 from desktop.employee_store import EmployeeSession
@@ -23,8 +20,12 @@ from desktop.views.backup_view import BackupView
 from desktop.views.dashboard import DashboardView
 from desktop.views.databases_view import DatabasesView
 from desktop.views.logs_view import LogsView
-from desktop.views.monitoring_view import MonitoringView
+from desktop.views.reports_view import ReportsView
 from desktop.views.restore_view import RestoreView
+from backend.models.schemas import DatabaseType
+from desktop.connection_panel import SERVER_SUBCATEGORIES
+from desktop.connection_store import load_saved_servers
+from desktop.db_icons import DB_ICON_META
 from desktop.views.servers_view import ServersView
 from desktop.views.settings_view import SettingsView
 
@@ -35,11 +36,15 @@ NAV_ITEMS = [
     ("backup", "Backup", BackupView),
     ("restore", "Restore", RestoreView),
     ("logs", "Logs", LogsView),
-    ("reports", "Reports", MonitoringView),
+    ("reports", "Reports", ReportsView),
     ("settings", "Settings", SettingsView),
 ]
 
 SIDEBAR_WIDTH = 280
+
+SERVERS_ENGINE_SUBNAV: list[tuple[str, str]] = [
+    (db_type.value, label) for db_type, label in SERVER_SUBCATEGORIES
+]
 
 # Disconnect always uses strong red (same in light and dark mode).
 DISCONNECT_BTN_FG = "#7f1d1d"
@@ -59,6 +64,12 @@ class DatabaseAutomationApp(ctk.CTk):
         self.theme_manager = ThemeManager()
         self.views: dict[str, ctk.CTkFrame] = {}
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
+        self._servers_sub_buttons: dict[str, ctk.CTkButton] = {}
+        self._servers_saved_buttons: dict[str, ctk.CTkButton] = {}
+        self._servers_subnav_frame: ctk.CTkFrame | None = None
+        self._servers_saved_frame: ctk.CTkFrame | None = None
+        self._servers_filter = "all"
+        self._active_saved_connection: str | None = None
         self._t = self.theme_manager
         self._active_nav = "dashboard"
         self._brand_title: ctk.CTkLabel | None = None
@@ -232,10 +243,55 @@ class DatabaseAutomationApp(ctk.CTk):
                 text_color=self._t.sc("text_secondary") if self._t.is_light else self._t.c("nav_idle_text"),
                 hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
                 font=ctk.CTkFont(size=13),
-                command=lambda k=key: self.navigate(k),
+                command=(
+                    (lambda: self._navigate_servers("all"))
+                    if key == "servers"
+                    else (lambda k=key: self.navigate(k))
+                ),
             )
             btn.pack(fill="x", pady=2, padx=4)
             self.nav_buttons[key] = btn
+
+            if key == "servers":
+                self._servers_subnav_frame = ctk.CTkFrame(nav_scroll, fg_color="transparent")
+                self._servers_subnav_frame.pack(fill="x", pady=(0, 4))
+                self._servers_subnav_frame.pack_forget()
+
+                all_btn = ctk.CTkButton(
+                    self._servers_subnav_frame,
+                    text="      Saved Connection",
+                    anchor="w",
+                    height=30,
+                    corner_radius=6,
+                    fg_color="transparent",
+                    text_color=self._t.sc("text_muted") if self._t.is_light else self._t.c("text_muted"),
+                    hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
+                    font=ctk.CTkFont(size=12),
+                    command=lambda: self._navigate_servers("all"),
+                )
+                all_btn.pack(fill="x", pady=1, padx=8)
+                self._servers_sub_buttons["all"] = all_btn
+
+                self._servers_saved_frame = ctk.CTkFrame(self._servers_subnav_frame, fg_color="transparent")
+                self._servers_saved_frame.pack(fill="x", padx=4, pady=(0, 4))
+
+                for sub_key, sub_label in SERVERS_ENGINE_SUBNAV:
+                    sub_btn = ctk.CTkButton(
+                        self._servers_subnav_frame,
+                        text=f"      {sub_label}",
+                        anchor="w",
+                        height=30,
+                        corner_radius=6,
+                        fg_color="transparent",
+                        text_color=self._t.sc("text_muted") if self._t.is_light else self._t.c("text_muted"),
+                        hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
+                        font=ctk.CTkFont(size=12),
+                        command=lambda sk=sub_key: self._navigate_servers(sk),
+                    )
+                    sub_btn.pack(fill="x", pady=1, padx=8)
+                    self._servers_sub_buttons[sub_key] = sub_btn
+
+                self._refresh_servers_saved_nav()
 
         # Row 3: theme toggle
         footer = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -315,38 +371,16 @@ class DatabaseAutomationApp(ctk.CTk):
         if dash and hasattr(dash, "refresh"):
             dash.refresh()
 
-    def connect_server(self, *, saved: SavedServer | None = None) -> None:
-        if saved is not None:
-            self._connect_saved_server(saved)
-            return
-        connection = ConnectionDialog.show(parent=self)
-        if not connection:
-            return
-        self._establish_connection(connection)
+    def manage_connections(self) -> None:
+        """Open the inline server connection workspace."""
+        self.navigate("servers", log=False)
 
-    def _connect_saved_server(self, server: SavedServer) -> None:
-        connection = server.to_connection_result()
-        self.append_log(f"Connecting to {server.name} ({server.db_type.upper()})...", "INFO")
-
-        def run() -> None:
-            ok, message = test_connection(connection)
-            self.after(0, lambda: self._on_saved_connect_complete(ok, message, connection))
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _on_saved_connect_complete(
+    def _establish_connection(
         self,
-        ok: bool,
-        message: str,
         connection: ConnectionResult,
+        *,
+        navigate_to: str | None = "databases",
     ) -> None:
-        if ok:
-            self.append_log(message, "SUCCESS")
-            self._establish_connection(connection)
-        else:
-            self.append_log(message, "ERROR")
-
-    def _establish_connection(self, connection: ConnectionResult) -> None:
         close_ssh_tunnel()
         apply_connection(connection)
         effective = open_ssh_tunnel(connection)
@@ -356,7 +390,7 @@ class DatabaseAutomationApp(ctk.CTk):
             if profile in settings.connections:
                 settings.connections[profile].host = effective.host
                 settings.connections[profile].port = effective.port
-        self.set_connection(connection, navigate_to="databases")
+        self.set_connection(connection, navigate_to=navigate_to)
 
     def set_connection(
         self,
@@ -397,6 +431,118 @@ class DatabaseAutomationApp(ctk.CTk):
     def update_status_footer(self, **kwargs) -> None:
         self.status_footer.update(**kwargs)
 
+    def _on_saved_connection_changed(self, name: str | None = None) -> None:
+        if name:
+            self._active_saved_connection = name
+            self._servers_filter = "all"
+        self._refresh_servers_saved_nav()
+
+    def _navigate_servers(self, servers_filter: str) -> None:
+        self._active_saved_connection = None
+        self.navigate("servers", view_extra={"servers_filter": servers_filter})
+
+    def _navigate_saved_server(self, server_name: str) -> None:
+        self._active_saved_connection = server_name
+        self.navigate(
+            "servers",
+            view_extra={"servers_filter": "all", "saved_server": server_name},
+        )
+
+    def _refresh_servers_saved_nav(self) -> None:
+        if self._servers_saved_frame is None:
+            return
+
+        for widget in self._servers_saved_frame.winfo_children():
+            widget.destroy()
+        self._servers_saved_buttons.clear()
+
+        servers = sorted(load_saved_servers(), key=lambda s: s.name.lower())
+        t = self._t
+
+        if not servers:
+            ctk.CTkLabel(
+                self._servers_saved_frame,
+                text="No saved connections",
+                font=ctk.CTkFont(size=11),
+                text_color=t.sc("text_muted") if t.is_light else t.c("text_muted"),
+                anchor="w",
+            ).pack(anchor="w", padx=18, pady=(2, 4))
+            self._style_servers_subnav()
+            return
+
+        for server in servers:
+            db_type = DatabaseType(server.db_type)
+            meta = DB_ICON_META.get(db_type, {"abbrev": "DB"})
+            btn = ctk.CTkButton(
+                self._servers_saved_frame,
+                text=f"          {meta['abbrev']}  {server.name}",
+                anchor="w",
+                height=28,
+                corner_radius=6,
+                fg_color="transparent",
+                text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
+                hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
+                font=ctk.CTkFont(size=11),
+                command=lambda name=server.name: self._navigate_saved_server(name),
+            )
+            btn.pack(fill="x", pady=1, padx=12)
+            self._servers_saved_buttons[server.name] = btn
+
+        self._style_servers_subnav()
+
+    def _style_servers_subnav(self) -> None:
+        t = self._t
+        on_servers = self._active_nav == "servers"
+        if self._servers_subnav_frame is not None:
+            if on_servers:
+                if not self._servers_subnav_frame.winfo_manager():
+                    servers_btn = self.nav_buttons.get("servers")
+                    if servers_btn is not None:
+                        self._servers_subnav_frame.pack(after=servers_btn, fill="x", pady=(0, 4))
+                    else:
+                        self._servers_subnav_frame.pack(fill="x", pady=(0, 4))
+            else:
+                self._servers_subnav_frame.pack_forget()
+
+        for sub_key, btn in self._servers_sub_buttons.items():
+            if sub_key == "all":
+                active = on_servers and self._servers_filter == "all" and not self._active_saved_connection
+            else:
+                active = (
+                    on_servers
+                    and self._servers_filter == sub_key
+                    and not self._active_saved_connection
+                )
+            if active:
+                btn.configure(
+                    fg_color=t.sc("nav_active") if t.is_light else t.c("primary_muted"),
+                    text_color=t.c("nav_active_text"),
+                    border_width=1,
+                    border_color=t.c("primary"),
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=t.sc("text_muted") if t.is_light else t.c("text_muted"),
+                    border_width=0,
+                )
+
+        for name, btn in self._servers_saved_buttons.items():
+            active = on_servers and self._active_saved_connection == name
+            if active:
+                btn.configure(
+                    fg_color=t.sc("nav_active") if t.is_light else t.c("primary_muted"),
+                    text_color=t.c("nav_active_text"),
+                    border_width=1,
+                    border_color=t.c("primary"),
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
+                    border_width=0,
+                )
+
     def _style_navigation(self, key: str) -> None:
         t = self._t
         for k, btn in self.nav_buttons.items():
@@ -413,8 +559,17 @@ class DatabaseAutomationApp(ctk.CTk):
                     text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
                     border_width=0,
                 )
+        self._style_servers_subnav()
 
     def navigate(self, key: str, *, log: bool = True, view_extra: dict | None = None) -> None:
+        extra = view_extra or {}
+        if key == "servers":
+            self._servers_filter = extra.get("servers_filter", self._servers_filter or "all")
+            if "saved_server" in extra:
+                self._active_saved_connection = extra.get("saved_server")
+            elif self._servers_filter != "all":
+                self._active_saved_connection = None
+
         self._active_nav = key
         self._style_navigation(key)
 
@@ -428,22 +583,21 @@ class DatabaseAutomationApp(ctk.CTk):
                         "log_callback": self.append_log,
                         "connection": self.connection,
                     }
-                    if view_extra:
-                        kwargs.update(view_extra)
+                    if extra:
+                        kwargs.update(extra)
                     if view_cls is DashboardView:
                         kwargs["navigate_callback"] = self.navigate
                         kwargs["employee"] = self.employee
                     if view_cls is ServersView:
-                        kwargs["connect_callback"] = self.connect_server
+                        kwargs["establish_callback"] = (
+                            lambda c: self._establish_connection(c, navigate_to=None)
+                        )
                         kwargs["disconnect_callback"] = self.clear_connection
+                        kwargs["saved_servers_changed_callback"] = self._on_saved_connection_changed
+                        kwargs.setdefault("servers_filter", self._servers_filter)
                     if view_cls is LogsView:
                         kwargs["log_store"] = self.log_store
                         kwargs["register_log_panel"] = self._register_log_panel
-                    if view_cls is MonitoringView:
-                        auto_actions = {
-                            "reports": "report",
-                        }
-                        kwargs["auto_action"] = auto_actions.get(key)
                     if view_cls is SettingsView:
                         kwargs["theme_toggle_callback"] = self._on_theme_change
                     self.views[key] = view_cls(
@@ -455,8 +609,19 @@ class DatabaseAutomationApp(ctk.CTk):
                     break
         else:
             self.views[key].grid(row=0, column=0, sticky="nsew")
-            if hasattr(self.views[key], "refresh"):
+            if key == "servers":
+                servers_view = self.views[key]
+                if hasattr(servers_view, "set_servers_filter"):
+                    servers_view.set_servers_filter(self._servers_filter)
+                saved = extra.get("saved_server")
+                if saved and hasattr(servers_view, "load_saved_server"):
+                    servers_view.load_saved_server(saved)
+                elif not saved and hasattr(servers_view, "refresh"):
+                    servers_view.refresh()
+            elif hasattr(self.views[key], "refresh"):
                 self.views[key].refresh()
+
+        self._style_servers_subnav()
 
         if log:
             self.append_log(f"Navigated to {key}")
@@ -530,6 +695,15 @@ class DatabaseAutomationApp(ctk.CTk):
                 text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
                 hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
             )
+        for sub_key, btn in self._servers_sub_buttons.items():
+            btn.configure(
+                hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
+            )
+        for btn in self._servers_saved_buttons.values():
+            btn.configure(
+                hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
+            )
+        self._style_servers_subnav()
 
         self.status_footer.apply_theme(t)
 

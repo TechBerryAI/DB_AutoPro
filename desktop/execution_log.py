@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from desktop.log_export import default_log_export_stem, export_logs_csv, export_logs_pdf
 from desktop.theme import ThemeManager
 
 LEVELS = ("ALL", "INFO", "SUCCESS", "WARNING", "ERROR")
@@ -115,7 +117,23 @@ class ExecutionLogPanel(ctk.CTkFrame):
             border_color=self.theme.c("border"),
             width=20,
             height=20,
-        ).grid(row=0, column=3, padx=(0, 4))
+        ).grid(row=0, column=3, padx=(0, 8))
+
+        download_menu = ctk.CTkOptionMenu(
+            toolbar,
+            values=["Download CSV", "Download PDF"],
+            command=self._on_download,
+            width=120,
+            height=28,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=self.theme.c("bg_card"),
+            button_color=self.theme.c("bg_card_hover"),
+            button_hover_color=self.theme.c("bg_elevated"),
+            dropdown_fg_color=self.theme.c("bg_card"),
+            text_color=self.theme.c("text_primary"),
+        )
+        download_menu.set("Download")
+        download_menu.grid(row=0, column=4, padx=(0, 8))
 
         clear_btn = ctk.CTkButton(
             toolbar,
@@ -131,7 +149,7 @@ class ExecutionLogPanel(ctk.CTkFrame):
             font=ctk.CTkFont(size=11),
             command=self.clear,
         )
-        clear_btn.grid(row=0, column=4)
+        clear_btn.grid(row=0, column=5)
 
         self._text = ctk.CTkTextbox(
             self,
@@ -179,6 +197,50 @@ class ExecutionLogPanel(ctk.CTkFrame):
         self.store.clear()
         self._render()
 
+    def filtered_entries(self) -> list[LogEntry]:
+        """Entries matching the current level filter and search query."""
+        filter_level = self._filter.get()
+        query = self._search.get().strip().lower()
+        rows: list[LogEntry] = []
+        for entry in self.store.entries:
+            if filter_level != "ALL" and entry.level != filter_level:
+                continue
+            if query and query not in entry.message.lower() and query not in entry.level.lower():
+                continue
+            rows.append(entry)
+        return rows
+
+    def _export_rows(self) -> list[tuple[str, str, str]]:
+        return [(e.timestamp, e.level, e.message) for e in self.filtered_entries()]
+
+    def _on_download(self, choice: str) -> None:
+        rows = self._export_rows()
+        if not rows:
+            messagebox.showinfo("Download", "No log entries match the current filter.")
+            return
+
+        stem = default_log_export_stem()
+        if choice == "Download CSV":
+            path = filedialog.asksaveasfilename(
+                title="Download execution log (CSV)",
+                defaultextension=".csv",
+                initialfile=f"{stem}.csv",
+                filetypes=[("CSV files", "*.csv")],
+            )
+            if path:
+                saved = export_logs_csv(rows, path)
+                messagebox.showinfo("Download", f"Log saved to:\n{saved}")
+        elif choice == "Download PDF":
+            path = filedialog.asksaveasfilename(
+                title="Download execution log (PDF)",
+                defaultextension=".pdf",
+                initialfile=f"{stem}.pdf",
+                filetypes=[("PDF files", "*.pdf")],
+            )
+            if path:
+                saved = export_logs_pdf(rows, path)
+                messagebox.showinfo("Download", f"Log saved to:\n{saved}")
+
     def _render(self) -> None:
         filter_level = self._filter.get()
         query = self._search.get().strip().lower()
@@ -187,11 +249,7 @@ class ExecutionLogPanel(ctk.CTkFrame):
         self._text.delete("1.0", "end")
 
         tb = self._text._textbox
-        for entry in self.store.entries:
-            if filter_level != "ALL" and entry.level != filter_level:
-                continue
-            if query and query not in entry.message.lower() and query not in entry.level.lower():
-                continue
+        for entry in self.filtered_entries():
             tb.insert("end", f"[{entry.timestamp}] ", "timestamp")
             tb.insert("end", f" {entry.level:<7} ", entry.level)
             tb.insert("end", f"{entry.message}\n", "message")
