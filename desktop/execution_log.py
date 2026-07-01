@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from desktop.design_system import font
 from desktop.log_export import default_log_export_stem, export_logs_csv, export_logs_pdf
 from desktop.theme import ThemeManager
 
@@ -53,7 +54,14 @@ class ExecutionLogPanel(ctk.CTkFrame):
         store: ExecutionLogStore | None = None,
         **kwargs,
     ) -> None:
-        super().__init__(master, fg_color=self._panel_bg(theme), border_width=1, border_color=theme.c("border"), **kwargs)
+        super().__init__(
+            master,
+            fg_color=self._panel_bg(theme),
+            corner_radius=theme.radius("lg"),
+            border_width=1,
+            border_color=theme.c("border"),
+            **kwargs,
+        )
         self.theme = theme
         self.store = store or ExecutionLogStore()
         self._auto_scroll = ctk.BooleanVar(value=True)
@@ -63,29 +71,32 @@ class ExecutionLogPanel(ctk.CTkFrame):
 
     @staticmethod
     def _panel_bg(theme: ThemeManager) -> str:
-        return theme.c("bg_card")
+        return theme.c("terminal_bg") if not theme.is_light else theme.c("bg_card")
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
-        toolbar.grid(row=0, column=0, sticky="ew", padx=14, pady=(8, 4))
+        toolbar.grid(row=0, column=0, sticky="ew", padx=16, pady=(10, 6))
         toolbar.grid_columnconfigure(2, weight=1)
 
+        header = ctk.CTkFrame(toolbar, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="w")
+        ctk.CTkFrame(header, width=3, height=14, corner_radius=2, fg_color=self.theme.c("primary")).pack(side="left", padx=(0, 8))
         ctk.CTkLabel(
-            toolbar,
+            header,
             text="EXECUTION LOG",
-            font=ctk.CTkFont(size=10, weight="bold"),
+            font=font(self.theme, 10, weight="bold"),
             text_color=self.theme.c("text_muted"),
-        ).grid(row=0, column=0, sticky="w")
+        ).pack(side="left")
 
         self._filter = ctk.CTkComboBox(
             toolbar,
             values=list(LEVELS),
-            width=100,
-            height=28,
-            font=ctk.CTkFont(size=11),
+            width=108,
+            height=32,
+            font=font(self.theme, 11),
             fg_color=self.theme.c("bg_elevated"),
             border_color=self.theme.c("border"),
             button_color=self.theme.c("bg_card_hover"),
@@ -93,15 +104,16 @@ class ExecutionLogPanel(ctk.CTkFrame):
             command=lambda _: self._render(),
         )
         self._filter.set("ALL")
-        self._filter.grid(row=0, column=1, padx=(12, 8))
+        self._filter.grid(row=0, column=1, padx=(14, 8))
 
         self._search = ctk.CTkEntry(
             toolbar,
             placeholder_text="Search logs…",
-            height=28,
-            font=ctk.CTkFont(size=11),
+            height=32,
+            font=font(self.theme, 11),
             fg_color=self.theme.c("bg_elevated"),
             border_color=self.theme.c("border"),
+            corner_radius=self.theme.radius("sm"),
         )
         self._search.grid(row=0, column=2, sticky="ew", padx=(0, 8))
         self._search.bind("<KeyRelease>", lambda _: self._render())
@@ -110,7 +122,7 @@ class ExecutionLogPanel(ctk.CTkFrame):
             toolbar,
             text="Auto-scroll",
             variable=self._auto_scroll,
-            font=ctk.CTkFont(size=11),
+            font=font(self.theme, 11),
             text_color=self.theme.c("text_secondary"),
             fg_color=self.theme.c("primary"),
             hover_color=self.theme.c("primary_hover"),
@@ -138,29 +150,30 @@ class ExecutionLogPanel(ctk.CTkFrame):
         clear_btn = ctk.CTkButton(
             toolbar,
             text="Clear",
-            width=60,
-            height=28,
-            corner_radius=6,
-            fg_color=self.theme.c("bg_card"),
+            width=64,
+            height=32,
+            corner_radius=self.theme.radius("sm"),
+            fg_color=self.theme.c("bg_elevated"),
             hover_color=self.theme.c("bg_card_hover"),
             border_width=1,
             border_color=self.theme.c("border"),
             text_color=self.theme.c("text_secondary"),
-            font=ctk.CTkFont(size=11),
+            font=font(self.theme, 11),
             command=self.clear,
         )
         clear_btn.grid(row=0, column=5)
 
         self._text = ctk.CTkTextbox(
             self,
-            font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color=self.theme.c("bg_card"),
+            font=ctk.CTkFont(family="Cascadia Mono", size=11),
+            fg_color=self.theme.c("terminal_bg") if not self.theme.is_light else self.theme.c("bg_input"),
             border_width=1,
             border_color=self.theme.c("border"),
             text_color=self.theme.c("text_secondary"),
+            corner_radius=self.theme.radius("md"),
             activate_scrollbars=True,
         )
-        self._text.grid(row=1, column=0, padx=14, pady=(0, 10), sticky="nsew")
+        self._text.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="nsew")
         self._text.configure(state="disabled")
 
     def _configure_tags(self) -> None:
@@ -183,7 +196,7 @@ class ExecutionLogPanel(ctk.CTkFrame):
         )
         self._search.configure(fg_color=theme.c("bg_elevated"), border_color=theme.c("border"))
         self._text.configure(
-            fg_color=theme.c("bg_card"),
+            fg_color=theme.c("terminal_bg") if not theme.is_light else theme.c("bg_input"),
             border_color=theme.c("border"),
             text_color=theme.c("text_secondary"),
         )

@@ -92,7 +92,7 @@ class SidebarDatabasePanel(ctk.CTkFrame):
             return
 
         self._server_label.configure(
-            text=f"{connection.name} · {connection.host}:{connection.port}"
+            text=f"{connection.name} · {connection.endpoint_label}"
         )
 
         try:

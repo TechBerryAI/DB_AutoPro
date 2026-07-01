@@ -159,7 +159,8 @@ def _tunneled_connection(connection: ConnectionResult, local_port: int) -> Conne
         connection,
         host="127.0.0.1",
         port=local_port,
-        ssh_enabled=False,
+        display_host=connection.endpoint_host,
+        display_port=connection.endpoint_port,
     )
 
 

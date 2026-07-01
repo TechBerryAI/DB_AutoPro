@@ -6,6 +6,8 @@ import json
 import os
 import platform
 import shlex
+import socket
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -23,6 +25,34 @@ logger = get_logger("services.monitoring")
 
 ReportPeriod = Literal["today", "monthly", "yearly", "custom"]
 
+_NETWORK_BAR_CAP_BPS = 10 * 1024 * 1024  # 10 MB/s reference for utilization bar
+
+
+def _disk_usage_path() -> str:
+    if platform.system() == "Windows":
+        return os.environ.get("SystemDrive", "C:") + os.sep
+    return "/"
+
+
+def _format_uptime(seconds: float) -> str:
+    total = max(0, int(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _format_bytes_per_sec(bps: float) -> str:
+    if bps < 1024:
+        return f"{bps:.0f} B/s"
+    if bps < 1024 * 1024:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps / (1024 * 1024):.1f} MB/s"
+
 
 class MonitoringService:
     """Provides health checks, metrics, and dashboard statistics."""
@@ -33,6 +63,8 @@ class MonitoringService:
         self.patch_service = PatchService()
         self._audit_cache: list[dict[str, Any]] | None = None
         self._audit_cache_mtime: float = -1.0
+        self._net_sample: tuple[float, int, int] | None = None
+        self._cpu_ready = False
 
     def health_check(self, *, check_databases: bool = True) -> list[HealthCheckResult]:
         """Run health checks on application and optionally configured databases."""
@@ -76,20 +108,75 @@ class MonitoringService:
         return results
 
     def get_system_metrics(self) -> dict:
-        """Collect system resource metrics."""
-        disk = psutil.disk_usage("/")
+        """Collect live system resource metrics from the local host."""
+        disk_path = _disk_usage_path()
+        disk = psutil.disk_usage(disk_path)
+        memory = psutil.virtual_memory()
+        now = time.time()
+
+        if not self._cpu_ready:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            self._cpu_ready = True
+        else:
+            cpu_percent = psutil.cpu_percent(interval=None)
+
+        freq = psutil.cpu_freq()
+        cpu_freq_mhz = round(freq.current, 0) if freq and freq.current else None
+
+        counters = psutil.net_io_counters()
+        sent_bps = 0.0
+        recv_bps = 0.0
+        if counters:
+            if self._net_sample is not None:
+                elapsed = max(now - self._net_sample[0], 0.001)
+                sent_bps = max(0.0, (counters.bytes_sent - self._net_sample[1]) / elapsed)
+                recv_bps = max(0.0, (counters.bytes_recv - self._net_sample[2]) / elapsed)
+            self._net_sample = (now, counters.bytes_sent, counters.bytes_recv)
+
+        total_bps = sent_bps + recv_bps
+        throughput_pct = min(100.0, (total_bps / _NETWORK_BAR_CAP_BPS) * 100) if total_bps else 0.0
+
+        boot_ts = psutil.boot_time()
+        uptime_seconds = max(0.0, now - boot_ts)
+        hostname = socket.gethostname()
+        os_label = f"{platform.system()} {platform.release()}"
+
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "cpu_percent": cpu_percent,
+            "cpu_count": psutil.cpu_count(logical=True) or 0,
+            "cpu_freq_mhz": cpu_freq_mhz,
             "memory": {
-                "total_mb": round(psutil.virtual_memory().total / (1024 * 1024), 2),
-                "used_mb": round(psutil.virtual_memory().used / (1024 * 1024), 2),
-                "percent": psutil.virtual_memory().percent,
+                "total_mb": round(memory.total / (1024 * 1024), 2),
+                "used_mb": round(memory.used / (1024 * 1024), 2),
+                "available_mb": round(memory.available / (1024 * 1024), 2),
+                "percent": memory.percent,
             },
             "disk": {
+                "path": disk_path,
                 "total_gb": round(disk.total / (1024 ** 3), 2),
                 "used_gb": round(disk.used / (1024 ** 3), 2),
+                "free_gb": round(disk.free / (1024 ** 3), 2),
                 "percent": disk.percent,
+            },
+            "network": {
+                "bytes_sent": counters.bytes_sent if counters else 0,
+                "bytes_recv": counters.bytes_recv if counters else 0,
+                "sent_bps": round(sent_bps, 1),
+                "recv_bps": round(recv_bps, 1),
+                "total_bps": round(total_bps, 1),
+                "throughput_pct": round(throughput_pct, 1),
+                "sent_label": _format_bytes_per_sec(sent_bps),
+                "recv_label": _format_bytes_per_sec(recv_bps),
+                "total_label": _format_bytes_per_sec(total_bps),
+            },
+            "host": {
+                "hostname": hostname,
+                "os": os_label,
+                "uptime_seconds": round(uptime_seconds),
+                "uptime_label": _format_uptime(uptime_seconds),
+                "boot_time": datetime.fromtimestamp(boot_ts, tz=timezone.utc).isoformat(),
+                "process_count": len(psutil.pids()),
             },
             "platform": platform.platform(),
         }
@@ -206,16 +293,23 @@ class MonitoringService:
         *,
         date_from: date | None = None,
         date_to: date | None = None,
+        user: str | None = None,
     ) -> tuple[int, int]:
         """Count success/failed audit entries for the selected time period."""
         success = 0
         failed = 0
+        user_key = user.strip().lower() if user else None
 
         for record in self._iter_audit_records():
             data = record.get("data", {})
             action = str(data.get("action", "")).lower()
             if action not in actions:
                 continue
+
+            if user_key:
+                rec_user = str(data.get("user", "")).strip().lower()
+                if rec_user != user_key:
+                    continue
 
             details = data.get("details") or {}
             if db_type:
@@ -484,6 +578,228 @@ class MonitoringService:
             if len(events) >= limit:
                 break
         return events
+
+    @staticmethod
+    def _security_severity(action: str, status: str) -> str:
+        action_l = action.lower()
+        status_l = status.lower()
+        if status_l == "failed":
+            if action_l == "connect":
+                return "critical"
+            if action_l in ("backup", "restore"):
+                return "warning"
+            return "critical"
+        return "info"
+
+    @staticmethod
+    def _security_alert_title(action: str, status: str) -> str:
+        action_l = action.lower()
+        status_l = status.lower()
+        titles = {
+            ("connect", "failed"): "Connection attempt failed",
+            ("connect", "success"): "User connected successfully",
+            ("backup", "failed"): "Backup operation failed",
+            ("backup", "success"): "Backup completed successfully",
+            ("restore", "failed"): "Restore operation failed",
+            ("restore", "success"): "Restore completed successfully",
+        }
+        return titles.get((action_l, status_l), f"{action_l.replace('_', ' ').title()} {status_l}")
+
+    def get_security_dashboard_data(self, *, user: str | None = None, days: int = 7) -> dict[str, Any]:
+        """Aggregate audit log into security dashboard metrics and charts."""
+        today = datetime.now().astimezone().date()
+        user_key = user.strip().lower() if user else None
+        day_keys = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
+        trend: dict = {d: {"critical": 0, "warning": 0, "info": 0} for d in day_keys}
+
+        critical_today = warning_today = info_today = 0
+        failed_logins_today = 0
+        recent_candidates: list[dict[str, Any]] = []
+        risk_counts: dict[str, int] = {
+            "Failed DB Connections": 0,
+            "Failed Backups": 0,
+            "Failed Restores": 0,
+        }
+
+        for record in self._iter_audit_records():
+            data = record.get("data", {})
+            action = str(data.get("action", "")).lower()
+            status = str(data.get("status", "")).lower()
+            if not action:
+                continue
+
+            rec_user = str(data.get("user", "")).strip().lower()
+            if user_key and rec_user != user_key:
+                continue
+
+            try:
+                ts = datetime.fromisoformat(str(record.get("timestamp", "")))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.astimezone()
+            except ValueError:
+                continue
+
+            severity = self._security_severity(action, status)
+            day = ts.date()
+            if day in trend:
+                trend[day][severity] += 1
+
+            if day == today:
+                if severity == "critical":
+                    critical_today += 1
+                elif severity == "warning":
+                    warning_today += 1
+                else:
+                    info_today += 1
+
+                if action == "connect" and status == "failed":
+                    failed_logins_today += 1
+                    risk_counts["Failed DB Connections"] += 1
+                elif action == "backup" and status == "failed":
+                    risk_counts["Failed Backups"] += 1
+                elif action == "restore" and status == "failed":
+                    risk_counts["Failed Restores"] += 1
+
+            if status == "failed":
+                resource = str(data.get("resource", "Unknown server"))
+                details = data.get("details") or {}
+                host = details.get("host", "")
+                detail = f"Server: {resource}"
+                if host:
+                    detail = f"{detail} ({host})"
+                if status == "failed" and details.get("error"):
+                    detail = f"{detail} — {str(details['error'])[:80]}"
+                recent_candidates.append({
+                    "severity": severity,
+                    "title": self._security_alert_title(action, status),
+                    "detail": detail,
+                    "time": ts.strftime("%I:%M %p").lstrip("0"),
+                    "timestamp": ts,
+                    "user": data.get("user", "system"),
+                })
+
+        recent_candidates.sort(key=lambda x: x["timestamp"], reverse=True)
+        recent_alerts = [
+            {k: v for k, v in item.items() if k != "timestamp"}
+            for item in recent_candidates[:5]
+        ]
+
+        total_today = critical_today + warning_today + info_today
+        overview = {
+            "critical": critical_today,
+            "warning": warning_today,
+            "info": info_today,
+            "total": total_today,
+        }
+
+        trend_series = [
+            {
+                "label": d.strftime("%d %b"),
+                "critical": trend[d]["critical"],
+                "warning": trend[d]["warning"],
+                "info": trend[d]["info"],
+            }
+            for d in day_keys
+        ]
+
+        severity_map = {
+            "Failed DB Connections": ("Critical", "critical"),
+            "Failed Backups": ("High", "warning"),
+            "Failed Restores": ("High", "warning"),
+        }
+        top_risks: list[dict[str, Any]] = []
+        for name, count in risk_counts.items():
+            if count <= 0:
+                continue
+            label, sev = severity_map.get(name, ("Medium", "warning"))
+            top_risks.append({"risk": name, "severity": label, "severity_key": sev, "count": count})
+        top_risks.sort(key=lambda r: r["count"], reverse=True)
+
+        security_alerts = critical_today + warning_today
+        if critical_today > 0:
+            compliance = "Review Required"
+        elif warning_today > 0:
+            compliance = "Needs Attention"
+        else:
+            compliance = "Compliant"
+
+        return {
+            "posture": {
+                "failed_logins": failed_logins_today,
+                "security_alerts": security_alerts,
+                "compliance": compliance,
+            },
+            "overview": overview,
+            "trend": trend_series,
+            "recent_alerts": recent_alerts,
+            "top_risks": top_risks[:5],
+        }
+
+    def get_backup_analytics_data(
+        self,
+        *,
+        user: str | None = None,
+        days: int = 7,
+        storage_mb: float = 0.0,
+    ) -> dict[str, Any]:
+        """Backup success/failure breakdown for dashboard charts."""
+        today = datetime.now().astimezone().date()
+        user_key = user.strip().lower() if user else None
+        day_keys = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
+        counts = {d: {"successful": 0, "failed": 0, "skipped": 0} for d in day_keys}
+        successful = failed = skipped = 0
+
+        for record in self._iter_audit_records():
+            data = record.get("data", {})
+            action = str(data.get("action", "")).lower()
+            if action != "backup":
+                continue
+            rec_user = str(data.get("user", "")).strip().lower()
+            if user_key and rec_user != user_key:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(record.get("timestamp", "")))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.astimezone()
+            except ValueError:
+                continue
+            day = ts.date()
+            if day not in counts:
+                continue
+            status = str(data.get("status", "")).lower()
+            if status == "success":
+                counts[day]["successful"] += 1
+                successful += 1
+            elif status == "failed":
+                counts[day]["failed"] += 1
+                failed += 1
+            elif status in ("skipped", "cancelled"):
+                counts[day]["skipped"] += 1
+                skipped += 1
+
+        total = successful + failed + skipped
+        success_rate = round(successful / total * 100, 1) if total else 0.0
+        trend = [
+            {
+                "label": d.strftime("%d %b"),
+                "successful": counts[d]["successful"],
+                "failed": counts[d]["failed"],
+                "skipped": counts[d]["skipped"],
+            }
+            for d in day_keys
+        ]
+        return {
+            "successful": successful,
+            "failed": failed,
+            "skipped": skipped,
+            "total": total,
+            "success_rate": success_rate,
+            "storage_mb": storage_mb,
+            "storage_gb": round(storage_mb / 1024, 1),
+            "trend": trend,
+        }
 
     def get_backup_history_chart(
         self,

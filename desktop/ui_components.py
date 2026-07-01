@@ -7,12 +7,14 @@ from typing import Callable
 
 import customtkinter as ctk
 
+from desktop.design_system import font
 from desktop.theme import ThemeManager
 
 
 def _hover_card(card: ctk.CTkFrame, theme: ThemeManager, accent: str) -> None:
     normal_border = theme.c("border")
-    card.bind("<Enter>", lambda _: card.configure(border_color=accent))
+    hover_border = accent if accent else theme.c("border_focus")
+    card.bind("<Enter>", lambda _: card.configure(border_color=hover_border))
     card.bind("<Leave>", lambda _: card.configure(border_color=normal_border))
 
 
@@ -28,7 +30,7 @@ def kpi_card(
     """Build a KPI card; returns (card, value_label, trend_label)."""
     card = ctk.CTkFrame(
         parent,
-        corner_radius=12,
+        corner_radius=theme.radius("lg"),
         fg_color=theme.c("bg_card"),
         border_width=1,
         border_color=theme.c("border"),
@@ -36,10 +38,10 @@ def kpi_card(
     _hover_card(card, theme, accent)
 
     body = ctk.CTkFrame(card, fg_color="transparent")
-    body.pack(fill="both", expand=True, padx=18, pady=16)
+    body.pack(fill="both", expand=True, padx=20, pady=18)
 
     accent_strip = ctk.CTkFrame(body, height=3, corner_radius=2, fg_color=accent)
-    accent_strip.pack(fill="x", pady=(0, 12))
+    accent_strip.pack(fill="x", pady=(0, 14))
 
     top = ctk.CTkFrame(body, fg_color="transparent")
     top.pack(fill="x")
@@ -100,72 +102,76 @@ def key_metric_tile(
     footer_link: str,
     icon_bg: str | None = None,
 ) -> tuple[ctk.CTkFrame, ctk.CTkLabel, ctk.CTkLabel]:
-    """Metric tile matching the enterprise home dashboard layout."""
+    """Premium metric tile with glass-style elevation."""
     card = ctk.CTkFrame(
         parent,
-        corner_radius=14,
-        fg_color=theme.c("bg_card"),
+        corner_radius=theme.radius("xl"),
+        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
         border_width=1,
         border_color=theme.c("border"),
     )
     _hover_card(card, theme, icon_color)
 
+    accent_top = ctk.CTkFrame(card, height=3, corner_radius=0, fg_color=icon_color)
+    accent_top.pack(fill="x")
+
     body = ctk.CTkFrame(card, fg_color="transparent")
-    body.pack(fill="both", expand=True, padx=20, pady=18)
+    body.pack(fill="both", expand=True, padx=24, pady=22)
 
     top = ctk.CTkFrame(body, fg_color="transparent")
     top.pack(fill="x")
 
     icon_frame = ctk.CTkFrame(
         top,
-        width=36,
-        height=36,
-        corner_radius=10,
+        width=44,
+        height=44,
+        corner_radius=theme.radius("md"),
         fg_color=icon_bg or theme.c("bg_elevated"),
-        border_width=0,
+        border_width=1,
+        border_color=theme.c("border_subtle"),
     )
     icon_frame.pack(side="left")
     icon_frame.pack_propagate(False)
     ctk.CTkLabel(
         icon_frame,
         text=icon,
-        font=ctk.CTkFont(size=16),
+        font=font(theme, 17),
         text_color=icon_color,
     ).place(relx=0.5, rely=0.5, anchor="center")
 
     ctk.CTkLabel(
         top,
         text=title,
-        font=ctk.CTkFont(size=14, weight="bold"),
+        font=font(theme, 14, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
-    ).pack(side="left", padx=(12, 0))
+    ).pack(side="left", padx=(14, 0))
 
     badge_label = ctk.CTkLabel(
         top,
         text=badge,
-        font=ctk.CTkFont(size=10, weight="bold"),
+        font=font(theme, 10, weight="bold"),
         text_color=badge_text,
         fg_color=badge_fg,
-        corner_radius=8,
+        corner_radius=theme.radius("sm"),
         padx=10,
-        pady=3,
+        pady=4,
     )
     badge_label.pack(side="right")
 
     value_label = ctk.CTkLabel(
         body,
         text="0",
-        font=ctk.CTkFont(size=36, weight="bold"),
+        font=font(theme, 42, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     )
-    value_label.pack(anchor="w", pady=(18, 6))
+    value_label.pack(anchor="w", pady=(22, 8))
 
     ctk.CTkLabel(
         body,
         text=subtitle,
-        font=ctk.CTkFont(size=12),
+        font=font(theme, 12),
         text_color=theme.c("text_muted"),
         anchor="w",
     ).pack(anchor="w")
@@ -173,11 +179,11 @@ def key_metric_tile(
     ctk.CTkLabel(
         body,
         text=footer_link,
-        font=ctk.CTkFont(size=12, weight="bold"),
+        font=font(theme, 12, weight="bold"),
         text_color=theme.c("primary"),
         anchor="w",
         cursor="hand2",
-    ).pack(anchor="w", pady=(12, 0))
+    ).pack(anchor="w", pady=(14, 0))
 
     return card, value_label, badge_label
 
@@ -190,21 +196,24 @@ def home_greeting_card(
     role: str,
     initials: str,
     datetime_text: str,
-    environment: str,
     on_refresh: Callable[[], None] | None = None,
-) -> tuple[ctk.CTkEntry, ctk.CTkLabel]:
-    """Top home header with avatar, greeting, search, and refresh."""
+) -> tuple[None, ctk.CTkLabel]:
+    """Premium home header with avatar and actions."""
     card = ctk.CTkFrame(
         parent,
-        corner_radius=14,
-        fg_color=theme.c("bg_card"),
+        corner_radius=theme.radius("xl"),
+        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
         border_width=1,
         border_color=theme.c("border"),
     )
-    card.pack(fill="x", pady=(0, 24))
+    card.pack(fill="x", pady=(0, 28))
+
+    accent = ctk.CTkFrame(card, height=4, corner_radius=0, fg_color=theme.c("primary"))
+    accent.pack(fill="x")
+    ctk.CTkFrame(card, height=1, fg_color=theme.c("accent")).pack(fill="x")
 
     body = ctk.CTkFrame(card, fg_color="transparent")
-    body.pack(fill="x", padx=28, pady=24)
+    body.pack(fill="x", padx=32, pady=28)
     body.grid_columnconfigure(0, weight=1)
 
     top = ctk.CTkFrame(body, fg_color="transparent")
@@ -216,17 +225,19 @@ def home_greeting_card(
 
     avatar = ctk.CTkFrame(
         left,
-        width=48,
-        height=48,
-        corner_radius=24,
+        width=56,
+        height=56,
+        corner_radius=28,
         fg_color=theme.c("primary"),
+        border_width=2,
+        border_color=theme.c("accent"),
     )
     avatar.pack(side="left")
     avatar.pack_propagate(False)
     ctk.CTkLabel(
         avatar,
         text=initials,
-        font=ctk.CTkFont(size=16, weight="bold"),
+        font=font(theme, 18, weight="bold"),
         text_color=theme.c("text_on_primary"),
     ).place(relx=0.5, rely=0.5, anchor="center")
 
@@ -235,7 +246,7 @@ def home_greeting_card(
     ctk.CTkLabel(
         text_col,
         text=greeting,
-        font=ctk.CTkFont(size=26, weight="bold"),
+        font=font(theme, 30, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     ).pack(anchor="w")
@@ -253,84 +264,35 @@ def home_greeting_card(
     datetime_label = ctk.CTkLabel(
         right,
         text=datetime_text,
-        font=ctk.CTkFont(size=12),
-        text_color=theme.c("text_muted"),
+        font=font(theme, 12, weight="bold"),
+        text_color=theme.c("text_secondary"),
         anchor="e",
     )
     datetime_label.pack(anchor="e")
-
-    env_text = environment.upper()
-    if env_text in ("DEV", "DEVELOPMENT"):
-        env_text = "DEVELOPMENT"
     ctk.CTkLabel(
         right,
-        text=env_text,
-        font=ctk.CTkFont(size=10, weight="bold"),
-        text_color=theme.c("text_on_primary"),
-        fg_color=theme.c("primary"),
-        corner_radius=8,
-        padx=12,
-        pady=4,
-    ).pack(anchor="e", pady=(8, 0))
+        text="Live",
+        font=font(theme, 10, weight="bold"),
+        text_color=theme.c("success"),
+        anchor="e",
+    ).pack(anchor="e", pady=(4, 0))
 
-    bottom = ctk.CTkFrame(body, fg_color="transparent")
-    bottom.grid(row=1, column=0, sticky="ew")
-    bottom.grid_columnconfigure(0, weight=1)
-
-    search = ctk.CTkEntry(
-        bottom,
-        height=42,
-        placeholder_text="Search jobs, servers, databases...",
-        fg_color=theme.c("bg_elevated"),
-        border_color=theme.c("border"),
-        text_color=theme.c("text_primary"),
-        corner_radius=10,
-    )
-    search.grid(row=0, column=0, sticky="ew", padx=(0, 12))
-
-    bell_wrap = ctk.CTkFrame(bottom, fg_color="transparent", width=48, height=42)
-    bell_wrap.grid(row=0, column=1, padx=(0, 8))
-    bell_wrap.grid_propagate(False)
-
+    actions = ctk.CTkFrame(body, fg_color="transparent")
+    actions.grid(row=1, column=0, sticky="e", pady=(16, 0))
     ctk.CTkButton(
-        bell_wrap,
-        text="🔔",
-        width=42,
-        height=42,
-        corner_radius=10,
-        fg_color=theme.c("bg_elevated"),
-        hover_color=theme.c("bg_card_hover"),
-        text_color=theme.c("text_primary"),
-        border_width=1,
-        border_color=theme.c("border"),
-        font=ctk.CTkFont(size=16),
-    ).place(relx=0, rely=0.5, anchor="w")
-
-    ctk.CTkLabel(
-        bell_wrap,
-        text="0",
-        width=18,
-        height=18,
-        corner_radius=9,
-        fg_color=theme.c("error"),
-        text_color=theme.c("text_on_primary"),
-        font=ctk.CTkFont(size=10, weight="bold"),
-    ).place(relx=0.72, rely=0.18, anchor="center")
-
-    ctk.CTkButton(
-        bottom,
-        text="Refresh",
-        width=96,
-        height=42,
-        corner_radius=10,
+        actions,
+        text="Refresh Dashboard",
+        width=160,
+        height=44,
+        corner_radius=theme.radius("md"),
         fg_color=theme.c("primary"),
         hover_color=theme.c("primary_hover"),
         text_color=theme.c("text_on_primary"),
-        font=ctk.CTkFont(size=13, weight="bold"),
+        font=font(theme, 13, weight="bold"),
         command=on_refresh,
-    ).grid(row=0, column=2)
+    ).pack(side="right")
 
-    return search, datetime_label
+    return None, datetime_label
 
 
 def set_kpi_trend(trend_label: ctk.CTkLabel, theme: ThemeManager, trend: dict, period: str = "vs last week") -> None:
@@ -649,18 +611,23 @@ def health_row(
 
 def section_header(parent: ctk.CTkFrame, theme: ThemeManager, title: str, subtitle: str = "") -> None:
     """Page section header with optional subtitle."""
+    row = ctk.CTkFrame(parent, fg_color="transparent")
+    row.pack(fill="x")
+    ctk.CTkFrame(row, width=4, height=28, corner_radius=2, fg_color=theme.c("primary")).pack(side="left", padx=(0, 12))
+    text_col = ctk.CTkFrame(row, fg_color="transparent")
+    text_col.pack(side="left", fill="x", expand=True)
     ctk.CTkLabel(
-        parent,
+        text_col,
         text=title,
-        font=ctk.CTkFont(size=24, weight="bold"),
+        font=font(theme, 26, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     ).pack(anchor="w")
     if subtitle:
         ctk.CTkLabel(
-            parent,
+            text_col,
             text=subtitle,
-            font=ctk.CTkFont(size=13),
+            font=font(theme, 13),
             text_color=theme.c("text_muted"),
             anchor="w",
         ).pack(anchor="w", pady=(4, 0))
@@ -799,18 +766,21 @@ def populate_database_catalog(
 
 
 def panel_card(parent: ctk.CTkFrame, theme: ThemeManager, title: str) -> ctk.CTkFrame:
-    """Standard titled panel card."""
+    """Standard titled panel card with premium elevation."""
     card = ctk.CTkFrame(
         parent,
-        corner_radius=12,
-        fg_color=theme.c("bg_card"),
+        corner_radius=theme.radius("lg"),
+        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
         border_width=1,
         border_color=theme.c("border"),
     )
+    header = ctk.CTkFrame(card, fg_color="transparent")
+    header.pack(fill="x", padx=20, pady=(18, 10))
+    ctk.CTkFrame(header, width=3, height=14, corner_radius=2, fg_color=theme.c("primary")).pack(side="left", padx=(0, 8))
     ctk.CTkLabel(
-        card,
+        header,
         text=title.upper(),
-        font=ctk.CTkFont(size=11, weight="bold"),
+        font=font(theme, 11, weight="bold"),
         text_color=theme.c("text_muted"),
-    ).pack(anchor="w", padx=20, pady=(18, 12))
+    ).pack(side="left")
     return card

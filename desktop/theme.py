@@ -1,4 +1,4 @@
-"""Enterprise theme tokens for Database Automation Pro."""
+"""Premium theme tokens for Database Automation Pro."""
 
 from __future__ import annotations
 
@@ -9,97 +9,145 @@ import customtkinter as ctk
 
 THEME_PREF_PATH = Path(__file__).resolve().parent.parent / "config" / "ui_preferences.json"
 
+RADIUS = {"sm": 10, "md": 14, "lg": 18, "xl": 24, "pill": 999}
+
+# Ultra-modern realistic palette — layered depth, glass surfaces, refined accents
 THEMES = {
     "dark": {
         "appearance_mode": "dark",
         "color_theme": "blue",
-        "bg_app": "#0b0f14",
-        "bg_sidebar": "#0f172a",
-        "bg_content": "#111827",
-        "bg_card": "#1a2332",
-        "bg_card_hover": "#1f2a3d",
-        "bg_elevated": "#243044",
-        "bg_input": "#0f172a",
-        "border": "#2d3a4f",
-        "border_subtle": "#1e293b",
-        "primary": "#3b82f6",
-        "primary_hover": "#2563eb",
-        "primary_muted": "#1e3a5f",
+        "bg_app": "#030508",
+        "bg_sidebar": "#070b12",
+        "bg_content": "#0a0e16",
+        "bg_card": "#0f1520",
+        "bg_card_hover": "#151d2c",
+        "bg_elevated": "#121a28",
+        "bg_input": "#0a1018",
+        "bg_glass": "#111827",
+        "bg_list": "#0c121c",
+        "border": "#1e2a3d",
+        "border_subtle": "#141c28",
+        "border_focus": "#5b9aff",
+        "primary": "#5b9aff",
+        "primary_hover": "#4a8ef5",
+        "primary_muted": "#152847",
+        "primary_glow": "#3b82f640",
         "text_primary": "#f8fafc",
-        "text_secondary": "#94a3b8",
-        "text_muted": "#64748b",
-        "success": "#22c55e",
-        "success_muted": "#14532d",
-        "warning": "#f59e0b",
-        "warning_muted": "#78350f",
-        "error": "#ef4444",
-        "error_muted": "#7f1d1d",
-        "accent": "#3b82f6",
+        "text_secondary": "#9aa8bc",
+        "text_muted": "#6b7a90",
         "text_on_primary": "#ffffff",
-        "nav_active_text": "#f8fafc",
-        "nav_idle_text": "#94a3b8",
-        "log_info": "#94a3b8",
-        "log_success": "#22c55e",
-        "log_warning": "#f59e0b",
-        "log_error": "#ef4444",
-        # Legacy keys used elsewhere
-        "bg_primary": "#0b0f14",
-        "bg_secondary": "#1a2332",
-        "bg_sidebar_legacy": "#0f172a",
+        "success": "#3dd68c",
+        "success_muted": "#0d3d2a",
+        "warning": "#f5c451",
+        "warning_muted": "#4a3410",
+        "error": "#ff6b6b",
+        "error_muted": "#4a1515",
+        "destructive_bg": "#8b2222",
+        "destructive_hover": "#ef4444",
+        "destructive_text": "#fecaca",
+        "accent": "#818cf8",
+        "accent_secondary": "#a78bfa",
+        "metric_blue": "#5b9aff",
+        "metric_blue_bg": "#152847",
+        "metric_purple": "#b4a0ff",
+        "metric_purple_bg": "#2a1f4a",
+        "metric_green": "#3dd68c",
+        "metric_green_bg": "#0d3d2a",
+        "metric_red": "#ff6b6b",
+        "metric_red_bg": "#4a1515",
+        "metric_amber": "#f5c451",
+        "metric_amber_bg": "#4a3410",
+        "nav_active_text": "#ffffff",
+        "nav_idle_text": "#8b9bb0",
+        "nav_indicator": "#5b9aff",
+        "log_info": "#9aa8bc",
+        "log_success": "#3dd68c",
+        "log_warning": "#f5c451",
+        "log_error": "#ff6b6b",
+        "terminal_bg": "#050810",
+        "sidebar_border": "#141c28",
+        "sidebar_text_primary": "#f1f5f9",
+        "sidebar_text_secondary": "#94a3b8",
+        "sidebar_text_muted": "#64748b",
+        "sidebar_bg_card": "#0f1520",
+        "sidebar_bg_hover": "#151d2c",
+        "sidebar_bg_list": "#0a0e16",
+        "sidebar_nav_active": "#152847",
+        "sidebar_nav_hover": "#121a28",
+        "bg_primary": "#030508",
+        "bg_secondary": "#0f1520",
+        "bg_sidebar_legacy": "#070b12",
     },
     "light": {
         "appearance_mode": "light",
         "color_theme": "blue",
-        # Main content — matches connection dialog right panel
-        "bg_app": "#eef1f6",
-        "bg_content": "#eef1f6",
+        "bg_app": "#e4eaf2",
+        "bg_content": "#eef2f8",
         "bg_card": "#ffffff",
         "bg_card_hover": "#f8fafc",
         "bg_elevated": "#ffffff",
         "bg_input": "#ffffff",
-        "border": "#dde3ec",
-        "border_subtle": "#eef1f6",
+        "bg_glass": "#ffffff",
+        "bg_list": "#f1f5f9",
+        "border": "#cdd6e3",
+        "border_subtle": "#e2e8f0",
+        "border_focus": "#2563eb",
         "primary": "#2563eb",
         "primary_hover": "#1d4ed8",
         "primary_muted": "#eff6ff",
+        "primary_glow": "#2563eb22",
         "text_primary": "#0f172a",
         "text_secondary": "#475569",
         "text_muted": "#64748b",
         "text_on_primary": "#ffffff",
-        "nav_active_text": "#ffffff",
-        "nav_idle_text": "#cbd5e1",
         "success": "#059669",
         "success_muted": "#ecfdf5",
         "warning": "#d97706",
         "warning_muted": "#fffbeb",
         "error": "#dc2626",
         "error_muted": "#fef2f2",
-        "accent": "#2563eb",
+        "destructive_bg": "#991b1b",
+        "destructive_hover": "#dc2626",
+        "destructive_text": "#ffffff",
+        "accent": "#6366f1",
+        "accent_secondary": "#8b5cf6",
+        "metric_blue": "#2563eb",
+        "metric_blue_bg": "#eff6ff",
+        "metric_purple": "#7c3aed",
+        "metric_purple_bg": "#f5f3ff",
+        "metric_green": "#059669",
+        "metric_green_bg": "#ecfdf5",
+        "metric_red": "#dc2626",
+        "metric_red_bg": "#fef2f2",
+        "metric_amber": "#d97706",
+        "metric_amber_bg": "#fffbeb",
+        "nav_active_text": "#ffffff",
+        "nav_idle_text": "#cbd5e1",
+        "nav_indicator": "#2563eb",
         "log_info": "#475569",
         "log_success": "#059669",
         "log_warning": "#d97706",
         "log_error": "#dc2626",
-        # Sidebar — matches connection dialog left panel (dark navy)
-        "bg_sidebar": "#1e293b",
-        "sidebar_border": "#334155",
+        "terminal_bg": "#0f172a",
+        "bg_sidebar": "#0f172a",
+        "sidebar_border": "#1e293b",
         "sidebar_text_primary": "#f8fafc",
         "sidebar_text_secondary": "#cbd5e1",
         "sidebar_text_muted": "#94a3b8",
-        "sidebar_bg_card": "#334155",
-        "sidebar_bg_hover": "#475569",
-        "sidebar_bg_list": "#172033",
+        "sidebar_bg_card": "#1e293b",
+        "sidebar_bg_hover": "#334155",
+        "sidebar_bg_list": "#0c1220",
         "sidebar_nav_active": "#2563eb",
-        "sidebar_nav_hover": "#334155",
-        "bg_primary": "#eef1f6",
+        "sidebar_nav_hover": "#1e293b",
+        "bg_primary": "#e4eaf2",
         "bg_secondary": "#ffffff",
-        "bg_sidebar_legacy": "#1e293b",
+        "bg_sidebar_legacy": "#0f172a",
     },
 }
 
-
-# When sidebar-specific tokens are absent, map to standard theme keys.
 _SIDEBAR_FALLBACKS: dict[str, str] = {
-    "bg_list": "bg_card",
+    "bg_sidebar": "bg_sidebar",
+    "bg_list": "bg_list",
     "bg_card": "bg_card",
     "bg_hover": "bg_card_hover",
     "border": "border",
@@ -112,7 +160,7 @@ _SIDEBAR_FALLBACKS: dict[str, str] = {
 
 
 class ThemeManager:
-    """Manages application theme switching."""
+    """Manages application theme switching and design tokens."""
 
     def __init__(self, initial: str | None = None) -> None:
         self.current = initial or load_saved_theme()
@@ -121,6 +169,10 @@ class ThemeManager:
         self.colors = THEMES[self.current]
         ctk.set_appearance_mode(self.colors["appearance_mode"])
         ctk.set_default_color_theme(self.colors["color_theme"])
+        try:
+            ctk.set_widget_scaling(1.0)
+        except Exception:
+            pass
 
     def toggle(self) -> str:
         self.current = "light" if self.current == "dark" else "dark"
@@ -133,6 +185,12 @@ class ThemeManager:
     @property
     def is_light(self) -> bool:
         return self.current == "light"
+
+    def radius(self, key: str = "md") -> int:
+        return RADIUS.get(key, RADIUS["md"])
+
+    def font(self, size: int, *, weight: str = "normal") -> ctk.CTkFont:
+        return ctk.CTkFont(family="Segoe UI", size=size, weight=weight)
 
     def log_level_color(self, level: str) -> str:
         key = f"log_{level.lower()}"
@@ -152,15 +210,11 @@ class ThemeManager:
         return self.colors.get(key, "#ffffff")
 
     def c(self, key: str) -> str:
-        """Shorthand for get."""
         return self.get(key)
 
     def sc(self, key: str) -> str:
-        """Sidebar chrome color — light mode uses dedicated navy-sidebar tokens."""
         fallback = _SIDEBAR_FALLBACKS.get(key, key)
-        if self.is_light:
-            return self.colors.get(f"sidebar_{key}", self.c(fallback))
-        return self.c(fallback)
+        return self.colors.get(f"sidebar_{key}", self.c(fallback))
 
 
 def _load_ui_prefs() -> dict:

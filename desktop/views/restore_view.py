@@ -80,7 +80,7 @@ class RestoreView(BaseView):
         if not self.connection:
             return None
         lookup = self.connection.saved_name or self.connection.name
-        for server in load_saved_servers():
+        for server in load_saved_servers(self.owner_username):
             if server.name == lookup and server.db_type == DatabaseType.MONGODB.value:
                 return server
         return None
