@@ -8,9 +8,9 @@ import platform
 import shlex
 import socket
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import psutil
 
@@ -22,6 +22,8 @@ from backend.services.backup_service import BackupService
 from backend.services.patch_service import PatchService
 
 logger = get_logger("services.monitoring")
+
+ReportPeriod = Literal["today", "monthly", "yearly", "custom"]
 
 _NETWORK_BAR_CAP_BPS = 10 * 1024 * 1024  # 10 MB/s reference for utilization bar
 
@@ -59,11 +61,13 @@ class MonitoringService:
         self.settings = get_settings()
         self.backup_service = BackupService()
         self.patch_service = PatchService()
+        self._audit_cache: list[dict[str, Any]] | None = None
+        self._audit_cache_mtime: float = -1.0
         self._net_sample: tuple[float, int, int] | None = None
         self._cpu_ready = False
 
-    def health_check(self) -> list[HealthCheckResult]:
-        """Run health checks on application and configured databases."""
+    def health_check(self, *, check_databases: bool = True) -> list[HealthCheckResult]:
+        """Run health checks on application and optionally configured databases."""
         results: list[HealthCheckResult] = []
 
         results.append(HealthCheckResult(
@@ -72,23 +76,24 @@ class MonitoringService:
             details={"version": "1.0.0", "environment": self.settings.environment},
         ))
 
-        for profile in self.settings.connections:
-            try:
-                db_type = DatabaseType(self.settings.database_type)
-                connector = get_connector(db_type, profile)
-                health = connector.health_check()
-                results.append(HealthCheckResult(
-                    service=f"database:{profile}",
-                    status=health.get("status", "unknown"),
-                    latency_ms=health.get("latency_ms"),
-                    details=health,
-                ))
-            except Exception as exc:
-                results.append(HealthCheckResult(
-                    service=f"database:{profile}",
-                    status="unhealthy",
-                    details={"error": str(exc)},
-                ))
+        if check_databases:
+            for profile in self.settings.connections:
+                try:
+                    db_type = DatabaseType(self.settings.database_type)
+                    connector = get_connector(db_type, profile)
+                    health = connector.health_check()
+                    results.append(HealthCheckResult(
+                        service=f"database:{profile}",
+                        status=health.get("status", "unknown"),
+                        latency_ms=health.get("latency_ms"),
+                        details=health,
+                    ))
+                except Exception as exc:
+                    results.append(HealthCheckResult(
+                        service=f"database:{profile}",
+                        status="unhealthy",
+                        details={"error": str(exc)},
+                    ))
 
         backup_dir = Path(self.settings.backup.output_dir)
         results.append(HealthCheckResult(
@@ -179,7 +184,14 @@ class MonitoringService:
     def _iter_audit_records(self) -> list[dict[str, Any]]:
         audit_path = Path(self.settings.logging.audit_log_path)
         if not audit_path.exists():
+            self._audit_cache = []
+            self._audit_cache_mtime = -1.0
             return []
+
+        mtime = audit_path.stat().st_mtime
+        if self._audit_cache is not None and mtime == self._audit_cache_mtime:
+            return self._audit_cache
+
         records: list[dict[str, Any]] = []
         for line in audit_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -189,6 +201,9 @@ class MonitoringService:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+
+        self._audit_cache = records
+        self._audit_cache_mtime = mtime
         return records
 
     def _backup_audit_stats(
@@ -230,16 +245,59 @@ class MonitoringService:
 
         return success, failed, last_success
 
-    def count_audit_today(
+    def _timestamp_in_period(
         self,
+        ts: datetime,
+        period: ReportPeriod,
+        *,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> bool:
+        local = ts.astimezone()
+        if period == "custom":
+            if not date_from or not date_to:
+                return False
+            day = local.date()
+            return date_from <= day <= date_to
+        now = datetime.now().astimezone()
+        if period == "today":
+            return local.date() == now.date()
+        if period == "monthly":
+            return local.year == now.year and local.month == now.month
+        return local.year == now.year
+
+    def _period_label(
+        self,
+        period: ReportPeriod,
+        *,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> str:
+        now = datetime.now().astimezone()
+        if period == "custom" and date_from and date_to:
+            return (
+                f"Custom Report ({date_from.strftime('%d %b %Y')} – "
+                f"{date_to.strftime('%d %b %Y')})"
+            )
+        if period == "today":
+            return f"Today's Report ({now.strftime('%d %B %Y')})"
+        if period == "monthly":
+            return f"Monthly Report ({now.strftime('%B %Y')})"
+        return f"Yearly Report ({now.year})"
+
+    def count_audit_for_period(
+        self,
+        period: ReportPeriod = "today",
         actions: tuple[str, ...] = ("backup", "restore"),
         db_type: DatabaseType | None = None,
+        *,
+        date_from: date | None = None,
+        date_to: date | None = None,
         user: str | None = None,
     ) -> tuple[int, int]:
-        """Count success/failed audit entries for today (local calendar day)."""
+        """Count success/failed audit entries for the selected time period."""
         success = 0
         failed = 0
-        today = datetime.now().astimezone().date()
         user_key = user.strip().lower() if user else None
 
         for record in self._iter_audit_records():
@@ -264,11 +322,12 @@ class MonitoringService:
                 ts = datetime.fromisoformat(str(ts_raw))
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
-                ts = ts.astimezone()
             except ValueError:
                 continue
 
-            if ts.date() != today:
+            if not self._timestamp_in_period(
+                ts, period, date_from=date_from, date_to=date_to
+            ):
                 continue
 
             status = str(data.get("status", "")).lower()
@@ -278,6 +337,76 @@ class MonitoringService:
                 failed += 1
 
         return success, failed
+
+    def count_audit_today(
+        self,
+        actions: tuple[str, ...] = ("backup", "restore"),
+        db_type: DatabaseType | None = None,
+    ) -> tuple[int, int]:
+        """Count success/failed audit entries for today (local calendar day)."""
+        return self.count_audit_for_period("today", actions=actions, db_type=db_type)
+
+    def get_dashboard_report(
+        self,
+        period: ReportPeriod = "today",
+        *,
+        profile: str = "default",
+        db_type: DatabaseType | None = None,
+        list_remote: bool = False,
+        remote_dir: str | None = None,
+        local_dir: str | None = None,
+        registered_servers: int = 0,
+        database_count: int = 0,
+        connection_name: str | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> dict[str, Any]:
+        """Build a dashboard-style metrics report for the selected time period."""
+        range_kw = {"date_from": date_from, "date_to": date_to}
+        success, failed = self.count_audit_for_period(period, db_type=db_type, **range_kw)
+        backup_ok, backup_fail = self.count_audit_for_period(
+            period, actions=("backup",), db_type=db_type, **range_kw
+        )
+        restore_ok, restore_fail = self.count_audit_for_period(
+            period, actions=("restore",), db_type=db_type, **range_kw
+        )
+        running, pending = self.count_live_jobs()
+
+        backups = self._list_backups_for_context(
+            profile=profile,
+            db_type=db_type,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+        )
+        storage_used = self._storage_used_mb(
+            profile=profile,
+            list_remote=list_remote,
+            remote_dir=remote_dir,
+            local_dir=local_dir,
+            backups=backups,
+        )
+
+        return {
+            "period": period,
+            "period_label": self._period_label(period, date_from=date_from, date_to=date_to),
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "generated_at": datetime.now().astimezone().strftime("%A, %d %B %Y · %H:%M:%S"),
+            "linux_servers": registered_servers,
+            "databases": database_count,
+            "active_jobs": running,
+            "pending_jobs": pending,
+            "success_operations": success,
+            "failed_operations": failed,
+            "backup_success": backup_ok,
+            "backup_failed": backup_fail,
+            "restore_success": restore_ok,
+            "restore_failed": restore_fail,
+            "total_backups": len(backups),
+            "storage_used_mb": storage_used,
+            "connection_name": connection_name or "Not connected",
+        }
 
     def count_live_jobs(self) -> tuple[int, int]:
         """Return (running, pending) in-memory backup/restore operations."""
