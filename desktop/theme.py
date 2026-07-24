@@ -260,3 +260,29 @@ def save_last_username(username: str) -> None:
     data = _load_ui_prefs()
     data["last_username"] = name
     _save_ui_prefs(data)
+
+
+def load_last_password() -> str:
+    return str(_load_ui_prefs().get("last_password", ""))
+
+
+def save_last_credentials(username: str, password: str) -> None:
+    name = username.strip()
+    if not name:
+        return
+    data = _load_ui_prefs()
+    data["last_username"] = name
+    data["last_password"] = password
+    data["remember_password"] = True
+    _save_ui_prefs(data)
+
+
+def load_remember_password() -> bool:
+    return bool(_load_ui_prefs().get("remember_password", True))
+
+
+def clear_last_password() -> None:
+    data = _load_ui_prefs()
+    data.pop("last_password", None)
+    data["remember_password"] = False
+    _save_ui_prefs(data)

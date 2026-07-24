@@ -69,7 +69,7 @@ class ConnectionPanel(ctk.CTkFrame):
         self.bind("<Return>", lambda _e: self._on_connect())
         if SHOW_SAVED_CONNECTIONS_SIDEBAR:
             self._refresh_saved_list()
-        self._select_db_type(DatabaseType.POSTGRESQL)
+        self._select_db_type(DatabaseType.POSTGRESQL, load_saved=False)
 
     def _init_sidebar_stubs(self) -> None:
         """Hidden placeholders so save/load logic keeps working without the sidebar UI."""
@@ -330,6 +330,18 @@ class ConnectionPanel(ctk.CTkFrame):
         )
         self.save_btn.pack(side="left", padx=(0, 12))
 
+        self.delete_btn = ctk.CTkButton(
+            actions,
+            text="Delete Connection",
+            width=160,
+            height=40,
+            fg_color="#b91c1c",
+            hover_color="#dc2626",
+            text_color="#ffffff",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._remove_saved,
+        )
+
         self.connect_btn = ctk.CTkButton(
             actions,
             text="Connect",
@@ -341,9 +353,10 @@ class ConnectionPanel(ctk.CTkFrame):
             command=self._on_connect,
         )
         self.connect_btn.pack(side="left")
+        self._sync_action_buttons()
 
     def set_servers_filter(self, db_filter: str = "all") -> None:
-        """Filter saved connections and open the matching engine form."""
+        """Open an engine form for +PostgreSQL / +MongoDB (new connection, not saved)."""
         self._servers_filter = db_filter or "all"
         if SHOW_SAVED_CONNECTIONS_SIDEBAR:
             self._refresh_saved_list()
@@ -353,7 +366,9 @@ class ConnectionPanel(ctk.CTkFrame):
             db_type = DatabaseType(self._servers_filter)
         except ValueError:
             return
-        self._select_db_type(db_type)
+        # Engine sub-nav should always start a *new* connection form
+        # (Test + Save + Connect). Saved profiles use load_saved_by_name().
+        self._select_db_type(db_type, load_saved=False)
 
     def load_saved_by_name(self, name: str) -> None:
         """Load a named saved profile (used from the main nav Saved Connection list)."""
@@ -729,20 +744,27 @@ class ConnectionPanel(ctk.CTkFrame):
                 )
                 tile.grid_remove()
 
-    def _select_db_type(self, db_type: DatabaseType) -> None:
+    def _select_db_type(self, db_type: DatabaseType, *, load_saved: bool = False) -> None:
+        """Switch engine type. Only load a saved profile when load_saved=True."""
         self._db_type_var.set(db_type.value)
         self._apply_db_type_tiles(db_type)
 
-        saved = self._find_saved_for_type(db_type)
-        if saved:
-            self._load_saved_server(saved)
-            return
+        if load_saved:
+            saved = self._find_saved_for_type(db_type)
+            if saved:
+                self._load_saved_server(saved)
+                return
 
         self._selected_saved = None
         self._highlight_saved_selection()
         self._apply_engine_profile(db_type)
         self._update_mongodb_fields(db_type)
-        self._set_status(f"{DB_ICON_META[db_type]['label']} defaults applied.", "info")
+        self._sync_action_buttons()
+        self._notify_saved_servers_changed(None)
+        self._set_status(
+            f"New {DB_ICON_META[db_type]['label']} connection — test or save when ready.",
+            "info",
+        )
 
     def _apply_engine_profile(self, db_type: DatabaseType) -> None:
         """Reset the form to standard defaults for a database engine."""
@@ -943,15 +965,34 @@ class ConnectionPanel(ctk.CTkFrame):
         self.ssh_port_entry.delete(0, "end")
         self.ssh_port_entry.insert(0, "22")
         self._sync_ssh_fields()
-        self._select_db_type(DatabaseType.POSTGRESQL)
-        self._set_status("New connection profile.", "info")
+        self._select_db_type(DatabaseType.POSTGRESQL, load_saved=False)
 
     def _load_saved_server(self, server: SavedServer) -> None:
         self._selected_saved = server.name
         self._highlight_saved_selection()
         self.update_idletasks()
         self._fill_form(server)
+        self._sync_action_buttons()
         self._set_status(f"Loaded '{server.name}'.", "info")
+
+    def _sync_action_buttons(self) -> None:
+        """Saved profile → Connect + Delete; new/engine form → Test + Save + Connect."""
+        if not hasattr(self, "test_btn"):
+            return
+        saved_mode = bool(self._selected_saved)
+        if saved_mode:
+            self.test_btn.pack_forget()
+            self.save_btn.pack_forget()
+            if not self.delete_btn.winfo_manager():
+                self.delete_btn.pack(side="left", padx=(0, 12), before=self.connect_btn)
+        else:
+            self.delete_btn.pack_forget()
+            if not self.test_btn.winfo_manager():
+                self.test_btn.pack(side="left", padx=(0, 12), before=self.connect_btn)
+            if not self.save_btn.winfo_manager():
+                self.save_btn.pack(side="left", padx=(0, 12), before=self.connect_btn)
+            if not self.connect_btn.winfo_manager():
+                self.connect_btn.pack(side="left")
 
     def _get_connection_name(self) -> str:
         return self.connection_name_entry.get().strip()
@@ -1052,6 +1093,7 @@ class ConnectionPanel(ctk.CTkFrame):
     def _save_server(self) -> None:
         name = self._get_connection_name()
         if self._persist_current_connection():
+            self._sync_action_buttons()
             self._set_status(f"Saved connection '{name or self._selected_saved}'.", "success")
 
     def _remove_saved(self) -> None:
@@ -1087,6 +1129,7 @@ class ConnectionPanel(ctk.CTkFrame):
         state = "disabled" if busy else "normal"
         self.test_btn.configure(state=state, text="Testing..." if testing else "Test Connection")
         self.save_btn.configure(state=state)
+        self.delete_btn.configure(state=state)
         self.connect_btn.configure(state=state, text="Connecting..." if connecting else "Connect")
 
     def _ensure_connection_name(self) -> None:
