@@ -14,7 +14,7 @@ def test_resolve_connection():
     assert conn.host == "localhost"
     assert conn.port == 5432
 
-
+ 
 def test_get_connector_postgresql():
     connector = get_connector(DatabaseType.POSTGRESQL)
     assert connector.db_type == DatabaseType.POSTGRESQL
@@ -31,3 +31,5 @@ def test_postgresql_health_check_mock():
         with patch.object(connector, "get_version", return_value="PostgreSQL 15"):
             result = connector.health_check()
             assert result["status"] == "healthy"
+
+

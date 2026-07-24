@@ -7,10 +7,12 @@ from typing import Any
 from backend.connectors.base import get_connector_from_info
 from backend.models.schemas import DatabaseType
 from desktop.connection import ConnectionResult
+from desktop.ssh_tunnel import resolve_active_connection
 
 
 def fetch_server_databases(connection: ConnectionResult) -> list[dict[str, Any]]:
     """Return databases on the server with name, owner, size, and status."""
+    connection = resolve_active_connection(connection)
     info = connection.to_connection_info()
     connector = get_connector_from_info(connection.db_type, info)
     db_type = connection.db_type

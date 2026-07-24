@@ -9,29 +9,38 @@ import customtkinter as ctk
 
 THEME_PREF_PATH = Path(__file__).resolve().parent.parent / "config" / "ui_preferences.json"
 
-RADIUS = {"sm": 10, "md": 14, "lg": 18, "xl": 24, "pill": 999}
+RADIUS = {"sm": 12, "md": 16, "lg": 22, "xl": 28, "pill": 999}
 
-# Ultra-modern realistic palette — layered depth, glass surfaces, refined accents
+FONT_DISPLAY = "Segoe UI"
+FONT_UI = "Segoe UI"
+
+# Ultra-realistic modern palette — layered depth, glass surfaces, mesh backgrounds
 THEMES = {
     "dark": {
         "appearance_mode": "dark",
         "color_theme": "blue",
-        "bg_app": "#030508",
-        "bg_sidebar": "#070b12",
-        "bg_content": "#0a0e16",
-        "bg_card": "#0f1520",
-        "bg_card_hover": "#151d2c",
-        "bg_elevated": "#121a28",
+        "bg_app": "#020408",
+        "bg_sidebar": "#060a12",
+        "bg_content": "#0b1018",
+        "bg_card": "#101722",
+        "bg_card_hover": "#161f2e",
+        "bg_elevated": "#141c2a",
         "bg_input": "#0a1018",
-        "bg_glass": "#111827",
+        "bg_glass": "#121a28cc",
         "bg_list": "#0c121c",
-        "border": "#1e2a3d",
-        "border_subtle": "#141c28",
-        "border_focus": "#5b9aff",
-        "primary": "#5b9aff",
-        "primary_hover": "#4a8ef5",
-        "primary_muted": "#152847",
+        "bg_mesh": "#0e1420",
+        "border": "#243044",
+        "border_subtle": "#1a2434",
+        "border_glow": "#3b82f633",
+        "border_focus": "#60a5fa",
+        "shadow_outer": "#000000",
+        "shadow_inner": "#1a2434",
+        "primary": "#3b82f6",
+        "primary_hover": "#2563eb",
+        "primary_muted": "#1e3a5f",
         "primary_glow": "#3b82f640",
+        "gradient_start": "#2563eb",
+        "gradient_end": "#7c3aed",
         "text_primary": "#f8fafc",
         "text_secondary": "#9aa8bc",
         "text_muted": "#6b7a90",
@@ -72,30 +81,36 @@ THEMES = {
         "sidebar_bg_card": "#0f1520",
         "sidebar_bg_hover": "#151d2c",
         "sidebar_bg_list": "#0a0e16",
-        "sidebar_nav_active": "#152847",
-        "sidebar_nav_hover": "#121a28",
-        "bg_primary": "#030508",
-        "bg_secondary": "#0f1520",
-        "bg_sidebar_legacy": "#070b12",
+        "sidebar_nav_active": "#1e3a5f",
+        "sidebar_nav_hover": "#141c2a",
+        "bg_primary": "#020408",
+        "bg_secondary": "#101722",
+        "bg_sidebar_legacy": "#060a12",
     },
     "light": {
         "appearance_mode": "light",
         "color_theme": "blue",
-        "bg_app": "#e4eaf2",
-        "bg_content": "#eef2f8",
+        "bg_app": "#c8d4e4",
+        "bg_content": "#dce4f0",
         "bg_card": "#ffffff",
         "bg_card_hover": "#f8fafc",
-        "bg_elevated": "#ffffff",
+        "bg_elevated": "#f1f5f9",
         "bg_input": "#ffffff",
         "bg_glass": "#ffffff",
-        "bg_list": "#f1f5f9",
-        "border": "#cdd6e3",
-        "border_subtle": "#e2e8f0",
+        "bg_list": "#eef2f8",
+        "bg_mesh": "#d4deec",
+        "border": "#b8c5d6",
+        "border_subtle": "#d8e0eb",
+        "border_glow": "#2563eb22",
         "border_focus": "#2563eb",
+        "shadow_outer": "#b8c4d4",
+        "shadow_inner": "#ffffff",
         "primary": "#2563eb",
         "primary_hover": "#1d4ed8",
-        "primary_muted": "#eff6ff",
-        "primary_glow": "#2563eb22",
+        "primary_muted": "#dbeafe",
+        "primary_glow": "#2563eb18",
+        "gradient_start": "#2563eb",
+        "gradient_end": "#6366f1",
         "text_primary": "#0f172a",
         "text_secondary": "#475569",
         "text_muted": "#64748b",
@@ -122,26 +137,26 @@ THEMES = {
         "metric_amber": "#d97706",
         "metric_amber_bg": "#fffbeb",
         "nav_active_text": "#ffffff",
-        "nav_idle_text": "#cbd5e1",
+        "nav_idle_text": "#94a3b8",
         "nav_indicator": "#2563eb",
         "log_info": "#475569",
         "log_success": "#059669",
         "log_warning": "#d97706",
         "log_error": "#dc2626",
         "terminal_bg": "#0f172a",
-        "bg_sidebar": "#0f172a",
-        "sidebar_border": "#1e293b",
+        "bg_sidebar": "#0a1020",
+        "sidebar_border": "#1a2744",
         "sidebar_text_primary": "#f8fafc",
         "sidebar_text_secondary": "#cbd5e1",
-        "sidebar_text_muted": "#94a3b8",
-        "sidebar_bg_card": "#1e293b",
-        "sidebar_bg_hover": "#334155",
+        "sidebar_text_muted": "#64748b",
+        "sidebar_bg_card": "#111827",
+        "sidebar_bg_hover": "#1e293b",
         "sidebar_bg_list": "#0c1220",
         "sidebar_nav_active": "#2563eb",
         "sidebar_nav_hover": "#1e293b",
-        "bg_primary": "#e4eaf2",
+        "bg_primary": "#c8d4e4",
         "bg_secondary": "#ffffff",
-        "bg_sidebar_legacy": "#0f172a",
+        "bg_sidebar_legacy": "#0a1020",
     },
 }
 
@@ -190,7 +205,8 @@ class ThemeManager:
         return RADIUS.get(key, RADIUS["md"])
 
     def font(self, size: int, *, weight: str = "normal") -> ctk.CTkFont:
-        return ctk.CTkFont(family="Segoe UI", size=size, weight=weight)
+        family = FONT_DISPLAY if size >= 22 else FONT_UI
+        return ctk.CTkFont(family=family, size=size, weight=weight)
 
     def log_level_color(self, level: str) -> str:
         key = f"log_{level.lower()}"

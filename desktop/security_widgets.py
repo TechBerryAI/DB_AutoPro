@@ -69,18 +69,23 @@ def alerts_donut_chart(
 
     legend = ctk.CTkFrame(parent, fg_color="transparent")
     legend.pack(fill="x", pady=(8, 0))
+    legend_labels: list[ctk.CTkLabel] = []
+    for _ in range(3):
+        lbl = ctk.CTkLabel(legend, text="", font=font(theme, 11), text_color=theme.c("text_secondary"), anchor="w")
+        lbl.pack(fill="x", pady=2)
+        legend_labels.append(lbl)
+    last_sig: list[tuple | None] = [None]
 
     def update(data: dict) -> None:
-        canvas.delete("all")
-        for child in legend.winfo_children():
-            child.destroy()
-
         critical = int(data.get("critical", 0))
         warning = int(data.get("warning", 0))
         info = int(data.get("info", 0))
         total = int(data.get("total", critical + warning + info))
-
-        canvas.update_idletasks()
+        sig = (critical, warning, info)
+        if sig == last_sig[0]:
+            return
+        last_sig[0] = sig
+        canvas.delete("all")
         w = max(canvas.winfo_width(), 160)
         h = height
         cx, cy = w * 0.38, h / 2
@@ -119,12 +124,9 @@ def alerts_donut_chart(
             ("Warning", warning, theme.c("warning")),
             ("Info", info, theme.c("primary")),
         ]
-        for name, count, color in specs:
+        for lbl, (name, count, color) in zip(legend_labels, specs):
             pct = f"{int(count / total * 100)}%" if total else "0%"
-            row = ctk.CTkFrame(legend, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-            ctk.CTkFrame(row, width=8, height=8, corner_radius=4, fg_color=color).pack(side="left", padx=(0, 8))
-            ctk.CTkLabel(row, text=f"{name}  {count}  ({pct})", font=font(theme, 11), text_color=theme.c("text_secondary"), anchor="w").pack(side="left")
+            lbl.configure(text=f"{name}  {count}  ({pct})", text_color=theme.c("text_secondary"))
 
     return update
 
@@ -153,12 +155,20 @@ def alerts_trend_chart(
         ctk.CTkFrame(row, width=8, height=8, corner_radius=4, fg_color=theme.c(key)).pack(side="left", padx=(0, 4))
         ctk.CTkLabel(row, text=label, font=font(theme, 10), text_color=theme.c("text_muted")).pack(side="left")
 
+    last_sig: list[tuple | None] = [None]
+
     def update(series: list[dict]) -> None:
+        sig = tuple(
+            (d.get("critical", 0), d.get("warning", 0), d.get("info", 0), d.get("label", ""))
+            for d in series
+        )
+        if sig == last_sig[0]:
+            return
+        last_sig[0] = sig
         canvas.delete("all")
         if not series:
             return
 
-        canvas.update_idletasks()
         w = max(canvas.winfo_width(), 280)
         h = height
         pad_l, pad_r, pad_t, pad_b = 28, 12, 14, 28
@@ -218,8 +228,7 @@ def security_alert_item(parent: ctk.CTkFrame, theme: ThemeManager, alert: dict) 
         parent,
         fg_color=theme.c("bg_elevated"),
         corner_radius=theme.radius("sm"),
-        border_width=1,
-        border_color=theme.c("border_subtle"),
+        border_width=0,
     )
     row.pack(fill="x", pady=4)
 

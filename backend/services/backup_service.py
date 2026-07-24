@@ -15,15 +15,23 @@ from backend.connectors.base import get_connector, resolve_connection
 from backend.core.config import get_settings
 from backend.core.exceptions import BackupError
 from backend.core.logging import get_audit_logger, get_logger
+from backend.services.backup_mode_handlers import (
+    backup_mysql,
+    backup_oracle,
+    backup_postgresql,
+)
 from backend.models.schemas import (
     BackupCategory,
     BackupMethod,
+    BackupMode,
     BackupRequest,
     DatabaseType,
     OperationResult,
     OperationStatus,
     backup_method_category,
+    backup_modes_for,
 )
+from backend.services.backup_chain import load_chain, record_backup
 
 logger = get_logger("services.backup")
 audit = get_audit_logger()
@@ -37,11 +45,13 @@ def _cli_not_found_error(tool: str) -> BackupError:
         "pg_dump": "Install PostgreSQL for Windows and add its bin folder to PATH.",
         "pg_dumpall": "Install PostgreSQL for Windows and add its bin folder to PATH.",
         "pg_basebackup": "Install PostgreSQL for Windows and add its bin folder to PATH.",
+        "pg_receivewal": "Install PostgreSQL for Windows and add its bin folder to PATH.",
         "mongodump": (
             "Install MongoDB Database Tools for Windows from mongodb.com/try/download/database-tools "
             "and add the bin folder to PATH."
         ),
         "mysqldump": "Install MySQL client tools and add them to PATH.",
+        "mysqlbinlog": "Install MySQL client tools and add them to PATH.",
     }
     hint = install_hints.get(tool, "Install the database client tools and add them to PATH.")
     return BackupError(f"'{tool}' was not found on this PC. {hint}")
@@ -77,6 +87,7 @@ class BackupService:
             if progress_callback:
                 progress_callback(0.1, "Preparing backup...")
 
+            self._validate_backup_mode(request)
             output_path = self._resolve_output_path(request)
             handlers = {
                 DatabaseType.POSTGRESQL: self._backup_postgresql,
@@ -117,10 +128,15 @@ class BackupService:
                 result.message = f"Remote backup completed on Linux server: {final_path}"
                 size_bytes = 0
             else:
-                size_bytes = final_path.stat().st_size
+                size_bytes = (
+                    sum(f.stat().st_size for f in final_path.rglob("*") if f.is_file())
+                    if final_path.is_dir()
+                    else final_path.stat().st_size
+                )
             result.details = {
                 "size_bytes": size_bytes,
                 "method": request.method.value,
+                "backup_mode": request.backup_mode.value,
                 "category": backup_method_category(request.method).value,
                 "db_type": request.db_type.value,
                 "remote": remote,
@@ -133,13 +149,26 @@ class BackupService:
             result.status = OperationStatus.FAILED
             result.message = str(exc)
             result.completed_at = datetime.now(timezone.utc)
-            audit.log("backup", user, request.profile, "failed", {"error": str(exc)})
+            audit.log("backup", user, request.profile, "failed", {
+                "error": str(exc),
+                "db_type": request.db_type.value,
+            })
             logger.error("Backup failed: %s", exc)
             raise BackupError(str(exc)) from exc
         finally:
             _operations[operation_id] = result
 
         return result
+
+    @staticmethod
+    def _validate_backup_mode(request: BackupRequest) -> None:
+        category = backup_method_category(request.method)
+        allowed = backup_modes_for(request.db_type, category)
+        if request.backup_mode not in allowed:
+            raise BackupError(
+                f"Backup mode '{request.backup_mode.value}' is not supported for "
+                f"{request.db_type.value} {category.value} backups."
+            )
 
     @staticmethod
     def _mongo_target_database(request: BackupRequest) -> str | None:
@@ -156,19 +185,27 @@ class BackupService:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         db_name = self._mongo_target_database(request) or "all"
         category = backup_method_category(request.method)
+        mode_tag = request.backup_mode.value
 
         if request.method == BackupMethod.PG_BASEBACKUP:
-            return base_dir / f"{request.db_type.value}_physical_{timestamp}"
+            return base_dir / f"{request.db_type.value}_physical_{mode_tag}_{timestamp}"
         if request.method == BackupMethod.MSSQL_BACKUP:
-            return base_dir / f"{request.db_type.value}_{db_name}_{timestamp}.bak"
+            ext = ".trn" if request.backup_mode == BackupMode.INCREMENTAL else ".bak"
+            return base_dir / f"{request.db_type.value}_{db_name}_{mode_tag}_{timestamp}{ext}"
         if request.method == BackupMethod.MONGODUMP:
             from backend.services.ssh_client import remote_backup_folder_name
 
             folder = remote_backup_folder_name(request.backup_folder_name, db_name)
             return base_dir / folder
 
+        if request.backup_mode != BackupMode.FULL:
+            if request.db_type == DatabaseType.POSTGRESQL:
+                return base_dir / f"{request.db_type.value}_{db_name}_{mode_tag}_{timestamp}_wal"
+            suffix = "sql"
+            return base_dir / f"{request.db_type.value}_{db_name}_{mode_tag}_{timestamp}.{suffix}"
+
         suffix = "sql" if category.value == "logical" else "backup"
-        return base_dir / f"{request.db_type.value}_{db_name}_{timestamp}.{suffix}"
+        return base_dir / f"{request.db_type.value}_{db_name}_full_{timestamp}.{suffix}"
 
     def _backup_postgresql(
         self,
@@ -176,53 +213,12 @@ class BackupService:
         output_path: Path,
         progress_callback: Callable[[float, str], None] | None,
     ) -> Path:
-        conn = resolve_connection(request.profile)
-        env = {"PGPASSWORD": conn.password}
-
-        if request.method == BackupMethod.PG_DUMPALL:
-            cmd = [
-                "pg_dumpall",
-                "-h", conn.host,
-                "-p", str(conn.port),
-                "-U", conn.username,
-                "-f", str(output_path),
-            ]
-        elif request.method == BackupMethod.PG_BASEBACKUP:
-            backup_dir = output_path.with_suffix("")
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                "pg_basebackup",
-                "-h", conn.host,
-                "-p", str(conn.port),
-                "-U", conn.username,
-                "-D", str(backup_dir),
-                "-Ft", "-z", "-P",
-            ]
-            try:
-                subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)
-            except FileNotFoundError as exc:
-                raise _cli_not_found_error("pg_basebackup") from exc
-            return backup_dir
-        else:
-            db = request.database or conn.database
-            cmd = [
-                "pg_dump",
-                "-h", conn.host,
-                "-p", str(conn.port),
-                "-U", conn.username,
-                "-d", db,
-                "-f", str(output_path),
-                "--format=plain",
-            ]
-
-        try:
-            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-        except FileNotFoundError as exc:
-            raise _cli_not_found_error(cmd[0]) from exc
-        if result.returncode != 0:
-            tool = request.method.value
-            raise BackupError(f"{tool} failed: {result.stderr}")
-        return output_path
+        return backup_postgresql(
+            request,
+            output_path,
+            progress_callback,
+            cli_not_found_error=_cli_not_found_error,
+        )
 
     def _backup_mysql(
         self,
@@ -230,21 +226,7 @@ class BackupService:
         output_path: Path,
         progress_callback: Callable[[float, str], None] | None,
     ) -> Path:
-        conn = resolve_connection(request.profile)
-        db = request.database or conn.database
-        cmd = [
-            "mysqldump",
-            "-h", conn.host,
-            "-P", str(conn.port),
-            "-u", conn.username,
-            f"-p{conn.password}",
-            db,
-            "--result-file", str(output_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise BackupError(f"mysqldump failed: {result.stderr}")
-        return output_path
+        return backup_mysql(request, output_path, progress_callback)
 
     def _backup_mongodb(
         self,
@@ -525,10 +507,27 @@ class BackupService:
     ) -> Path:
         conn = resolve_connection(request.profile)
         db = request.database or conn.database
-        backup_file = str(output_path.with_suffix(".bak"))
+        if request.backup_mode == BackupMode.INCREMENTAL:
+            backup_file = str(output_path.with_suffix(".trn"))
+            sql = f"BACKUP LOG [{db}] TO DISK = N'{backup_file}'"
+        if request.backup_mode == BackupMode.DIFFERENTIAL:
+            chain = load_chain(output_path.parent, request)
+            if not chain.get("full"):
+                raise BackupError(
+                    "Run a Full backup first before a differential backup."
+                )
+            backup_file = str(output_path.with_suffix(".bak"))
+            sql = f"BACKUP DATABASE [{db}] TO DISK = N'{backup_file}' WITH DIFFERENTIAL, INIT"
+        else:
+            backup_file = str(output_path.with_suffix(".bak"))
+            sql = f"BACKUP DATABASE [{db}] TO DISK = N'{backup_file}' WITH FORMAT, INIT"
         connector = get_connector(DatabaseType.MSSQL, request.profile)
-        connector.execute_script(
-            f"BACKUP DATABASE [{db}] TO DISK = N'{backup_file}' WITH FORMAT, INIT"
+        connector.execute_script(sql)
+        record_backup(
+            output_path.parent,
+            request,
+            {"path": backup_file, "database": db},
+            request.backup_mode,
         )
         return Path(backup_file)
 
@@ -538,18 +537,7 @@ class BackupService:
         output_path: Path,
         progress_callback: Callable[[float, str], None] | None,
     ) -> Path:
-        conn = resolve_connection(request.profile)
-        cmd = [
-            "expdp",
-            f"{conn.username}/{conn.password}@{conn.host}:{conn.port}/{conn.database}",
-            f"DIRECTORY=DATA_PUMP_DIR",
-            f"DUMPFILE={output_path.name}",
-            "FULL=Y",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise BackupError(f"Oracle expdp failed: {result.stderr}")
-        return output_path
+        return backup_oracle(request, output_path, progress_callback)
 
     def _compress(self, path: Path) -> Path:
         if self.settings.backup.compression_format == "gzip":

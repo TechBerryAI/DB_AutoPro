@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 from desktop.connection import ConnectionResult
-from desktop.connection_panel import ConnectionPanel
+from desktop.connection_panel import ConnectionPanel, _widget_alive
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
 
@@ -66,8 +66,11 @@ class ServersView(BaseView):
             self._panel.load_saved_by_name(name)
 
     def _update_session(self) -> None:
-        if self._panel:
-            self._panel.update_session(self.connection)
+        if not self.winfo_exists() or not self._panel:
+            return
+        if not _widget_alive(self._panel):
+            return
+        self._panel.update_session(self.connection)
 
     def _on_connected(self, connection: ConnectionResult) -> None:
         if self.establish_callback:

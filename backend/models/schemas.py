@@ -28,6 +28,12 @@ class BackupCategory(str, Enum):
     PHYSICAL = "physical"
 
 
+class BackupMode(str, Enum):
+    FULL = "full"
+    INCREMENTAL = "incremental"
+    DIFFERENTIAL = "differential"
+
+
 class MongoRestoreScope(str, Enum):
     ALL_DATABASES = "all_databases"
     SPECIFIC_DATABASE = "specific_database"
@@ -66,6 +72,29 @@ def backup_methods_for(
     return list(_BACKUP_METHODS.get((db_type, category), []))
 
 
+def backup_modes_for(
+    db_type: DatabaseType, category: BackupCategory
+) -> list[BackupMode]:
+    """Return backup modes supported for a database type and backup category."""
+    if db_type == DatabaseType.MONGODB:
+        return [BackupMode.FULL]
+    if category == BackupCategory.PHYSICAL:
+        if db_type == DatabaseType.POSTGRESQL:
+            return [BackupMode.FULL, BackupMode.INCREMENTAL]
+        if db_type == DatabaseType.MSSQL:
+            return [BackupMode.FULL, BackupMode.DIFFERENTIAL]
+        return [BackupMode.FULL]
+    if db_type == DatabaseType.POSTGRESQL:
+        return [BackupMode.FULL, BackupMode.INCREMENTAL, BackupMode.DIFFERENTIAL]
+    if db_type == DatabaseType.MYSQL:
+        return [BackupMode.FULL, BackupMode.INCREMENTAL]
+    if db_type == DatabaseType.MSSQL:
+        return [BackupMode.FULL, BackupMode.DIFFERENTIAL]
+    if db_type == DatabaseType.ORACLE:
+        return [BackupMode.FULL, BackupMode.INCREMENTAL]
+    return [BackupMode.FULL]
+
+
 def backup_method_category(method: BackupMethod) -> BackupCategory:
     """Classify a backup method as logical or physical."""
     if method in (BackupMethod.PG_BASEBACKUP, BackupMethod.MSSQL_BACKUP):
@@ -90,6 +119,7 @@ class BackupRequest(BaseModel):
     profile: str = "default"
     db_type: DatabaseType = DatabaseType.POSTGRESQL
     method: BackupMethod = BackupMethod.PG_DUMP
+    backup_mode: BackupMode = BackupMode.FULL
     database: str | None = None
     compress: bool = True
     output_path: str | None = None

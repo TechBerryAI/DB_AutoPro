@@ -29,6 +29,8 @@ class AuthDialog(ctk.CTk):
         self._mode = "login"
         self._prefill_username: str = ""
         self._wraplength = 440
+        self._destroying = False
+        self._pending_jobs: list[str] = []
         self.theme = ThemeManager(load_saved_theme())
 
         self.title(f"{APP_NAME} — Login")
@@ -41,17 +43,26 @@ class AuthDialog(ctk.CTk):
         self.bind("<Map>", self._on_map, add="+")
         self.bind("<Configure>", self._on_resize, add="+")
 
+    def _defer(self, delay_ms: int, callback) -> None:
+        if self._destroying:
+            return
+        try:
+            job = self.after(delay_ms, callback)
+            self._pending_jobs.append(job)
+        except Exception:
+            pass
+
     def _on_map(self, _event=None) -> None:
-        self.after(0, self._fit_window)
+        self._defer(0, self._fit_window)
 
     def _on_resize(self, event=None) -> None:
-        if event is not None and event.widget is not self:
+        if self._destroying or event is not None and event.widget is not self:
             return
         self._sync_layout_widths()
 
     def _fit_window(self) -> None:
         """Size and center the window for the current auth mode."""
-        if not self.winfo_exists():
+        if self._destroying or not self.winfo_exists():
             return
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
@@ -67,7 +78,7 @@ class AuthDialog(ctk.CTk):
         self._sync_layout_widths()
 
     def _sync_layout_widths(self) -> None:
-        if not self.winfo_exists():
+        if self._destroying or not self.winfo_exists():
             return
         card_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, self.winfo_width() - 56))
         self._wraplength = max(320, card_w - (BODY_PAD * 2) - 16)
@@ -84,8 +95,8 @@ class AuthDialog(ctk.CTk):
                     pass
 
     def _schedule_fit(self) -> None:
-        self.after(0, self._fit_window)
-        self.after(120, self._fit_window)
+        self._defer(0, self._fit_window)
+        self._defer(120, self._fit_window)
 
     def _center_window(self, _width: int, _height: int) -> None:
         self._schedule_fit()
@@ -121,15 +132,10 @@ class AuthDialog(ctk.CTk):
         )
         self.card.grid(row=1, column=1, sticky="n", padx=20, pady=20)
         self.card.grid_columnconfigure(0, weight=1)
-        self.card.grid_rowconfigure(1, weight=1)
-
-        accent_row = ctk.CTkFrame(self.card, fg_color="transparent")
-        accent_row.grid(row=0, column=0, sticky="ew")
-        ctk.CTkFrame(accent_row, height=4, corner_radius=0, fg_color=self.theme.c("primary")).pack(fill="x")
-        ctk.CTkFrame(accent_row, height=1, fg_color=self.theme.c("accent")).pack(fill="x")
+        self.card.grid_rowconfigure(0, weight=1)
 
         self.body = ctk.CTkFrame(self.card, fg_color="transparent")
-        self.body.grid(row=1, column=0, sticky="nsew", padx=BODY_PAD, pady=BODY_PAD)
+        self.body.grid(row=0, column=0, sticky="nsew", padx=BODY_PAD, pady=BODY_PAD)
         self.body.grid_columnconfigure(0, weight=1)
         self.body.grid_rowconfigure(0, weight=1)
 
@@ -410,22 +416,32 @@ class AuthDialog(ctk.CTk):
         self.session = None
         self._safe_destroy()
 
-    @staticmethod
-    def _cancel_pending_callbacks(widget) -> None:
+    def _safe_destroy(self) -> None:
+        if self._destroying:
+            return
+        self._destroying = True
+        for job in self._pending_jobs:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._pending_jobs.clear()
         try:
-            for after_id in widget.tk.call("after", "info"):
-                try:
-                    widget.after_cancel(after_id)
-                except Exception:
-                    pass
+            self.unbind("<Map>")
+            self.unbind("<Configure>")
+            self.unbind("<Return>")
         except Exception:
             pass
-        for child in widget.winfo_children():
-            AuthDialog._cancel_pending_callbacks(child)
+        try:
+            self.after(0, self._finish_destroy)
+        except Exception:
+            self._finish_destroy()
 
-    def _safe_destroy(self) -> None:
-        self._cancel_pending_callbacks(self)
-        super().destroy()
+    def _finish_destroy(self) -> None:
+        try:
+            super().destroy()
+        except Exception:
+            pass
 
     @staticmethod
     def show() -> EmployeeSession | None:
