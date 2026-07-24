@@ -67,7 +67,7 @@ def primary_button(
     text: str,
     command: Callable | None = None,
     width: int | None = None,
-    height: int = 44,
+    height: int = 36,
 ) -> ctk.CTkButton:
     kwargs: dict = {
         "text": text,
@@ -92,7 +92,7 @@ def secondary_button(
     text: str,
     command: Callable | None = None,
     width: int | None = None,
-    height: int = 44,
+    height: int = 36,
 ) -> ctk.CTkButton:
     kwargs: dict = {
         "text": text,
@@ -139,7 +139,7 @@ def destructive_button(
     text: str,
     command: Callable | None = None,
     width: int | None = None,
-    height: int = 44,
+    height: int = 36,
 ) -> ctk.CTkButton:
     kwargs: dict = {
         "text": text,

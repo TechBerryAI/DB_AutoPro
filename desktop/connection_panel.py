@@ -69,7 +69,8 @@ class ConnectionPanel(ctk.CTkFrame):
         self.bind("<Return>", lambda _e: self._on_connect())
         if SHOW_SAVED_CONNECTIONS_SIDEBAR:
             self._refresh_saved_list()
-        self._select_db_type(DatabaseType.POSTGRESQL, load_saved=False)
+        # Initial blank form — do not notify parent (would clear active saved selection on view rebuild).
+        self._select_db_type(DatabaseType.POSTGRESQL, load_saved=False, notify=False)
 
     def _init_sidebar_stubs(self) -> None:
         """Hidden placeholders so save/load logic keeps working without the sidebar UI."""
@@ -370,14 +371,34 @@ class ConnectionPanel(ctk.CTkFrame):
         # (Test + Save + Connect). Saved profiles use load_saved_by_name().
         self._select_db_type(db_type, load_saved=False)
 
-    def load_saved_by_name(self, name: str) -> None:
-        """Load a named saved profile (used from the main nav Saved Connection list)."""
+    def load_saved_by_name(self, name: str) -> bool:
+        """Load a named saved profile. Returns True if found."""
         self._servers_filter = "all"
         for server in load_saved_servers():
             if server.name == name:
                 self._load_saved_server(server)
-                return
+                return True
         self._set_status(f"Saved connection '{name}' not found.", "warning")
+        return False
+
+    def load_from_connection(self, connection: ConnectionResult) -> None:
+        """Fill the form from an active ConnectionResult (post-connect restore)."""
+        server = SavedServer(
+            name=connection.saved_name or connection.name,
+            db_type=connection.db_type.value,
+            host=connection.host,
+            port=connection.port,
+            username=connection.username,
+            password=connection.password,
+            database=connection.database,
+            auth_database=connection.auth_database or "",
+            ssh_enabled=connection.ssh_enabled,
+            linux_username=connection.linux_username,
+            linux_password=connection.linux_password,
+            ssh_host=connection.ssh_host or "",
+            ssh_port=connection.ssh_port,
+        )
+        self._load_saved_server(server)
 
     def _notify_saved_servers_changed(self, name: str | None = None) -> None:
         if self.on_saved_servers_changed:
@@ -600,7 +621,7 @@ class ConnectionPanel(ctk.CTkFrame):
 
     def _build_linux_access_card(self, parent: ctk.CTkFrame) -> None:
         body = self._section_card(parent, "Linux Server Access (SSH)")
-        body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(0, weight=1)
 
         self.ssh_enabled_var = ctk.BooleanVar(value=False)
         self.ssh_enabled_cb = ctk.CTkCheckBox(
@@ -608,31 +629,41 @@ class ConnectionPanel(ctk.CTkFrame):
             text="Connect through Linux server using SSH tunnel",
             variable=self.ssh_enabled_var,
             command=self._sync_ssh_fields,
+            font=ctk.CTkFont(size=13),
+            text_color=self.theme.c("text_primary"),
+            fg_color=self.theme.c("primary"),
+            hover_color=self.theme.c("primary_hover"),
+            border_color=self.theme.c("border"),
         )
-        self.ssh_enabled_cb.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.ssh_enabled_cb.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        self._labeled_field(body, "Linux host", row=1)
+        # All SSH inputs live in this frame so they can be shown/hidden together.
+        self._ssh_fields_frame = ctk.CTkFrame(body, fg_color="transparent")
+        self._ssh_fields_frame.grid(row=1, column=0, sticky="ew")
+        self._ssh_fields_frame.grid_columnconfigure(1, weight=1)
+
+        self._labeled_field(self._ssh_fields_frame, "Linux host", row=0)
         self.ssh_host_entry = ctk.CTkEntry(
-            body,
+            self._ssh_fields_frame,
             height=ENTRY_HEIGHT,
             placeholder_text="Same as database host if left blank",
         )
-        self.ssh_host_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=6)
+        self.ssh_host_entry.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=6)
 
-        self._labeled_field(body, "SSH port", row=2)
-        self.ssh_port_entry = ctk.CTkEntry(body, width=90, height=ENTRY_HEIGHT)
+        self._labeled_field(self._ssh_fields_frame, "SSH port", row=1)
+        self.ssh_port_entry = ctk.CTkEntry(self._ssh_fields_frame, width=90, height=ENTRY_HEIGHT)
         self.ssh_port_entry.insert(0, "22")
-        self.ssh_port_entry.grid(row=2, column=1, sticky="w", padx=(12, 0), pady=6)
+        self.ssh_port_entry.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=6)
 
-        self._labeled_field(body, "Linux username", row=3)
+        self._labeled_field(self._ssh_fields_frame, "Linux username", row=2)
         self.linux_user_entry = ctk.CTkEntry(
-            body, height=ENTRY_HEIGHT, placeholder_text="e.g. ubuntu, root, techadmin"
+            self._ssh_fields_frame, height=ENTRY_HEIGHT, placeholder_text="e.g. ubuntu, root, techadmin"
         )
-        self.linux_user_entry.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=6)
+        self.linux_user_entry.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=6)
 
-        self._labeled_field(body, "Linux password", row=4)
-        linux_pw_row = ctk.CTkFrame(body, fg_color="transparent")
-        linux_pw_row.grid(row=4, column=1, sticky="ew", padx=(12, 0), pady=6)
+        self._labeled_field(self._ssh_fields_frame, "Linux password", row=3)
+        linux_pw_row = ctk.CTkFrame(self._ssh_fields_frame, fg_color="transparent")
+        linux_pw_row.grid(row=3, column=1, sticky="ew", padx=(12, 0), pady=6)
         linux_pw_row.grid_columnconfigure(0, weight=1)
         self.linux_password_entry = ctk.CTkEntry(linux_pw_row, height=ENTRY_HEIGHT, show="*")
         self.linux_password_entry.grid(row=0, column=0, sticky="ew")
@@ -652,7 +683,7 @@ class ConnectionPanel(ctk.CTkFrame):
         self.linux_password_toggle_btn.grid(row=0, column=1, padx=(8, 0))
 
         ctk.CTkLabel(
-            body,
+            self._ssh_fields_frame,
             text=(
                 "Use the Linux login for the machine where the database runs. "
                 "The app opens an SSH tunnel, then connects with the DB username/password below."
@@ -661,7 +692,7 @@ class ConnectionPanel(ctk.CTkFrame):
             text_color=self.theme.c("text_muted"),
             wraplength=560,
             justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         self._ssh_fields = (
             self.ssh_host_entry,
@@ -680,10 +711,22 @@ class ConnectionPanel(ctk.CTkFrame):
         )
 
     def _sync_ssh_fields(self) -> None:
-        enabled = self.ssh_enabled_var.get()
-        state = "normal" if enabled else "disabled"
-        for widget in self._ssh_fields:
-            widget.configure(state=state)
+        """Show SSH fields only when the tunnel checkbox is checked."""
+        enabled = bool(self.ssh_enabled_var.get())
+        if not hasattr(self, "_ssh_fields_frame"):
+            return
+        if enabled:
+            if not self._ssh_fields_frame.winfo_manager():
+                self._ssh_fields_frame.grid(row=1, column=0, sticky="ew")
+            for widget in self._ssh_fields:
+                widget.configure(state="normal")
+        else:
+            self._ssh_fields_frame.grid_remove()
+            for widget in self._ssh_fields:
+                try:
+                    widget.configure(state="disabled")
+                except Exception:
+                    pass
 
     def _with_ssh_fields_enabled(self, callback):
         """Run callback while SSH inputs are editable (disabled entries may not read/write reliably)."""
@@ -744,7 +787,13 @@ class ConnectionPanel(ctk.CTkFrame):
                 )
                 tile.grid_remove()
 
-    def _select_db_type(self, db_type: DatabaseType, *, load_saved: bool = False) -> None:
+    def _select_db_type(
+        self,
+        db_type: DatabaseType,
+        *,
+        load_saved: bool = False,
+        notify: bool = True,
+    ) -> None:
         """Switch engine type. Only load a saved profile when load_saved=True."""
         self._db_type_var.set(db_type.value)
         self._apply_db_type_tiles(db_type)
@@ -760,7 +809,8 @@ class ConnectionPanel(ctk.CTkFrame):
         self._apply_engine_profile(db_type)
         self._update_mongodb_fields(db_type)
         self._sync_action_buttons()
-        self._notify_saved_servers_changed(None)
+        if notify:
+            self._notify_saved_servers_changed(None)
         self._set_status(
             f"New {DB_ICON_META[db_type]['label']} connection — test or save when ready.",
             "info",
@@ -1236,6 +1286,9 @@ class ConnectionPanel(ctk.CTkFrame):
                     border_color=self.theme.c("border"),
                     text_color=self.theme.c("text_primary"),
                 )
+        # Re-apply SSH show/hide after theme styling so fields stay in sync.
+        if hasattr(self, "ssh_enabled_var"):
+            self._sync_ssh_fields()
 
     def apply_theme(self, theme: ThemeManager) -> None:
         """Re-apply theme tokens after light/dark toggle."""

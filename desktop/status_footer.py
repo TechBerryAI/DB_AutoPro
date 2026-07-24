@@ -9,14 +9,14 @@ from desktop.theme import ThemeManager
 
 
 class StatusFooterBar(ctk.CTkFrame):
-    """Footer showing connection status, version, sessions, and last refresh."""
+    """Subtle application status bar — muted, compact, non-competing."""
 
     def __init__(self, master, theme: ThemeManager, **kwargs) -> None:
         super().__init__(
             master,
-            height=44,
+            height=32,
             corner_radius=0,
-            fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
+            fg_color=theme.c("bg_content"),
             border_width=0,
             **kwargs,
         )
@@ -26,9 +26,9 @@ class StatusFooterBar(ctk.CTkFrame):
 
     def _build_ui(self) -> None:
         self.grid_propagate(False)
-        ctk.CTkFrame(self, height=1, fg_color=self.theme.c("border")).pack(fill="x")
+        ctk.CTkFrame(self, height=1, fg_color=self.theme.c("border_subtle")).pack(fill="x")
         inner = ctk.CTkFrame(self, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=22, pady=8)
+        inner.pack(fill="both", expand=True, padx=20, pady=4)
 
         fields = [
             ("connection", "● Disconnected"),
@@ -37,14 +37,21 @@ class StatusFooterBar(ctk.CTkFrame):
             ("sessions", "Sessions —"),
             ("refresh", "Last refresh —"),
         ]
-        for key, default in fields:
+        for i, (key, default) in enumerate(fields):
+            if i > 0:
+                ctk.CTkLabel(
+                    inner,
+                    text="|",
+                    font=font(self.theme, 11),
+                    text_color=self.theme.c("border"),
+                ).pack(side="left", padx=10)
             lbl = ctk.CTkLabel(
                 inner,
                 text=default,
                 font=font(self.theme, 11),
                 text_color=self.theme.c("text_muted"),
             )
-            lbl.pack(side="left", padx=(0, 24))
+            lbl.pack(side="left")
             self._labels[key] = lbl
 
     def update(
@@ -59,20 +66,30 @@ class StatusFooterBar(ctk.CTkFrame):
         if connection_status:
             connected = "connected" in connection_status.lower()
             color = self.theme.c("success") if connected else self.theme.c("text_muted")
-            self._labels["connection"].configure(text=connection_status, text_color=color)
+            text = connection_status
+            if not connected and connection_status.strip() in {"● Disconnected", "Disconnected"}:
+                text = "● Disconnected"
+            self._labels["connection"].configure(text=text, text_color=color)
         if version:
-            self._labels["version"].configure(text=f"DB {version}")
+            self._labels["version"].configure(
+                text=f"Version {version}" if not version.lower().startswith("version") else version
+            )
         if uptime:
-            self._labels["uptime"].configure(text=f"Engine {uptime}")
+            self._labels["uptime"].configure(
+                text=f"Uptime {uptime}" if not uptime.lower().startswith("uptime") else uptime
+            )
         if sessions:
-            self._labels["sessions"].configure(text=f"Sessions {sessions}")
+            self._labels["sessions"].configure(
+                text=f"Sessions {sessions}" if not sessions.lower().startswith("sessions") else sessions
+            )
         if last_refresh:
-            self._labels["refresh"].configure(text=f"Refreshed {last_refresh}")
+            text = last_refresh
+            if not last_refresh.lower().startswith("last"):
+                text = f"Last refresh {last_refresh}"
+            self._labels["refresh"].configure(text=text)
 
     def apply_theme(self, theme: ThemeManager) -> None:
         self.theme = theme
-        self.configure(
-            fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-        )
+        self.configure(fg_color=theme.c("bg_content"))
         for lbl in self._labels.values():
             lbl.configure(text_color=theme.c("text_muted"))

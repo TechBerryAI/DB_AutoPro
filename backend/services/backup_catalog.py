@@ -41,6 +41,10 @@ def _mongo_collection_arg(request: BackupRequest) -> str:
     return ""
 
 
+def _mongo_gzip_arg(request: BackupRequest) -> str:
+    return " --gzip" if request.gzip_archive else ""
+
+
 def _mongo_target_database(request: BackupRequest) -> str | None:
     """Explicit database from backup form only; None means dump all databases."""
     if request.database and request.database.strip():
@@ -86,6 +90,7 @@ def describe_backup_command(request: BackupRequest) -> str:
         mongo_port = opts.get("mongo_port", port)
         folder_name = _mongo_folder_preview(request)
         coll = _mongo_collection_arg(request)
+        gzip = _mongo_gzip_arg(request)
         db_arg = _mongo_db_arg(request)
         auth = (
             f"--username {user} --password **** "
@@ -105,7 +110,7 @@ def describe_backup_command(request: BackupRequest) -> str:
                 return (
                     f"ssh {ssh_user}@{ssh_host} → "
                     f"{mongodump} --host {mongo_host} --port {mongo_port} "
-                    f"{auth}{db_arg}{coll} "
+                    f"{auth}{db_arg}{coll}{gzip} "
                     f"--out {out_dir}/{folder_name}\n"
                     f"Local output dir (this PC): {local_dir}"
                 )
@@ -114,12 +119,12 @@ def describe_backup_command(request: BackupRequest) -> str:
                 f"ssh {ssh_user}@{ssh_host} → run mongodump on Linux server, "
                 f"then download to this PC:\n"
                 f"{mongodump} --host {mongo_host} --port {mongo_port} "
-                f"{auth}{db_arg}{coll} "
+                f"{auth}{db_arg}{coll}{gzip} "
                 f"--out {local_dir}/{folder_name}"
             )
         return (
             f"mongodump --host {host} --port {port} "
-            f"{auth}{db_arg}{coll} "
+            f"{auth}{db_arg}{coll}{gzip} "
             f"--out {_local_output_hint(request, folder_name)}"
         )
 

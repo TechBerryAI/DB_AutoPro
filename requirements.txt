@@ -30,6 +30,8 @@ psutil>=5.9.7
 # Desktop UI
 customtkinter>=5.2.1
 fpdf2>=2.7.9
+Pillow>=10.0.0
+resvg_py>=0.3.0
 
 # Remote Linux SSH tunnels (desktop connections)
 paramiko>=3.4.0
