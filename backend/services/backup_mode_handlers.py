@@ -21,6 +21,9 @@ from backend.models.schemas import (
 from backend.services.backup_chain import anchor_for_mode, load_chain, record_backup
 from backend.services.pg_tools import resolve_local_pg_tool
 
+# Level 1 keeps custom-format backups small without the heavy CPU cost of level 9.
+PG_DUMP_COMPRESS_LEVEL = 1
+
 
 def _pg_executable(tool: str, cli_not_found_error: Callable[[str], BackupError]) -> str:
     try:
@@ -37,6 +40,7 @@ def _run_pg_dump_command(
     *,
     cli_not_found_error: Callable[[str], BackupError],
     progress_callback: Callable[[float, str], None] | None = None,
+    expected_bytes: int | None = None,
 ) -> None:
     """Run pg_dump/pg_dumpall using the resolved binary and optional file-size progress."""
     pg_bin = _pg_executable(tool, cli_not_found_error)
@@ -48,15 +52,26 @@ def _run_pg_dump_command(
         stderr=subprocess.PIPE,
         text=True,
     )
+    started = time.monotonic()
     try:
         while proc.poll() is None:
-            if progress_callback and output_path.exists():
-                size_mb = output_path.stat().st_size / (1024 * 1024)
-                progress_callback(
-                    min(0.88, 0.35 + size_mb / 80.0),
-                    f"Running {tool}... ({size_mb:.1f} MB written)",
-                )
-            time.sleep(1.5)
+            if progress_callback:
+                elapsed = int(time.monotonic() - started)
+                written_mb = 0.0
+                if output_path.exists():
+                    written_mb = output_path.stat().st_size / (1024 * 1024)
+                if expected_bytes and expected_bytes > 0:
+                    expected_mb = expected_bytes / (1024 * 1024)
+                    ratio = min(1.0, (written_mb * 1024 * 1024) / expected_bytes)
+                    progress = min(0.92, 0.08 + ratio * 0.84)
+                    message = (
+                        f"Running {tool}... {written_mb:.1f} / ~{expected_mb:.0f} MB ({elapsed}s)"
+                    )
+                else:
+                    progress = min(0.92, 0.08 + written_mb / 120.0)
+                    message = f"Running {tool}... {written_mb:.1f} MB written ({elapsed}s)"
+                progress_callback(progress, message)
+            time.sleep(0.8)
     finally:
         if proc.poll() is None:
             proc.wait()
@@ -90,6 +105,24 @@ def _pg_current_lsn(profile: str) -> str:
     return str(rows[0]["lsn"]) if rows else ""
 
 
+def _pg_database_size_bytes(profile: str, database: str) -> int | None:
+    """Return on-disk database size in bytes for progress estimation."""
+    import re
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", database or ""):
+        return None
+    try:
+        rows = _pg_query(
+            profile,
+            f"SELECT pg_database_size('{database}') AS size",
+        )
+        if rows and rows[0].get("size") is not None:
+            return int(rows[0]["size"])
+    except Exception:
+        return None
+    return None
+
+
 def backup_postgresql(
     request: BackupRequest,
     output_path: Path,
@@ -100,6 +133,20 @@ def backup_postgresql(
     if request.method == BackupMethod.PG_BASEBACKUP:
         return _postgresql_basebackup(request, output_path, cli_not_found_error)
     if request.backup_mode == BackupMode.FULL:
+        from backend.connectors.base import resolve_connection
+        from backend.services.ssh_client import ssh_options_from_connection
+
+        conn = resolve_connection(request.profile)
+        ssh = ssh_options_from_connection(conn)
+        if ssh and request.method in (BackupMethod.PG_DUMP, BackupMethod.PG_DUMPALL):
+            return _postgresql_logical_full_via_ssh(
+                request,
+                output_path,
+                conn,
+                ssh,
+                cli_not_found_error,
+                progress_callback,
+            )
         return _postgresql_logical_full(
             request, output_path, cli_not_found_error, progress_callback
         )
@@ -170,11 +217,21 @@ def _postgresql_logical_full(
             "-U", conn.username,
             "-d", db,
             "-f", str(output_path),
-            "--format=plain",
+            "--format=custom",
+            f"--compress={PG_DUMP_COMPRESS_LEVEL}",
         ]
 
+    expected_bytes = None
+    if tool == "pg_dump":
+        db_name = request.database or conn.database
+        expected_bytes = _pg_database_size_bytes(request.profile, db_name)
+
     if progress_callback:
-        progress_callback(0.3, f"Running {tool}...")
+        if expected_bytes:
+            expected_mb = expected_bytes / (1024 * 1024)
+            progress_callback(0.08, f"Running {tool}... (~{expected_mb:.0f} MB database)")
+        else:
+            progress_callback(0.08, f"Running {tool}...")
     _run_pg_dump_command(
         tool,
         args,
@@ -182,10 +239,96 @@ def _postgresql_logical_full(
         output_path,
         cli_not_found_error=cli_not_found_error,
         progress_callback=progress_callback,
+        expected_bytes=expected_bytes,
     )
     if progress_callback:
         progress_callback(0.9, f"{tool} completed")
     _record_postgresql_chain(request, output_path.parent, str(output_path))
+    return output_path
+
+
+def _postgresql_logical_full_via_ssh(
+    request: BackupRequest,
+    output_path: Path,
+    conn,
+    ssh: dict,
+    cli_not_found_error: Callable[[str], BackupError],
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> Path:
+    """Run pg_dump on the Linux server, then download the archive to this PC."""
+    from backend.services.ssh_client import (
+        _ssh_kwargs,
+        build_pg_dump_remote_command,
+        download_remote_file,
+        pg_endpoint_from_connection,
+        remote_file_size,
+        remove_remote_path,
+        resolve_remote_pg_dump_path,
+        run_ssh_command,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pg_host, pg_port = pg_endpoint_from_connection(conn)
+    db = request.database or conn.database
+    dumpall = request.method == BackupMethod.PG_DUMPALL
+    remote_name = output_path.name if output_path.suffix else f"{output_path.name}.dump"
+    remote_path = f"/tmp/{remote_name}"
+
+    if progress_callback:
+        progress_callback(0.12, "Locating pg_dump on Linux server...")
+    try:
+        pg_dump_path = resolve_remote_pg_dump_path(ssh, None)
+    except RuntimeError as exc:
+        raise BackupError(str(exc)) from exc
+
+    expected_bytes = None if dumpall else _pg_database_size_bytes(request.profile, db)
+
+    command = build_pg_dump_remote_command(
+        pg_dump_path=pg_dump_path,
+        pg_host=pg_host,
+        pg_port=pg_port,
+        username=conn.username,
+        password=conn.password,
+        output_path=remote_path,
+        database=db,
+        dumpall=dumpall,
+        compress_level=PG_DUMP_COMPRESS_LEVEL,
+    )
+
+    if progress_callback:
+        label = "pg_dumpall" if dumpall else "pg_dump"
+        if expected_bytes:
+            expected_mb = expected_bytes / (1024 * 1024)
+            progress_callback(0.18, f"Running {label} on Linux server (~{expected_mb:.0f} MB DB)...")
+        else:
+            progress_callback(0.18, f"Running {label} on Linux server...")
+
+    started = time.monotonic()
+    exit_code, _stdout, stderr = run_ssh_command(command=command, timeout=7200, **_ssh_kwargs(ssh))
+    if exit_code != 0:
+        remove_remote_path(ssh, remote_path)
+        detail = stderr.strip() or "pg_dump failed on Linux server"
+        raise BackupError(detail)
+
+    if progress_callback:
+        elapsed = int(time.monotonic() - started)
+        remote_mb = remote_file_size(ssh, remote_path) / (1024 * 1024)
+        progress_callback(0.72, f"Downloading backup ({remote_mb:.1f} MB, server finished in {elapsed}s)...")
+
+    try:
+        download_remote_file(ssh, remote_path, output_path)
+    finally:
+        remove_remote_path(ssh, remote_path)
+
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        raise BackupError("Backup download completed but the local file is empty.")
+
+    if progress_callback:
+        local_mb = output_path.stat().st_size / (1024 * 1024)
+        progress_callback(0.92, f"Backup saved ({local_mb:.1f} MB)")
+
+    if not dumpall:
+        _record_postgresql_chain(request, output_path.parent, str(output_path))
     return output_path
 
 

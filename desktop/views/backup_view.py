@@ -10,19 +10,14 @@ import customtkinter as ctk
 from backend.models.schemas import (
     BackupCategory,
     BackupMethod,
-    BackupMode,
     BackupRequest,
     DatabaseType,
     backup_methods_for,
-    backup_modes_for,
 )
 from backend.services.backup_catalog import (
     category_description,
     describe_backup_command,
     method_label,
-    mode_description,
-    mode_label,
-    mode_requires_wal_note,
 )
 from backend.services.backup_service import BackupService
 from desktop.connection_store import SavedServer, load_saved_servers, upsert_server
@@ -40,14 +35,13 @@ class BackupView(BaseView):
         super().__init__(master, theme, log_callback, **kwargs)
         self.service = BackupService()
         self._category = BackupCategory.LOGICAL
-        self._backup_mode = BackupMode.FULL
         self._local_output_dir = str(self.service.output_dir)
         self._remote_output_dir = "/mnt/backup"
         self._mongodb_collections: list[dict] = []
+        self._collection_rows: list[ctk.CTkFrame] = []
+        self._selected_collection_name: str | None = None
         self._build_ui()
         self._init_remote_defaults()
-        self._sync_category_controls()
-        self._sync_mode_controls()
         self._refresh_methods()
 
     def _init_remote_defaults(self) -> None:
@@ -78,12 +72,14 @@ class BackupView(BaseView):
                 self.remote_binary.delete(0, "end")
                 self.remote_binary.insert(0, saved.mongodump_path)
             if saved.backup_collection:
+                self._selected_collection_name = saved.backup_collection
                 self.collection_combo.configure(
                     values=["All collections", saved.backup_collection]
                 )
                 self.collection_combo.set(saved.backup_collection)
 
         self._sync_mongo_fields()
+        self._update_collection_scope_label()
 
     def _is_mongodb_session(self) -> bool:
         return self._active_db_type() == DatabaseType.MONGODB
@@ -141,8 +137,6 @@ class BackupView(BaseView):
         self.db_type.grid(row=0, column=1, padx=16, pady=10, sticky="ew")
         if self.connection:
             self.db_type.configure(state="disabled")
-        else:
-            self.db_type.configure(command=self._on_db_type_changed)
 
         ctk.CTkLabel(form, text="Connection:").grid(row=1, column=0, padx=16, pady=10, sticky="w")
         conn_label = self.connection.name if self.connection else "default"
@@ -161,13 +155,6 @@ class BackupView(BaseView):
         self.category_seg.set("Logical")
         self.category_seg.grid(row=0, column=0, sticky="w")
 
-        self.category_logical_label = ctk.CTkLabel(
-            type_frame,
-            text="Logical",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.theme.c("text_primary"),
-        )
-
         self.category_hint = ctk.CTkLabel(
             type_frame,
             text=category_description(BackupCategory.LOGICAL),
@@ -178,56 +165,16 @@ class BackupView(BaseView):
         )
         self.category_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
-        self.mode_label = ctk.CTkLabel(form, text="Backup Mode:")
-        self.mode_label.grid(row=3, column=0, padx=16, pady=10, sticky="nw")
-        mode_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.mode_frame = mode_frame
-        mode_frame.grid(row=3, column=1, padx=16, pady=10, sticky="ew")
-        mode_frame.grid_columnconfigure(0, weight=1)
-
-        mode_row = ctk.CTkFrame(mode_frame, fg_color="transparent")
-        mode_row.grid(row=0, column=0, sticky="w")
-
-        self.mode_seg = ctk.CTkSegmentedButton(
-            mode_row,
-            values=["Full Backup", "Incremental Backup", "Differential Backup"],
-            command=self._on_mode_changed,
-        )
-        self.mode_seg.set("Full Backup")
-        self.mode_seg.pack(side="left")
-
-        self.mode_new_badge = ctk.CTkLabel(
-            mode_row,
-            text="New",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#FFFFFF",
-            fg_color="#22C55E",
-            corner_radius=6,
-            width=36,
-            height=20,
-        )
-        self.mode_new_badge.pack(side="left", padx=(8, 0))
-
-        self.mode_hint = ctk.CTkLabel(
-            mode_frame,
-            text=mode_description(DatabaseType.POSTGRESQL, BackupCategory.LOGICAL, BackupMode.FULL),
-            font=ctk.CTkFont(size=11),
-            text_color=self.theme.c("text_muted"),
-            justify="left",
-            anchor="w",
-        )
-        self.mode_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
-        ctk.CTkLabel(form, text="Command:").grid(row=4, column=0, padx=16, pady=10, sticky="nw")
+        ctk.CTkLabel(form, text="Command:").grid(row=3, column=0, padx=16, pady=10, sticky="nw")
         self.method = ctk.CTkComboBox(
             form, values=["pg_dump"], command=self._on_method_changed
         )
         self.method.set("pg_dump")
-        self.method.grid(row=4, column=1, padx=16, pady=10, sticky="ew")
+        self.method.grid(row=3, column=1, padx=16, pady=10, sticky="ew")
 
-        ctk.CTkLabel(form, text="Database:").grid(row=5, column=0, padx=16, pady=10, sticky="nw")
+        ctk.CTkLabel(form, text="Database:").grid(row=4, column=0, padx=16, pady=10, sticky="nw")
         db_col = ctk.CTkFrame(form, fg_color="transparent")
-        db_col.grid(row=5, column=1, padx=16, pady=10, sticky="ew")
+        db_col.grid(row=4, column=1, padx=16, pady=10, sticky="ew")
         db_col.grid_columnconfigure(0, weight=1)
 
         self.database = ctk.CTkEntry(
@@ -251,7 +198,7 @@ class BackupView(BaseView):
         self.database_hint.pack(anchor="w", pady=(6, 0))
 
         self.collections_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.collections_frame.grid(row=6, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.collections_frame.grid(row=5, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.collections_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self.collections_frame, text="Collection:").grid(row=0, column=0, sticky="w", pady=6)
@@ -277,29 +224,43 @@ class BackupView(BaseView):
 
         ctk.CTkLabel(
             self.collections_frame,
-            text="Collections in selected database:",
+            text="Collections in selected database — click one for a single-collection backup:",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=self.theme.c("text_primary"),
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 4))
 
-        self.collections_list = ctk.CTkTextbox(self.collections_frame, height=100, activate_scrollbars=True)
+        self.collections_list = ctk.CTkScrollableFrame(
+            self.collections_frame,
+            height=120,
+            fg_color=self.theme.c("bg_elevated"),
+            corner_radius=8,
+        )
         self.collections_list.grid(row=2, column=0, columnspan=2, sticky="ew")
-        self.collections_list.configure(state="disabled")
+
+        self.collection_scope_label = ctk.CTkLabel(
+            self.collections_frame,
+            text="Scope: all collections in this database",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.theme.c("primary"),
+            anchor="w",
+        )
+        self.collection_scope_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ctk.CTkLabel(
             self.collections_frame,
             text=(
-                "Click Load Collections to list collections in the Database field above. "
-                "Choose one to add --collection to mongodump, or leave as All collections."
+                "Click a collection to select it for a single-collection backup "
+                "(adds --collection to mongodump). Choose “All collections” for the full database."
             ),
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             justify="left",
             anchor="w",
-        ).grid(row=3, column=0, columnspan=2, sticky="w")
+            wraplength=560,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.output_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.output_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.output_frame.grid(row=6, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.output_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self.output_frame, text="Output dir:").grid(row=0, column=0, sticky="w", pady=6)
@@ -352,8 +313,17 @@ class BackupView(BaseView):
             anchor="w",
         ).grid(row=3, column=1, padx=(12, 0), sticky="w")
 
+        self.gzip_var = ctk.BooleanVar(value=False)
+        self.gzip_cb = ctk.CTkCheckBox(
+            self.output_frame,
+            text="Gzip archive (--gzip)",
+            variable=self.gzip_var,
+            command=self._update_command_preview,
+        )
+        self.gzip_cb.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         self.remote_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.remote_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.remote_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.remote_frame.grid_columnconfigure(1, weight=1)
 
         self.use_remote_var = ctk.BooleanVar(value=False)
@@ -378,34 +348,13 @@ class BackupView(BaseView):
         self.remote_dir_entry.grid(row=2, column=1, padx=(12, 0), pady=6, sticky="ew")
         self.remote_dir_entry.bind("<KeyRelease>", lambda _e: self._update_command_preview())
 
-        # Compression UI removed; backups are always stored uncompressed.
-        ctk.CTkLabel(form, text="Preview:").grid(row=9, column=0, padx=16, pady=10, sticky="nw")
+        ctk.CTkLabel(form, text="Preview:").grid(row=8, column=0, padx=16, pady=10, sticky="nw")
         self.command_preview = ctk.CTkTextbox(form, height=88, activate_scrollbars=True)
-        self.command_preview.grid(row=9, column=1, padx=16, pady=10, sticky="ew")
+        self.command_preview.grid(row=8, column=1, padx=16, pady=10, sticky="ew")
         self.command_preview.configure(state="disabled")
 
-        self.mode_note = ctk.CTkFrame(
-            form,
-            fg_color="#EFF6FF",
-            border_width=1,
-            border_color="#BFDBFE",
-            corner_radius=8,
-        )
-        self.mode_note.grid(row=10, column=0, columnspan=2, padx=16, pady=(0, 10), sticky="ew")
-        self.mode_note.grid_columnconfigure(0, weight=1)
-        self.mode_note_label = ctk.CTkLabel(
-            self.mode_note,
-            text="ⓘ  Note: Incremental/differential backups archive WAL segments and require wal_level=replica (or logical) on the server. Run a Full backup first.",
-            font=ctk.CTkFont(size=11),
-            text_color="#1D4ED8",
-            justify="left",
-            anchor="w",
-            wraplength=640,
-        )
-        self.mode_note_label.grid(row=0, column=0, padx=12, pady=10, sticky="ew")
-
         btn_frame = ctk.CTkFrame(form, fg_color="transparent")
-        btn_frame.grid(row=11, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
+        btn_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
 
         ctk.CTkButton(
             btn_frame,
@@ -458,87 +407,10 @@ class BackupView(BaseView):
             return self.get_active_db_type()
         return DatabaseType(self.db_type.get())
 
-    def _on_db_type_changed(self, _value: str | None = None) -> None:
-        self._sync_category_controls()
-        self._sync_mode_controls()
-        self._sync_mongo_fields()
-        self._refresh_methods()
-
-    def _sync_category_controls(self) -> None:
-        if self._is_mongodb_session():
-            self._category = BackupCategory.LOGICAL
-            self.category_seg.grid_remove()
-            self.category_logical_label.grid(row=0, column=0, sticky="w")
-            self.category_hint.configure(text=category_description(BackupCategory.LOGICAL))
-        else:
-            self.category_logical_label.grid_remove()
-            self.category_seg.grid(row=0, column=0, sticky="w")
-
-    def _mode_from_label(self, label: str) -> BackupMode:
-        for mode in BackupMode:
-            if mode_label(mode) == label:
-                return mode
-        return BackupMode.FULL
-
-    def _sync_mode_controls(self) -> None:
-        db_type = self._active_db_type()
-        modes = backup_modes_for(db_type, self._category)
-        labels = [mode_label(m) for m in modes]
-
-        if db_type == DatabaseType.MONGODB:
-            self._backup_mode = BackupMode.FULL
-            self.mode_label.grid_remove()
-            self.mode_frame.grid_remove()
-            self.mode_note.grid_remove()
-            return
-
-        self.mode_label.grid()
-        self.mode_frame.grid()
-
-        if len(modes) <= 1:
-            self.mode_seg.grid_remove()
-            self.mode_new_badge.pack_forget()
-            self._backup_mode = BackupMode.FULL
-        else:
-            self.mode_seg.configure(values=labels)
-            if self._backup_mode not in modes:
-                self._backup_mode = BackupMode.FULL
-            self.mode_seg.set(mode_label(self._backup_mode))
-            if not self.mode_seg.winfo_ismapped():
-                self.mode_seg.pack(side="left")
-            if BackupMode.DIFFERENTIAL in modes:
-                if not self.mode_new_badge.winfo_ismapped():
-                    self.mode_new_badge.pack(side="left", padx=(8, 0))
-            else:
-                self.mode_new_badge.pack_forget()
-
-        self.mode_hint.configure(
-            text=mode_description(db_type, self._category, self._backup_mode)
-        )
-        if mode_requires_wal_note(db_type, self._category, self._backup_mode):
-            self.mode_note.grid()
-        else:
-            self.mode_note.grid_remove()
-
     def _on_category_changed(self, value: str) -> None:
-        if self._is_mongodb_session():
-            return
         self._category = BackupCategory.PHYSICAL if value == "Physical" else BackupCategory.LOGICAL
         self.category_hint.configure(text=category_description(self._category))
-        self._sync_mode_controls()
         self._refresh_methods()
-
-    def _on_mode_changed(self, value: str) -> None:
-        self._backup_mode = self._mode_from_label(value)
-        db_type = self._active_db_type()
-        self.mode_hint.configure(
-            text=mode_description(db_type, self._category, self._backup_mode)
-        )
-        if mode_requires_wal_note(db_type, self._category, self._backup_mode):
-            self.mode_note.grid()
-        else:
-            self.mode_note.grid_remove()
-        self._update_command_preview()
 
     def _on_method_changed(self, _value: str | None = None) -> None:
         self._sync_form_state()
@@ -584,44 +456,179 @@ class BackupView(BaseView):
     def _backup_database_name(self) -> str | None:
         return self.database.get().strip() or None
 
-    def _on_collection_changed(self, _value: str | None = None) -> None:
+    def _on_collection_changed(self, value: str | None = None) -> None:
+        selected = value if value is not None else self.collection_combo.get()
+        if not selected or selected == "All collections":
+            self._selected_collection_name = None
+        else:
+            self._selected_collection_name = selected
+        self._highlight_collection_rows()
+        self._update_collection_scope_label()
         self._update_command_preview()
 
     def _selected_collection(self) -> str | None:
         value = self.collection_combo.get()
         if not value or value == "All collections":
             return None
-        return value
+        return value.strip() or None
+
+    def _update_collection_scope_label(self) -> None:
+        if not hasattr(self, "collection_scope_label"):
+            return
+        coll = self._selected_collection()
+        db = self._backup_database_name() or "database"
+        if coll:
+            self.collection_scope_label.configure(
+                text=f"Scope: single collection → {db}.{coll}",
+                text_color=self.theme.c("success"),
+            )
+        else:
+            self.collection_scope_label.configure(
+                text=f"Scope: all collections in {db}",
+                text_color=self.theme.c("primary"),
+            )
+
+    def _clear_collection_rows(self) -> None:
+        for row in self._collection_rows:
+            row.destroy()
+        self._collection_rows.clear()
 
     def _show_collections_message(self, text: str) -> None:
-        self.collections_list.configure(state="normal")
-        self.collections_list.delete("1.0", "end")
-        self.collections_list.insert("1.0", text)
-        self.collections_list.configure(state="disabled")
+        self._clear_collection_rows()
+        msg = ctk.CTkLabel(
+            self.collections_list,
+            text=text,
+            font=ctk.CTkFont(size=12),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+            justify="left",
+        )
+        msg.pack(fill="x", padx=10, pady=10)
+        self._collection_rows.append(msg)
+
+    def _select_collection(self, name: str | None) -> None:
+        """Select a single collection (or None for all) for mongodump --collection."""
+        if name:
+            self.collection_combo.set(name)
+            self._selected_collection_name = name
+        else:
+            self.collection_combo.set("All collections")
+            self._selected_collection_name = None
+        self._highlight_collection_rows()
+        self._update_collection_scope_label()
+        self._update_command_preview()
+        self._save_mongo_prefs()
+
+    def _highlight_collection_rows(self) -> None:
+        active = self._selected_collection()
+        for row in self._collection_rows:
+            name = getattr(row, "_collection_name", None)
+            marker = getattr(row, "_marker", None)
+            if name is None:
+                continue
+            is_all_option = name == ""
+            selected = (active is None and is_all_option) or (bool(active) and name == active)
+            if selected:
+                row.configure(fg_color=self.theme.c("primary_muted"), border_color=self.theme.c("primary"))
+                if marker is not None:
+                    marker.configure(text="●", text_color=self.theme.c("primary"))
+            else:
+                row.configure(fg_color=self.theme.c("bg_card"), border_color=self.theme.c("border_subtle"))
+                if marker is not None:
+                    marker.configure(text="○", text_color=self.theme.c("text_muted"))
+
+    def _make_collection_row(self, *, key: str, title: str, subtitle: str = "") -> ctk.CTkFrame:
+        """Selectable collection row — click anywhere to choose for single-collection backup."""
+        row = ctk.CTkFrame(
+            self.collections_list,
+            fg_color=self.theme.c("bg_card"),
+            corner_radius=8,
+            border_width=1,
+            border_color=self.theme.c("border_subtle"),
+            height=40,
+        )
+        row.pack(fill="x", padx=6, pady=2)
+        row.pack_propagate(False)
+        row._collection_name = key  # type: ignore[attr-defined]
+
+        inner = ctk.CTkFrame(row, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=12, pady=0)
+
+        marker = ctk.CTkLabel(
+            inner,
+            text="○",
+            width=18,
+            font=ctk.CTkFont(size=14),
+            text_color=self.theme.c("text_muted"),
+        )
+        marker.pack(side="left")
+        row._marker = marker  # type: ignore[attr-defined]
+
+        title_lbl = ctk.CTkLabel(
+            inner,
+            text=title,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        )
+        title_lbl.pack(side="left", padx=(8, 8), fill="x", expand=True)
+
+        meta = None
+        if subtitle:
+            meta = ctk.CTkLabel(
+                inner,
+                text=subtitle,
+                font=ctk.CTkFont(size=12),
+                text_color=self.theme.c("text_muted"),
+                width=110,
+                anchor="e",
+            )
+            meta.pack(side="right")
+
+        target = None if key == "" else key
+
+        def on_click(_event=None, n=target) -> None:
+            self._select_collection(n)
+
+        for widget in (row, inner, marker, title_lbl):
+            widget.bind("<Button-1>", on_click)
+        if meta is not None:
+            meta.bind("<Button-1>", on_click)
+
+        self._collection_rows.append(row)
+        return row
+
+    def _add_collection_row(self, name: str, count: int) -> None:
+        self._make_collection_row(key=name, title=name, subtitle=f"{count:,} docs")
 
     def _populate_collections(self, collections: list[dict], error: str | None = None) -> None:
         self._mongodb_collections = collections
         self.collection_combo.configure(state="normal")
+        self._clear_collection_rows()
+
         if error:
             self._show_collections_message(f"Error: {error}")
             self.collection_combo.configure(values=["All collections"])
-            self.collection_combo.set("All collections")
-            self._update_command_preview()
+            self._select_collection(None)
             return
 
         names = [c["name"] for c in collections]
         self.collection_combo.configure(values=["All collections"] + names)
-        self.collection_combo.set("All collections")
 
-        self.collections_list.configure(state="normal")
-        self.collections_list.delete("1.0", "end")
         if not collections:
-            self.collections_list.insert("1.0", "No collections found.")
+            self._show_collections_message("No collections found in this database.")
+            self._select_collection(None)
+            return
+
+        self._make_collection_row(key="", title="All collections", subtitle="Full database")
+        for item in collections:
+            self._add_collection_row(item["name"], int(item.get("count", 0) or 0))
+
+        preferred = self._selected_collection_name
+        if preferred and preferred in names:
+            self._select_collection(preferred)
         else:
-            lines = [f"{c['name']}  ({c.get('count', 0):,} docs)" for c in collections]
-            self.collections_list.insert("1.0", "\n".join(lines))
-        self.collections_list.configure(state="disabled")
-        self._update_command_preview()
+            self._select_collection(None)
 
     def _load_collections(self) -> None:
         if not self._is_mongodb_session():
@@ -701,7 +708,6 @@ class BackupView(BaseView):
             profile=self.get_active_profile(),
             db_type=self._active_db_type(),
             method=BackupMethod(method_value),
-            backup_mode=self._backup_mode,
             database=db_name,
             compress=False,
             local_output_dir=local_dir if self._is_mongodb_session() and not remote else None,
@@ -710,6 +716,7 @@ class BackupView(BaseView):
             remote_output_dir=self.remote_dir_entry.get().strip() or None,
             backup_folder_name=self.backup_folder_entry.get().strip() or None,
             collection=self._selected_collection() if db_name else None,
+            gzip_archive=bool(self.gzip_var.get()) if self._is_mongodb_session() else False,
         )
 
     def _update_command_preview(self) -> None:
@@ -735,8 +742,9 @@ class BackupView(BaseView):
             try:
                 request = self._build_request()
                 category = self._category.value
-                mode = self._backup_mode.value
-                self.log(f"Starting {category} {mode} backup: {request.method.value}")
+                self.log(f"Starting {category} backup: {request.method.value}")
+                if request.collection:
+                    self.log(f"Single collection: {request.database}.{request.collection}")
                 result = self.service.create_backup(request, progress_callback=self._update_progress)
                 self.after(0, self._save_mongo_prefs)
                 self.after(
@@ -749,9 +757,6 @@ class BackupView(BaseView):
             except Exception as exc:
                 self.after(0, lambda: self.results.insert("end", f"Error: {exc}\n"))
                 self.log(f"Backup failed: {exc}", "ERROR")
-            finally:
-                self.after(0, lambda: self.progress.set(0))
-                self.after(0, lambda: self.status_label.configure(text="Ready"))
 
         threading.Thread(target=task, daemon=True).start()
 

@@ -1,10 +1,8 @@
-"""Enterprise operations dashboard for DB Automation Pro."""
+"""Enterprise Database Operations Command Center dashboard."""
 
 from __future__ import annotations
 
-import queue
 import threading
-import time
 from collections import deque
 from datetime import datetime
 from typing import Callable
@@ -12,29 +10,29 @@ from typing import Callable
 import customtkinter as ctk
 
 from backend.models.schemas import DatabaseType
-from backend.services.monitoring_service import (
-    DashboardConnectionScope,
-    MonitoringService,
-    empty_backup_analytics,
-    empty_security_dashboard,
-)
+from backend.services.monitoring_service import MonitoringService
 from desktop.connection_store import load_saved_servers
 from desktop.db_catalog import fetch_server_databases
 from desktop.db_performance import fetch_database_performance
-from desktop.dashboard_widgets import (
-    analytics_card,
-    host_stat_row,
-    panel_grid,
-    resource_gauge,
-    section_block,
-)
+from desktop.dashboard_widgets import host_stat_row, section_block
 from desktop.db_performance_widgets import build_database_performance_section
 from desktop.design_system import font, status_chip
 from desktop.employee_store import EmployeeSession
 from desktop.infrastructure_health import InfrastructureHealthPanel
+from desktop.ops_widgets import (
+    activity_item,
+    alert_item_compact,
+    command_center_header,
+    compact_kpi_card,
+    compact_section,
+    empty_state,
+    health_overview_visual,
+    panel_card,
+    resource_progress_row,
+    threshold_color,
+)
 from desktop.security_widgets import build_security_section, security_alert_item, top_risk_row
 from desktop.theme import ThemeManager
-from desktop.ui_components import home_greeting_card, key_metric_tile
 from desktop.views.base_view import BaseView
 
 
@@ -60,7 +58,7 @@ def _initials(name: str) -> str:
 
 
 def _datetime_text() -> str:
-    return datetime.now().strftime("%A, %d %B %Y - %H:%M:%S")
+    return datetime.now().strftime("%I:%M:%S %p").lstrip("0")
 
 
 def _format_gb(value_gb: float) -> str:
@@ -69,25 +67,13 @@ def _format_gb(value_gb: float) -> str:
     return f"{value_gb:.1f} GB"
 
 
-# Poll intervals (ms) — tuned to reduce UI thread load
-CLOCK_MS = 2000
-FAST_POLL_MS = 10000
-SLOW_POLL_MS = 45000
-DB_POLL_MS = 10000
-COUNTS_CACHE_TTL = 30.0
-UI_QUEUE_MS = 50
-
-
 def _gauge_color(theme: ThemeManager, pct: float, base: str) -> str:
-    if pct >= 90:
-        return theme.c("error")
-    if pct >= 75:
-        return theme.c("warning")
-    return theme.c(base)
+    _ = base
+    return threshold_color(theme, pct)
 
 
 class DashboardView(BaseView):
-    """Enterprise operations dashboard."""
+    """Enterprise Database Operations Command Center."""
 
     def __init__(
         self,
@@ -99,34 +85,20 @@ class DashboardView(BaseView):
         sidebar_refresh: Callable[[], None] | None = None,
         **kwargs,
     ) -> None:
-        initial_refresh = kwargs.pop("initial_refresh", False)
+        initial_refresh = kwargs.pop("initial_refresh", True)
         super().__init__(master, theme, log_callback, employee=employee, **kwargs)
         self.monitoring = MonitoringService()
         self.navigate_callback = navigate_callback
         self.sidebar_refresh = sidebar_refresh
         self._metric_values: dict[str, ctk.CTkLabel] = {}
-        self._metric_badges: dict[str, ctk.CTkLabel] = {}
+        self._metric_secondary: dict[str, ctk.CTkLabel] = {}
         self._datetime_label: ctk.CTkLabel | None = None
         self._gauges: dict[str, tuple[ctk.CTkProgressBar, ctk.CTkLabel, ctk.CTkLabel]] = {}
         self._host_labels: dict[str, ctk.CTkLabel] = {}
         self._host_status_chip: ctk.CTkLabel | None = None
         self._poll_job: str | None = None
-        self._slow_poll_job: str | None = None
-        self._db_poll_job: str | None = None
         self._clock_job: str | None = None
-        self._bootstrap_job: str | None = None
         self._db_poll_busy = False
-        self._slow_poll_busy = False
-        self._is_active = False
-        self._sys_metrics_sig: tuple | None = None
-        self._chart_sig: tuple | None = None
-        self._last_load_pct: float | None = None
-        self._db_count_cache: int | None = None
-        self._saved_count_cache: int | None = None
-        self._counts_cache_ts = 0.0
-        self._slow_rows_sig: tuple | None = None
-        self._recent_alerts_sig: tuple | None = None
-        self._top_risks_sig: tuple | None = None
         self._db_perf_refs: dict = {}
         self._db_samples: deque = deque(maxlen=24)
         self._last_sys_metrics: dict = {}
@@ -134,133 +106,77 @@ class DashboardView(BaseView):
         self._health_panel: InfrastructureHealthPanel | None = None
         self._last_db_metrics: dict = {}
         self._timers_active = True
-        self._ui_queue: queue.SimpleQueue = queue.SimpleQueue()
-        self._ui_queue_job: str | None = None
+        self._db_health_counts: dict[str, ctk.CTkLabel] = {}
+        self._db_health_rows: ctk.CTkFrame | None = None
+        self._health_visual_host: ctk.CTkFrame | None = None
+        self._health_update: Callable[[dict[str, int]], None] | None = None
+        self._alerts_list: ctk.CTkFrame | None = None
+        self._activity_list: ctk.CTkFrame | None = None
+        self._jobs_list: ctk.CTkFrame | None = None
+        self._backup_labels: dict[str, ctk.CTkLabel] = {}
+        self._activity_metric_labels: dict[str, ctk.CTkLabel] = {}
+        self._conn_limit_label: ctk.CTkLabel | None = None
+        self._panel_fingerprint: dict[str, str] = {}
+        self._db_list_cache: tuple[float, list] | None = None
         self._build_ui()
         if initial_refresh:
             self.refresh()
-
-    def set_active(self, active: bool) -> None:
-        """Pause or resume live polling when this view is hidden or shown."""
-        if active == self._is_active:
-            return
-        self._is_active = active
-        if self._health_panel is not None:
-            self._health_panel.set_active(active)
-        if not active:
-            self._cancel_timer_jobs()
-            return
-        if self._bootstrap_job is not None:
-            try:
-                self.after_cancel(self._bootstrap_job)
-            except Exception:
-                pass
-        self._bootstrap_job = self.after(1, self._bootstrap_live_data)
-        self._start_ui_queue_pump()
         self._schedule_clock_tick()
-        self._schedule_fast_poll()
-        self._schedule_slow_poll()
-        if self.connection:
-            self._schedule_db_poll()
-            self._apply_health_dashboard()
-        else:
-            empty = {"connected": False}
-            self._last_db_metrics = empty
-            self._db_samples.clear()
-            self._chart_sig = None
-            self._apply_db_performance_dashboard(empty)
-            self._apply_health_dashboard(empty)
-            self._apply_security_data(empty_security_dashboard())
-            self._apply_backup_data(empty_backup_analytics())
-
-    def _bootstrap_live_data(self) -> None:
-        """First paint when the dashboard becomes visible — avoids work while hidden."""
-        self._bootstrap_job = None
-        if not self._is_active or not self.winfo_exists():
-            return
-        self.refresh(include_sidebar=False)
-
-    def _cancel_timer_jobs(self) -> None:
-        for attr in ("_poll_job", "_slow_poll_job", "_db_poll_job", "_clock_job", "_bootstrap_job"):
-            job = getattr(self, attr, None)
-            if job is not None:
-                try:
-                    self.after_cancel(job)
-                except Exception:
-                    pass
-                setattr(self, attr, None)
-        self._db_poll_busy = False
-        self._slow_poll_busy = False
-        self._stop_ui_queue_pump(drain=True)
-
-    def _start_ui_queue_pump(self) -> None:
-        if self._ui_queue_job is None and self._timers_active and self.winfo_exists():
-            self._pump_ui_queue()
-
-    def _stop_ui_queue_pump(self, *, drain: bool = False) -> None:
-        job = self._ui_queue_job
-        if job is not None:
-            try:
-                self.after_cancel(job)
-            except Exception:
-                pass
-            self._ui_queue_job = None
-        if drain:
-            while True:
-                try:
-                    self._ui_queue.get_nowait()
-                except queue.Empty:
-                    break
-
-    def _pump_ui_queue(self) -> None:
-        self._ui_queue_job = None
-        if not self._timers_active or not self.winfo_exists():
-            return
-        while True:
-            try:
-                callback = self._ui_queue.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                if self._timers_active and self.winfo_exists():
-                    callback()
-            except Exception:
-                pass
-        if self._timers_active and self.winfo_exists():
-            try:
-                self._ui_queue_job = self.after(UI_QUEUE_MS, self._pump_ui_queue)
-            except Exception:
-                self._ui_queue_job = None
-
-    def _enqueue_ui(self, callback: Callable[[], None]) -> None:
-        """Schedule UI work on the main thread (safe to call from worker threads)."""
-        if not self._timers_active or not self._is_active:
-            return
-        self._ui_queue.put(callback)
+        self._schedule_system_poll()
 
     def destroy(self) -> None:
         self._timers_active = False
-        self._is_active = False
         self._db_poll_busy = False
-        self._slow_poll_busy = False
         if self._health_panel is not None:
             try:
                 self._health_panel.destroy()
             except Exception:
                 pass
             self._health_panel = None
-        self._cancel_timer_jobs()
+        for job_attr in ("_poll_job", "_clock_job"):
+            job = getattr(self, job_attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_attr, None)
         super().destroy()
 
     def _schedule_clock_tick(self) -> None:
-        if not self._timers_active or not self._is_active or not self.winfo_exists():
+        if not self._timers_active or not self.winfo_exists():
             return
-        if self._datetime_label and self._datetime_label.winfo_exists():
-            self._datetime_label.configure(text=_datetime_text())
-        try:
-            self._clock_job = self.after(CLOCK_MS, self._schedule_clock_tick)
-        except Exception:
-            self._clock_job = None
+        if self._datetime_label:
+            self._datetime_label.configure(text=f"Last updated {_datetime_text()}")
+        # Avoid 1Hz UI churn — clock is informational only.
+        self._clock_job = self.after(5000, self._schedule_clock_tick)
+
+    def _content_changed(self, key: str, fingerprint: str, *, force: bool = False) -> bool:
+        """Return True when panel widgets must be rebuilt (content actually changed)."""
+        if not force and self._panel_fingerprint.get(key) == fingerprint:
+            return False
+        self._panel_fingerprint[key] = fingerprint
+        return True
+
+    def _cached_server_databases(self) -> list:
+        """Cache database inventory briefly to avoid hammering the server every poll."""
+        import time
+
+        now = time.monotonic()
+        if self._db_list_cache and (now - self._db_list_cache[0]) < 15:
+            return self._db_list_cache[1]
+        rows: list = []
+        if self.connection:
+            try:
+                rows = fetch_server_databases(self.connection)
+            except Exception:
+                rows = []
+        self._db_list_cache = (now, rows)
+        return rows
+
+    def _nav(self, key: str) -> None:
+        if self.navigate_callback:
+            self.navigate_callback(key)
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -272,17 +188,15 @@ class DashboardView(BaseView):
             scrollbar_button_color=self.theme.c("bg_elevated"),
             scrollbar_button_hover_color=self.theme.c("primary"),
         )
-        scroll.grid(row=0, column=0, sticky="nsew", padx=32, pady=(24, 20))
+        scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(12, 12))
         scroll.grid_columnconfigure(0, weight=1)
+        self._build_command_center(scroll)
 
-        self._build_overview_page(scroll)
-        self._build_health_page(scroll)
-
-    def _build_overview_page(self, scroll: ctk.CTkScrollableFrame) -> None:
+    def _build_command_center(self, scroll: ctk.CTkScrollableFrame) -> None:
         name = self.employee.full_name if self.employee else "User"
         role = _role_label(self.employee.role) if self.employee else "Operator"
 
-        _, self._datetime_label = home_greeting_card(
+        self._datetime_label = command_center_header(
             scroll,
             self.theme,
             greeting=f"{_greeting()}, {name}",
@@ -292,99 +206,261 @@ class DashboardView(BaseView):
             on_refresh=self.refresh,
         )
 
-        # ── Key Metrics ──
-        km_body = section_block(scroll, self.theme, "Key Metrics", subtitle="Saved profiles, active connection, and today's job activity")
-        grid = ctk.CTkFrame(km_body, fg_color="transparent")
-        grid.pack(fill="x")
+        self._build_kpi_row(scroll)
+        self._build_health_alerts_row(scroll)
+        self._build_infra_activity_row(scroll)
+        self._build_backup_jobs_row(scroll)
+        self._build_recent_activity(scroll)
+        self._build_legacy_detail_sections(scroll)
+
+    def _build_kpi_row(self, scroll: ctk.CTkScrollableFrame) -> None:
+        grid = ctk.CTkFrame(scroll, fg_color="transparent")
+        grid.pack(fill="x", pady=(0, 20))
         for col in range(3):
-            grid.grid_columnconfigure(col, weight=1, uniform="metric")
+            grid.grid_columnconfigure(col, weight=1, uniform="kpi3")
 
         tiles = [
-            ("linux_servers", "⬡", "metric_blue", "metric_blue_bg", "Saved Servers", "Profiles", "Registered database profiles", "Saved"),
-            ("databases", "◎", "metric_purple", "metric_purple_bg", "Databases", "Offline", "On connected server", "Multi-DB"),
-            ("active_jobs", "▣", "metric_blue", "metric_blue_bg", "Active Jobs", "Live", "Backup/restore running now", "Live"),
-            ("success_today", "✓", "metric_green", "metric_green_bg", "Success Today", "Today", "Connect, backup, restore OK", "Today"),
-            ("failed_today", "!", "metric_red", "metric_red_bg", "Failed Today", "OK", "Connect, backup, restore errors", "Today"),
-            ("pending_jobs", "◷", "metric_amber", "metric_amber_bg", "Pending Jobs", "Queue", "Queued backup/restore jobs", "Queue"),
+            ("linux_servers", "Saved Servers", "No active connection"),
+            ("databases", "Connected Databases", "Active connections"),
+            ("healthy_dbs", "Healthy", "Passing health checks"),
+            ("active_jobs", "Active Jobs", "Running automation"),
+            ("active_alerts", "Active Alerts", "Requires attention"),
+            ("failed_today", "Failed Backups", "Failed today"),
         ]
-        for i, spec in enumerate(tiles):
-            key, icon, ck, bgk, title, badge, subtitle, link = spec
-            row, col = divmod(i, 3)
-            card, val_lbl, badge_lbl = key_metric_tile(
-                grid, self.theme,
-                icon=icon,
-                icon_color=self.theme.c(ck),
-                icon_bg=self.theme.c(bgk),
-                title=title, badge=badge,
-                badge_fg=self.theme.c(bgk), badge_text=self.theme.c(ck),
-                subtitle=subtitle, footer_link=link,
-            )
-            card.grid(row=row, column=col, padx=(0 if col == 0 else 10, 0), pady=(0 if row == 0 else 10, 0), sticky="nsew")
-            self._metric_values[key] = val_lbl
-            self._metric_badges[key] = badge_lbl
-
-        # ── Infrastructure Monitoring ──
-        infra_body = section_block(
-            scroll,
-            self.theme,
-            "Infrastructure Monitoring",
-            subtitle="This workstation — local CPU, memory, disk, and network (via psutil)",
-        )
-        infra_grid = panel_grid(infra_body, self.theme, columns=2)
-        infra_card, infra_content = analytics_card(infra_grid, self.theme, "Local System Resources", accent=self.theme.c("primary"))
-        infra_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=4)
-        for label, color_key, key, icon in [
-            ("CPU Usage", "metric_blue", "cpu", "◉"),
-            ("RAM Usage", "metric_purple", "ram", "▦"),
-            ("Storage Usage", "metric_amber", "storage", "▤"),
-            ("Network Traffic", "metric_green", "network", "⇅"),
-        ]:
-            self._gauges[key] = resource_gauge(
-                infra_content,
+        for i, (key, label, secondary) in enumerate(tiles):
+            r, c = divmod(i, 3)
+            card, val, sec = compact_kpi_card(
+                grid,
                 self.theme,
-                label,
-                self.theme.c(color_key),
-                icon=icon,
+                key=key,
+                label=label,
+                secondary=secondary,
             )
+            card.grid(
+                row=r,
+                column=c,
+                sticky="nsew",
+                padx=(0 if c == 0 else 8, 0),
+                pady=(0 if r == 0 else 8, 0),
+            )
+            self._metric_values[key] = val
+            self._metric_secondary[key] = sec
 
-        net_card, net_content = analytics_card(infra_grid, self.theme, "This Machine", accent=self.theme.c("success"))
-        net_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=4)
+    def _build_health_alerts_row(self, scroll: ctk.CTkScrollableFrame) -> None:
+        row = ctk.CTkFrame(scroll, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 20))
+        row.grid_columnconfigure(0, weight=65)
+        row.grid_columnconfigure(1, weight=35)
 
-        status_row = ctk.CTkFrame(net_content, fg_color="transparent")
-        status_row.pack(fill="x", pady=(0, 10))
+        left_wrap = ctk.CTkFrame(row, fg_color="transparent")
+        left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left_body = compact_section(
+            left_wrap,
+            self.theme,
+            "Database Health Overview",
+            subtitle="Operational status across infrastructure",
+            action_text="View databases →",
+            action_command=lambda: self._nav("databases"),
+        )
+        health_shell, health_content = panel_card(left_body, self.theme)
+        health_shell.pack(fill="both", expand=True)
+
+        self._health_visual_host = ctk.CTkFrame(health_content, fg_color="transparent")
+        self._health_visual_host.pack(fill="x")
+        self._db_health_counts, self._health_update = health_overview_visual(
+            self._health_visual_host,
+            self.theme,
+        )
+
+        self._db_health_rows = ctk.CTkFrame(health_content, fg_color="transparent")
+        self._db_health_rows.pack(fill="x", pady=(12, 0))
+
+        right_wrap = ctk.CTkFrame(row, fg_color="transparent")
+        right_wrap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        right_body = compact_section(
+            right_wrap,
+            self.theme,
+            "Active Alerts",
+            subtitle="Critical failures and warnings",
+            action_text="View alerts →",
+            action_command=lambda: self._nav("logs"),
+        )
+        alerts_shell, alerts_content = panel_card(right_body, self.theme)
+        alerts_shell.pack(fill="both", expand=True)
+        self._alerts_list = ctk.CTkFrame(alerts_content, fg_color="transparent")
+        self._alerts_list.pack(fill="both", expand=True)
+
+    def _build_infra_activity_row(self, scroll: ctk.CTkScrollableFrame) -> None:
+        row = ctk.CTkFrame(scroll, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 14))
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left_body = compact_section(
+            left,
+            self.theme,
+            "Resource Utilization",
+            subtitle="CPU, memory, disk and connections",
+        )
+        infra_shell, infra_content = panel_card(left_body, self.theme)
+        infra_shell.pack(fill="both", expand=True)
+
+        status_row = ctk.CTkFrame(infra_content, fg_color="transparent")
+        status_row.pack(fill="x", pady=(0, 8))
         ctk.CTkLabel(
-            status_row,
-            text="Local agent (this PC)",
-            font=ctk.CTkFont(size=11),
-            text_color=self.theme.c("text_muted"),
-            anchor="w",
+            status_row, text="Local agent", font=font(self.theme, 11), text_color=self.theme.c("text_muted")
         ).pack(side="left")
         self._host_status_chip = status_chip(status_row, self.theme, text="—", tone="neutral")
         self._host_status_chip.pack(side="right")
 
         for label, key in [
-            ("Hostname", "hostname"),
-            ("Operating System", "os"),
-            ("Processor", "cpu"),
-            ("Memory", "memory"),
-            ("Disk", "disk"),
-            ("Uptime", "uptime"),
-            ("Processes", "processes"),
+            ("CPU Usage", "cpu"),
+            ("Memory Usage", "ram"),
+            ("Disk Usage", "storage"),
+            ("Network Traffic", "network"),
         ]:
-            self._host_labels[key] = host_stat_row(net_content, self.theme, label)
+            self._gauges[key] = resource_progress_row(infra_content, self.theme, label)
 
-    def _build_health_page(self, scroll: ctk.CTkScrollableFrame) -> None:
+        conn_row = ctk.CTkFrame(infra_content, fg_color="transparent")
+        conn_row.pack(fill="x", pady=(8, 0))
+        ctk.CTkLabel(
+            conn_row, text="Active Connections", font=font(self.theme, 11), text_color=self.theme.c("text_secondary")
+        ).pack(side="left")
+        self._conn_limit_label = ctk.CTkLabel(
+            conn_row, text="— / —", font=font(self.theme, 12, weight="bold"), text_color=self.theme.c("text_primary")
+        )
+        self._conn_limit_label.pack(side="right")
+
+        host_grid = ctk.CTkFrame(infra_content, fg_color="transparent")
+        host_grid.pack(fill="x", pady=(8, 0))
+        for label, key in [("Hostname", "hostname"), ("OS", "os"), ("Uptime", "uptime")]:
+            self._host_labels[key] = host_stat_row(host_grid, self.theme, label)
+
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        right_body = compact_section(
+            right,
+            self.theme,
+            "Database Activity",
+            subtitle="Sessions, queries and throughput on the active connection",
+        )
+        act_shell, act_content = panel_card(right_body, self.theme)
+        act_shell.pack(fill="both", expand=True)
+
+        metrics_grid = ctk.CTkFrame(act_content, fg_color="transparent")
+        metrics_grid.pack(fill="x")
+        for col in range(2):
+            metrics_grid.grid_columnconfigure(col, weight=1)
+
+        activity_specs = [
+            ("active_sessions", "Active Sessions"),
+            ("blocked_sessions", "Blocked Sessions"),
+            ("long_queries", "Long Running Queries"),
+            ("slow_queries", "Slow Queries"),
+            ("tps", "Transactions/sec"),
+            ("connections", "Total Connections"),
+        ]
+        for i, (key, label) in enumerate(activity_specs):
+            r, c = divmod(i, 2)
+            cell = ctk.CTkFrame(
+                metrics_grid,
+                fg_color=self.theme.c("bg_elevated"),
+                corner_radius=8,
+                border_width=1,
+                border_color=self.theme.c("border_subtle"),
+            )
+            cell.grid(row=r, column=c, sticky="ew", padx=(0 if c == 0 else 4, 0), pady=(0 if r == 0 else 6, 0))
+            inner = ctk.CTkFrame(cell, fg_color="transparent")
+            inner.pack(fill="x", padx=10, pady=8)
+            ctk.CTkLabel(inner, text=label, font=font(self.theme, 10), text_color=self.theme.c("text_muted"), anchor="w").pack(
+                anchor="w"
+            )
+            val = ctk.CTkLabel(
+                inner, text="—", font=font(self.theme, 18, weight="bold"), text_color=self.theme.c("text_primary"), anchor="w"
+            )
+            val.pack(anchor="w")
+            self._activity_metric_labels[key] = val
+
+    def _build_backup_jobs_row(self, scroll: ctk.CTkScrollableFrame) -> None:
+        row = ctk.CTkFrame(scroll, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 14))
+        row.grid_columnconfigure(0, weight=1)
+        row.grid_columnconfigure(1, weight=1)
+
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left_body = compact_section(
+            left,
+            self.theme,
+            "Backup & Recovery Status",
+            subtitle="Today's backup outcomes from the audit log",
+            action_text="Open backup →",
+            action_command=lambda: self._nav("backup"),
+        )
+        bak_shell, bak_content = panel_card(left_body, self.theme)
+        bak_shell.pack(fill="both", expand=True)
+
+        stats = ctk.CTkFrame(bak_content, fg_color="transparent")
+        stats.pack(fill="x")
+        for key, label in [("successful", "Successful"), ("failed", "Failed"), ("running", "Running")]:
+            cell = ctk.CTkFrame(stats, fg_color=self.theme.c("bg_elevated"), corner_radius=8)
+            cell.pack(side="left", fill="x", expand=True, padx=(0 if key == "successful" else 4, 0))
+            ctk.CTkLabel(cell, text=label, font=font(self.theme, 10), text_color=self.theme.c("text_muted")).pack(pady=(6, 0))
+            val = ctk.CTkLabel(cell, text="0", font=font(self.theme, 20, weight="bold"), text_color=self.theme.c("text_primary"))
+            val.pack(pady=(0, 6))
+            self._backup_labels[key] = val
+
+        for key, label in [("last", "Last Successful"), ("next", "Next Scheduled")]:
+            line = ctk.CTkFrame(bak_content, fg_color="transparent")
+            line.pack(fill="x", pady=(8, 0))
+            ctk.CTkLabel(line, text=label, font=font(self.theme, 11), text_color=self.theme.c("text_secondary")).pack(side="left")
+            val = ctk.CTkLabel(line, text="—", font=font(self.theme, 11, weight="bold"), text_color=self.theme.c("text_primary"))
+            val.pack(side="right")
+            self._backup_labels[key] = val
+
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        right_body = compact_section(
+            right,
+            self.theme,
+            "Running Automation Jobs",
+            subtitle="In-memory backup and restore operations",
+            action_text="View jobs →",
+            action_command=lambda: self._nav("logs"),
+        )
+        jobs_shell, jobs_content = panel_card(right_body, self.theme)
+        jobs_shell.pack(fill="both", expand=True)
+        self._jobs_list = ctk.CTkFrame(jobs_content, fg_color="transparent")
+        self._jobs_list.pack(fill="both", expand=True)
+
+    def _build_recent_activity(self, scroll: ctk.CTkScrollableFrame) -> None:
+        body = compact_section(
+            scroll,
+            self.theme,
+            "Recent Activity",
+            subtitle="Latest connect, backup and restore events",
+            action_text="Open logs →",
+            action_command=lambda: self._nav("logs"),
+        )
+        shell, content = panel_card(body, self.theme)
+        shell.pack(fill="x")
+        self._activity_list = ctk.CTkFrame(content, fg_color="transparent")
+        self._activity_list.pack(fill="x")
+
+    def _build_legacy_detail_sections(self, scroll: ctk.CTkScrollableFrame) -> None:
+        """Preserve existing detailed panels and data wiring."""
         health_body = section_block(
             scroll,
             self.theme,
-            "Infrastructure Health",
-            subtitle="Live connection and service status across your environment",
+            "Service Status",
+            subtitle="Saved profiles, connection, backup and replication",
         )
         self._health_panel = InfrastructureHealthPanel(health_body, self.theme)
         self._health_panel.pack(fill="x")
         self._apply_health_dashboard()
 
-        # ── Database Performance ──
         db_body = section_block(
             scroll,
             self.theme,
@@ -393,23 +469,346 @@ class DashboardView(BaseView):
         )
         self._db_perf_refs = build_database_performance_section(db_body, self.theme)
 
-        # ── Security & Alerts ──
-        sec_body = section_block(scroll, self.theme, "Security & Alerts", subtitle="Database connection failures and backup/restore events from audit log")
+        sec_body = section_block(
+            scroll,
+            self.theme,
+            "Security Analytics",
+            subtitle="Database connection failures and backup/restore events from audit log",
+        )
         self._security_refs = build_security_section(sec_body, self.theme)
 
+
+    def _apply_command_center_panels(self, db_metrics: dict | None = None, *, force: bool = False) -> None:
+        """Refresh command-center panels from live MonitoringService / connection data."""
+        metrics = db_metrics if db_metrics is not None else self._last_db_metrics
+        self._apply_db_health_overview(metrics, force=force)
+        self._apply_active_alerts_panel(force=force)
+        self._apply_database_activity_panel(metrics)
+        self._apply_backup_recovery_panel()
+        self._apply_automation_jobs_panel(force=force)
+        self._apply_recent_activity_panel(force=force)
+
+    def _apply_db_health_overview(self, metrics: dict, *, force: bool = False) -> None:
+        saved = load_saved_servers(self.owner_username)
+        if not saved and self.owner_username:
+            saved = load_saved_servers()
+        connected = bool(self.connection and metrics.get("connected"))
+        db_count = 0
+        if self.connection:
+            db_count = len(self._cached_server_databases())
+
+        healthy = db_count if connected and str(metrics.get("status", "")).lower() in ("", "healthy", "ok", "online") else (1 if connected else 0)
+        if connected and metrics.get("status") and str(metrics.get("status")).lower() not in ("healthy", "ok", "online", ""):
+            healthy = max(0, db_count - 1) if db_count else 0
+        warning = 1 if connected and float(metrics.get("load_pct") or 0) >= 70 else 0
+        critical = 1 if connected and float(metrics.get("load_pct") or 0) >= 85 else 0
+        offline = 0 if connected else max(1, len(saved)) if saved else 1
+        total = max(db_count, len(saved), 1 if not saved else len(saved))
+
+        if connected:
+            offline = 0
+            total = max(db_count, 1)
+            if critical:
+                healthy = max(0, total - critical - warning)
+            elif warning:
+                healthy = max(0, total - warning)
+            else:
+                healthy = total
+        else:
+            healthy = 0
+            warning = 0
+            critical = 0
+            offline = total
+            total = max(len(saved), 0)
+
+        count_map = {
+            "total": total,
+            "healthy": healthy,
+            "warning": warning,
+            "critical": critical,
+            "offline": offline,
+        }
+
+        show_empty = not connected and not saved
+        if self._health_visual_host:
+            if show_empty:
+                if self._health_visual_host.winfo_manager():
+                    self._health_visual_host.pack_forget()
+            else:
+                if not self._health_visual_host.winfo_manager():
+                    self._health_visual_host.pack(fill="x")
+                if self._health_update:
+                    self._health_update(count_map)
+
+        if not self._db_health_rows:
+            return
+
+        rows: list[tuple[str, str, str]] = []
+        if self.connection:
+            label = f"{self.connection.db_type.value.upper()}  {self.connection.name}"
+            if critical:
+                rows.append((label, "Critical", "error"))
+            elif warning:
+                rows.append((label, "Warning", "warning"))
+            elif connected:
+                rows.append((label, "Healthy", "success"))
+            else:
+                rows.append((label, "Offline", "neutral"))
+        for server in saved[:6]:
+            name = f"{server.db_type.upper()}  {server.name}"
+            if self.connection and (
+                server.name == (self.connection.saved_name or self.connection.name)
+            ):
+                continue
+            rows.append((name, "Offline" if not connected else "Registered", "neutral"))
+
+        fingerprint = f"empty={show_empty}|{rows[:5]}|{count_map}"
+        if not self._content_changed("health_rows", fingerprint, force=force):
+            return
+
+        for child in self._db_health_rows.winfo_children():
+            child.destroy()
+
+        if show_empty:
+            empty_state(
+                self._db_health_rows,
+                self.theme,
+                icon="database",
+                title="No databases connected",
+                message="Connect a database to start monitoring health, performance and backup status.",
+                action_text="+ Connect Database",
+                action_command=lambda: self._nav("servers"),
+                tone="info",
+            )
+            return
+
+        for title, status, tone in rows[:5]:
+            line = ctk.CTkFrame(self._db_health_rows, fg_color="transparent")
+            line.pack(fill="x", pady=3)
+            ctk.CTkLabel(
+                line,
+                text=title,
+                font=font(self.theme, 12),
+                text_color=self.theme.c("text_primary"),
+                anchor="w",
+            ).pack(side="left")
+            colors = {
+                "success": self.theme.c("success"),
+                "warning": self.theme.c("warning"),
+                "error": self.theme.c("error"),
+                "neutral": self.theme.c("text_muted"),
+            }
+            ctk.CTkLabel(
+                line,
+                text=status,
+                font=font(self.theme, 12, weight="bold"),
+                text_color=colors.get(tone, self.theme.c("text_muted")),
+            ).pack(side="right")
+
+    def _apply_active_alerts_panel(self, *, force: bool = False) -> None:
+        if not self._alerts_list:
+            return
+        try:
+            data = self.monitoring.get_security_dashboard_data(user=self.owner_username, days=7)
+        except Exception:
+            data = {}
+        alerts = data.get("recent_alerts") or []
+        fingerprint = repr(
+            [(a.get("severity"), a.get("title"), a.get("detail"), a.get("time")) for a in alerts[:5]]
+        ) or "empty"
+        if not self._content_changed("alerts", fingerprint, force=force):
+            return
+
+        for child in self._alerts_list.winfo_children():
+            child.destroy()
+        if not alerts:
+            empty_state(
+                self._alerts_list,
+                self.theme,
+                icon="shield-check",
+                title="Everything looks healthy",
+                message="No active database alerts detected.",
+                tone="success",
+            )
+            return
+        for alert in alerts[:5]:
+            alert_item_compact(
+                self._alerts_list,
+                self.theme,
+                severity=str(alert.get("severity", "info")),
+                title=str(alert.get("title", "Alert")),
+                detail=str(alert.get("detail", "")),
+                time_text=str(alert.get("time", "")),
+            )
+
+    def _apply_database_activity_panel(self, metrics: dict) -> None:
+        connected = bool(metrics.get("connected"))
+        conn_n = int(metrics.get("connections_num") or 0) if connected else 0
+        max_c = metrics.get("max_connections") if connected else None
+        slow = int(metrics.get("slow_num") or 0) if connected else 0
+        tput = metrics.get("throughput") if connected else None
+        blocked = int(metrics.get("blocked_sessions") or 0) if connected else 0
+        long_q = int(metrics.get("long_running") or metrics.get("long_queries") or 0) if connected else 0
+
+        values = {
+            "active_sessions": str(conn_n) if connected else "—",
+            "blocked_sessions": str(blocked) if connected else "—",
+            "long_queries": str(long_q) if connected else "—",
+            "slow_queries": str(slow) if connected else "—",
+            "tps": f"{float(tput):.0f}" if connected and tput is not None else "—",
+            "connections": (
+                f"{conn_n}" if connected else "—"
+            ),
+        }
+        for key, text in values.items():
+            lbl = self._activity_metric_labels.get(key)
+            if lbl:
+                lbl.configure(text=text)
+
+        if self._conn_limit_label:
+            if connected:
+                self._conn_limit_label.configure(text=f"{conn_n} / {max_c or '—'}")
+            else:
+                self._conn_limit_label.configure(text="— / —")
+
+    def _apply_backup_recovery_panel(self) -> None:
+        try:
+            ok, failed = self.monitoring.count_audit_today(
+                actions=("backup",),
+                user=self.owner_username,
+            )
+        except Exception:
+            ok, failed = 0, 0
+        running, _pending = self.monitoring.count_live_jobs()
+        mapping = {
+            "successful": str(ok),
+            "failed": str(failed),
+            "running": str(running),
+            "last": "—" if ok == 0 else "Today",
+            "next": "Scheduled / Manual",
+        }
+        for key, text in mapping.items():
+            lbl = self._backup_labels.get(key)
+            if not lbl:
+                continue
+            color = self.theme.c("text_primary")
+            if key == "failed" and failed > 0:
+                color = self.theme.c("error")
+            elif key == "successful" and ok > 0:
+                color = self.theme.c("success")
+            lbl.configure(text=text, text_color=color)
+
+    def _apply_automation_jobs_panel(self, *, force: bool = False) -> None:
+        if not self._jobs_list:
+            return
+        running, pending = self.monitoring.count_live_jobs()
+        fingerprint = f"{running}:{pending}"
+        if not self._content_changed("jobs", fingerprint, force=force):
+            return
+
+        for child in self._jobs_list.winfo_children():
+            child.destroy()
+        if running == 0 and pending == 0:
+            empty_state(
+                self._jobs_list,
+                self.theme,
+                icon="briefcase",
+                title="No active jobs",
+                message="Backup and restore jobs will appear here when running.",
+                tone="info",
+            )
+            return
+        if running:
+            row = ctk.CTkFrame(self._jobs_list, fg_color=self.theme.c("bg_elevated"), corner_radius=8)
+            row.pack(fill="x", pady=4)
+            inner = ctk.CTkFrame(row, fg_color="transparent")
+            inner.pack(fill="x", padx=10, pady=8)
+            ctk.CTkLabel(
+                inner,
+                text="Backup / Restore",
+                font=font(self.theme, 12, weight="bold"),
+                text_color=self.theme.c("text_primary"),
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                inner,
+                text=f"Running · {running} active",
+                font=font(self.theme, 11),
+                text_color=self.theme.c("primary"),
+            ).pack(anchor="w")
+            bar = ctk.CTkProgressBar(
+                inner,
+                height=6,
+                progress_color=self.theme.c("primary"),
+                fg_color=self.theme.c("bg_card"),
+            )
+            bar.pack(fill="x", pady=(6, 0))
+            bar.set(0.65)
+        if pending:
+            ctk.CTkLabel(
+                self._jobs_list,
+                text=f"{pending} job(s) pending in queue",
+                font=font(self.theme, 11),
+                text_color=self.theme.c("warning"),
+                anchor="w",
+            ).pack(anchor="w", pady=(6, 0))
+
+    def _apply_recent_activity_panel(self, *, force: bool = False) -> None:
+        if not self._activity_list:
+            return
+        try:
+            events = self.monitoring.get_recent_activity(limit=8)
+        except Exception:
+            events = []
+        fingerprint = repr(
+            [(e.get("time"), e.get("action"), e.get("status"), e.get("resource"), e.get("user")) for e in events]
+        ) or "empty"
+        if not self._content_changed("activity", fingerprint, force=force):
+            return
+
+        for child in self._activity_list.winfo_children():
+            child.destroy()
+        if not events:
+            empty_state(
+                self._activity_list,
+                self.theme,
+                icon="activity",
+                title="No recent activity",
+                message="Connect, backup and restore events will show up here.",
+                tone="info",
+            )
+            return
+        for event in events:
+            status = str(event.get("status", "info")).lower()
+            if status == "success":
+                tone = "success"
+            elif status == "failed":
+                tone = "error"
+            elif status in ("warning", "warn"):
+                tone = "warning"
+            else:
+                tone = "info"
+            activity_item(
+                self._activity_list,
+                self.theme,
+                time_text=str(event.get("time", "")),
+                title=str(event.get("action", "event")).replace("_", " ").title(),
+                detail=str(event.get("resource", "") or event.get("user", "")),
+                tone=tone,
+            )
+
+
     def _apply_db_performance_dashboard(self, metrics: dict | None = None) -> None:
-        if not self._timers_active or not self.winfo_exists() or not self._db_perf_refs:
+        if not self._db_perf_refs:
             return
         if metrics is None:
             metrics = fetch_database_performance(self.connection)
 
         refs = self._db_perf_refs
-        session_connected = self.connection is not None
-        metrics_live = bool(metrics.get("connected"))
+        connected = bool(metrics.get("connected"))
 
-        if metrics_live and session_connected:
+        if connected:
             self._db_samples.append({
-                "label": datetime.now().strftime("%H:%M:%S"),
+                "label": datetime.now().strftime("%H:%M"),
                 "latency": float(metrics.get("latency_ms") or 0),
                 "connections": int(metrics.get("connections_num") or 0),
                 "slow": int(metrics.get("slow_num") or 0),
@@ -418,10 +817,8 @@ class DashboardView(BaseView):
 
         status_lbl = refs.get("kpi_status")
         if status_lbl:
-            if metrics_live:
+            if connected:
                 status_lbl.configure(text="Healthy", text_color=self.theme.c("success"))
-            elif session_connected:
-                status_lbl.configure(text="Connected", text_color=self.theme.c("success"))
             else:
                 status_lbl.configure(text="Offline", text_color=self.theme.c("error"))
 
@@ -445,194 +842,38 @@ class DashboardView(BaseView):
         tput_lbl = refs.get("kpi_throughput")
         if tput_lbl:
             tput = metrics.get("throughput")
-            tput_lbl.configure(text=f"{float(tput):.0f}" if metrics_live and tput is not None else "—")
+            tput_lbl.configure(text=f"{float(tput):.0f}" if connected and tput is not None else "—")
             if hasattr(tput_lbl, "_subtitle"):
                 label = str(metrics.get("throughput_label") or "Lifetime counter")
                 tput_lbl._subtitle.configure(text=label)  # type: ignore[attr-defined]
 
         update_chart = refs.get("update_perf_chart")
         if update_chart:
-            chart_sig = tuple(
-                (s.get("latency"), s.get("connections"), s.get("slow"), s.get("replication"), s.get("label"))
-                for s in self._db_samples
-            )
-            if chart_sig != self._chart_sig:
-                self._chart_sig = chart_sig
-                update_chart(list(self._db_samples))
+            update_chart(list(self._db_samples))
 
         sparks = refs.get("sparklines") or {}
-        latency_spark = sparks.get("latency")
-        if latency_spark:
-            latency_spark.configure(
-                text=metrics.get("latency", "Connect a database") if not session_connected else metrics.get("latency", "—")
+        if sparks:
+            sparks.get("latency", ctk.CTkLabel()).configure(
+                text=metrics.get("latency", "Connect a database") if not connected else metrics.get("latency", "—")
             )
-        connections_spark = sparks.get("connections")
-        if connections_spark:
-            connections_spark.configure(text="Offline" if not session_connected else str(conn_n))
-        slow_spark = sparks.get("slow")
-        if slow_spark:
-            slow_spark.configure(text="—" if not metrics_live else str(metrics.get("slow_num", "—")))
-        replication_spark = sparks.get("replication")
-        if replication_spark:
-            replication_spark.configure(text=str(metrics.get("replication_lag", "N/A")))
-
-    def _update_slow_query_rows(
-        self,
-        slow_frame: ctk.CTkFrame | None,
-        metrics: dict,
-        connected: bool,
-    ) -> None:
-        if not slow_frame:
-            return
-        rows = metrics.get("slow_query_rows") or []
-        empty_msg = "No slow queries detected." if connected else "Connect a database."
-        sig: tuple = (empty_msg,) if not rows else tuple(
-            (str(r.get("query", ""))[:48], r.get("avg_ms"), r.get("count")) for r in rows
-        )
-        if sig == self._slow_rows_sig:
-            return
-        self._slow_rows_sig = sig
-        for child in slow_frame.winfo_children():
-            child.destroy()
-        if not rows:
-            ctk.CTkLabel(
-                slow_frame,
-                text=empty_msg,
-                font=ctk.CTkFont(size=11),
-                text_color=self.theme.c("text_muted"),
-            ).pack(anchor="w", pady=6)
-            return
-        for row in rows:
-            r = ctk.CTkFrame(slow_frame, fg_color="transparent")
-            r.pack(fill="x", pady=2)
-            ctk.CTkLabel(
-                r,
-                text=str(row.get("query", ""))[:48],
-                font=font(self.theme, 10),
-                text_color=self.theme.c("text_primary"),
-                anchor="w",
-            ).pack(side="left", fill="x", expand=True)
-            ctk.CTkLabel(
-                r,
-                text=str(row.get("avg_ms", 0)),
-                font=font(self.theme, 10, weight="bold"),
-                text_color=self.theme.c("text_secondary"),
-                width=50,
-            ).pack(side="left")
-            ctk.CTkLabel(
-                r,
-                text=str(row.get("count", 1)),
-                font=font(self.theme, 10, weight="bold"),
-                text_color=self.theme.c("text_secondary"),
-                width=30,
-                anchor="e",
-            ).pack(side="right")
-
-    def _apply_backup_data(self, bak: dict, *, storage_mb: float = 0.0) -> None:
-        if not self._db_perf_refs:
-            return
-        refs = self._db_perf_refs
-        donut = refs.get("update_backup_donut")
-        if donut:
-            donut(bak)
-        trend_fn = refs.get("update_backup_trend")
-        if trend_fn:
-            trend_fn(bak.get("trend") or [])
-        if refs.get("bak_total"):
-            refs["bak_total"].configure(text=f"Total Backups: {bak.get('total', 0)}")
-        if refs.get("bak_failed"):
-            refs["bak_failed"].configure(text=f"Failed: {bak.get('failed', 0)}")
-        if refs.get("bak_storage"):
-            gb = bak.get("storage_gb", 0)
-            refs["bak_storage"].configure(
-                text=f"Storage: {gb:.1f} GB" if gb else f"Storage: {storage_mb:.1f} MB"
+            sparks.get("connections", ctk.CTkLabel()).configure(
+                text="Offline" if not connected else str(conn_n)
             )
-
-    def _apply_backup_analytics(self) -> None:
-        if not self._db_perf_refs or not self._is_active:
-            return
-        scope = self._connection_scope()
-        if scope is None:
-            self._apply_backup_data(empty_backup_analytics())
-            return
-        ctx = self._backup_stats_context()
-        storage_mb = 0.0
-        try:
-            stats = self.monitoring.get_dashboard_stats(
-                profile=ctx.get("profile", "default"),
-                db_type=ctx.get("db_type"),
-                list_remote=ctx.get("list_remote", False),
-                remote_dir=ctx.get("remote_dir"),
-                local_dir=ctx.get("local_dir"),
+            sparks.get("slow", ctk.CTkLabel()).configure(
+                text="—" if not connected else str(metrics.get("slow_num", "—"))
             )
-            storage_mb = stats.storage_used_mb
-        except Exception:
-            pass
-        try:
-            bak = self.monitoring.get_backup_analytics_data(
-                user=self.owner_username,
-                storage_mb=storage_mb,
-                scope=scope,
+            sparks.get("replication", ctk.CTkLabel()).configure(
+                text=str(metrics.get("replication_lag", "N/A"))
             )
-        except Exception:
-            bak = empty_backup_analytics()
-        self._apply_backup_data(bak, storage_mb=storage_mb)
-
-    def _apply_key_metrics_from_snapshot(
-        self,
-        active_jobs: int,
-        pending_jobs: int,
-        backup_success: int,
-        backup_failed: int,
-        connect_success: int,
-        connect_failed: int,
-        *,
-        counts: tuple[int, int],
-    ) -> None:
-        saved_count, db_count = counts
-        success_today = backup_success + connect_success
-        failed_today = backup_failed + connect_failed
-        for key, value in {
-            "linux_servers": str(saved_count),
-            "databases": str(db_count),
-            "active_jobs": str(active_jobs),
-            "success_today": str(success_today),
-            "failed_today": str(failed_today),
-            "pending_jobs": str(pending_jobs),
-        }.items():
-            if key in self._metric_values:
-                self._metric_values[key].configure(text=value)
-
-        if failed_today > 0:
-            self._update_badge("failed_today", "Alert", self.theme.c("metric_red_bg"), self.theme.c("metric_red"))
-        else:
-            self._update_badge("failed_today", "OK", self.theme.c("metric_green_bg"), self.theme.c("metric_green"))
-
-        if self.connection:
-            self._update_badge("databases", "Connected", self.theme.c("metric_purple_bg"), self.theme.c("metric_purple"))
-        else:
-            self._update_badge("databases", "Offline", self.theme.c("bg_elevated"), self.theme.c("text_muted"))
 
     def _apply_security_dashboard(self) -> None:
         if not self._security_refs:
             return
-        scope = self._connection_scope()
-        if scope is None:
-            self._apply_security_data(empty_security_dashboard())
-            return
         try:
-            data = self.monitoring.get_security_dashboard_data(
-                user=self.owner_username,
-                days=7,
-                scope=scope,
-            )
+            data = self.monitoring.get_security_dashboard_data(user=self.owner_username, days=7)
         except Exception:
             return
-        self._apply_security_data(data)
 
-    def _apply_security_data(self, data: dict) -> None:
-        if not self._security_refs:
-            return
         posture = data.get("posture") or {}
         refs = self._security_refs
 
@@ -675,11 +916,10 @@ class DashboardView(BaseView):
         recent_frame = refs.get("recent_frame")
         if recent_frame:
             alerts = data.get("recent_alerts") or []
-            sig: tuple = ("none",) if not alerts else tuple(
-                (a.get("action"), a.get("status"), a.get("resource"), a.get("time")) for a in alerts
-            )
-            if sig != self._recent_alerts_sig:
-                self._recent_alerts_sig = sig
+            fingerprint = repr(
+                [(a.get("severity"), a.get("title"), a.get("time")) for a in alerts]
+            ) or "empty"
+            if self._content_changed("security_alerts", fingerprint):
                 for child in recent_frame.winfo_children():
                     child.destroy()
                 if not alerts:
@@ -696,11 +936,8 @@ class DashboardView(BaseView):
         risks_frame = refs.get("risks_frame")
         if risks_frame:
             risks = data.get("top_risks") or []
-            sig_risks: tuple = ("none",) if not risks else tuple(
-                (r.get("label"), r.get("severity"), r.get("detail")) for r in risks
-            )
-            if sig_risks != getattr(self, "_top_risks_sig", None):
-                self._top_risks_sig = sig_risks
+            fingerprint = repr([(r.get("title"), r.get("score")) for r in risks]) or "empty"
+            if self._content_changed("security_risks", fingerprint):
                 for child in risks_frame.winfo_children():
                     child.destroy()
                 if not risks:
@@ -714,56 +951,47 @@ class DashboardView(BaseView):
                     for risk in risks:
                         top_risk_row(risks_frame, self.theme, risk)
 
-    def _cached_counts(self) -> tuple[int, int]:
-        now = time.monotonic()
-        if now - self._counts_cache_ts < COUNTS_CACHE_TTL and self._saved_count_cache is not None:
-            return self._saved_count_cache, self._db_count_cache or 0
-        saved_count = len(load_saved_servers(self.owner_username))
-        db_count = 0
-        if self.connection:
-            try:
-                db_count = len(fetch_server_databases(self.connection))
-            except Exception:
-                db_count = 0
-        self._saved_count_cache = saved_count
-        self._db_count_cache = db_count
-        self._counts_cache_ts = now
-        return saved_count, db_count
-
-    def invalidate_counts_cache(self) -> None:
-        self._counts_cache_ts = 0.0
-        self._saved_count_cache = None
-        self._db_count_cache = None
-
     def _apply_health_dashboard(self, db_metrics: dict | None = None) -> None:
         if not self._health_panel:
             return
         metrics = db_metrics if db_metrics is not None else self._last_db_metrics
-        saved_count, db_count = self._cached_counts()
-        session_connected = self.connection is not None
-        connected = session_connected
+        saved = load_saved_servers(self.owner_username)
+        if not saved and self.owner_username:
+            saved = load_saved_servers()
+        saved_count = len(saved)
 
-        if connected:
-            servers = f"{saved_count} Saved · 1 Connected" if saved_count else "1 Connected"
+        # App session is the source of truth for "are we connected?"
+        # Probe metrics refine health quality; they should not flip the row to
+        # "Not Connected" while the footer still shows Connected · mongodb.
+        session_active = bool(self.connection)
+        probe_ok = bool(metrics.get("connected")) if metrics else False
+
+        if session_active:
+            servers = f"{saved_count} Saved · 1 Active" if saved_count else "1 Active"
         elif saved_count:
             servers = f"{saved_count} Saved"
         else:
             servers = "None Saved"
 
-        if connected:
-            suffix = f" ({db_count} DB{'s' if db_count != 1 else ''})" if db_count else ""
-            databases = f"Connected{suffix}"
+        if session_active:
+            try:
+                db_count = len(self._cached_server_databases())
+            except Exception:
+                db_count = 0
+            name = self.connection.saved_name or self.connection.name
+            engine = self.connection.db_type.value.upper()
+            suffix = f" · {db_count} DB{'s' if db_count != 1 else ''}" if db_count else ""
+            if probe_ok:
+                databases = f"Connected · {engine} {name}{suffix}"
+            else:
+                databases = f"Connected · {engine} {name} (checking…)"
         else:
             databases = "Not Connected"
 
-        if connected:
-            backup_success, backup_failed = self.monitoring.count_audit_today(
-                actions=("backup",),
-                user=self.owner_username,
-                scope=self._connection_scope(),
-            )
-        else:
-            backup_success, backup_failed = 0, 0
+        backup_success, backup_failed = self.monitoring.count_audit_today(
+            actions=("backup",),
+            user=self.owner_username,
+        )
         if backup_failed > 0:
             backup = f"{backup_failed} Failed"
         elif backup_success > 0:
@@ -771,7 +999,7 @@ class DashboardView(BaseView):
         else:
             backup = "No Backups Today"
 
-        if not connected:
+        if not session_active:
             replication = "N/A"
         else:
             replication = str(metrics.get("replication_lag") or "N/A")
@@ -787,42 +1015,77 @@ class DashboardView(BaseView):
         try:
             ctx = self._backup_stats_context()
             db_type = ctx.get("db_type")
-            scope = self._connection_scope()
-            saved_count, db_count = self._cached_counts()
+            # Prefer user-scoped list; fall back to all profiles so legacy rows still count.
+            saved = load_saved_servers(self.owner_username)
+            if not saved and self.owner_username:
+                saved = load_saved_servers()
+            saved_count = len(saved)
+
+            active_name = ""
+            active_engine = ""
+            if self.connection:
+                active_name = (self.connection.saved_name or self.connection.name or "").strip()
+                active_engine = self.connection.db_type.value.upper()
+
+            db_count = 0
+            if self.connection:
+                try:
+                    db_count = len(fetch_server_databases(self.connection))
+                except Exception:
+                    db_count = 0
 
             active_jobs, pending_jobs = self.monitoring.count_live_jobs()
-            if scope:
-                backup_success, backup_failed = self.monitoring.count_audit_today(
-                    actions=("backup", "restore"), db_type=db_type, user=self.owner_username, scope=scope,
-                )
-                connect_success, connect_failed = self.monitoring.count_audit_today(
-                    actions=("connect",), user=self.owner_username, scope=scope,
-                )
-            else:
-                backup_success = backup_failed = connect_success = connect_failed = 0
+            backup_success, backup_failed = self.monitoring.count_audit_today(
+                actions=("backup", "restore"), db_type=db_type, user=self.owner_username,
+            )
+            connect_success, connect_failed = self.monitoring.count_audit_today(
+                actions=("connect",), user=self.owner_username,
+            )
             success_today = backup_success + connect_success
             failed_today = backup_failed + connect_failed
+
+            try:
+                sec = self.monitoring.get_security_dashboard_data(user=self.owner_username, days=1)
+                alerts_n = int((sec.get("posture") or {}).get("security_alerts", 0))
+            except Exception:
+                alerts_n = failed_today
+
+            bak_ok, bak_fail = self.monitoring.count_audit_today(
+                actions=("backup",), user=self.owner_username,
+            )
+            healthy = db_count if self.connection and self._last_db_metrics.get("connected") else 0
 
             for key, value in {
                 "linux_servers": str(saved_count),
                 "databases": str(db_count),
+                "healthy_dbs": str(healthy),
                 "active_jobs": str(active_jobs),
-                "success_today": str(success_today),
-                "failed_today": str(failed_today),
-                "pending_jobs": str(pending_jobs),
+                "active_alerts": str(alerts_n),
+                "failed_today": str(bak_fail),
             }.items():
                 if key in self._metric_values:
                     self._metric_values[key].configure(text=value)
 
-            if failed_today > 0:
-                self._update_badge("failed_today", "Alert", self.theme.c("metric_red_bg"), self.theme.c("metric_red"))
+            if active_name:
+                saved_secondary = f"Active: {active_name} · {active_engine}"
+            elif saved_count:
+                saved_secondary = f"{saved_count} registered · none active"
             else:
-                self._update_badge("failed_today", "OK", self.theme.c("metric_green_bg"), self.theme.c("metric_green"))
+                saved_secondary = "No saved profiles"
 
-            if self.connection:
-                self._update_badge("databases", "Connected", self.theme.c("metric_purple_bg"), self.theme.c("metric_purple"))
-            else:
-                self._update_badge("databases", "Offline", self.theme.c("bg_elevated"), self.theme.c("text_muted"))
+            sec_map = {
+                "linux_servers": saved_secondary,
+                "databases": (
+                    f"On {active_name}" if active_name else "Not connected"
+                ),
+                "healthy_dbs": "Healthy online" if healthy else "None online",
+                "active_jobs": f"{pending_jobs} queued" if pending_jobs else "None running",
+                "active_alerts": "Needs attention" if alerts_n else "All clear",
+                "failed_today": f"{bak_ok} succeeded today",
+            }
+            for key, text in sec_map.items():
+                if key in self._metric_secondary:
+                    self._metric_secondary[key].configure(text=text)
         except Exception:
             pass
 
@@ -856,20 +1119,6 @@ class DashboardView(BaseView):
             "local_dir": local_dir,
         }
 
-    def _connection_scope(self) -> DashboardConnectionScope | None:
-        if not self.connection:
-            return None
-        ctx = self._backup_stats_context()
-        conn = self.connection
-        return DashboardConnectionScope(
-            resource=conn.saved_name or conn.name or f"{conn.host}:{conn.port}",
-            host=conn.endpoint_host,
-            db_type=conn.db_type,
-            profile=ctx.get("profile", "default"),
-            local_dir=ctx.get("local_dir"),
-            database=getattr(conn, "database", None),
-        )
-
     def _set_gauge(
         self,
         key: str,
@@ -889,6 +1138,7 @@ class DashboardView(BaseView):
         detail_lbl.configure(text=detail)
 
     def _apply_system_metrics(self, sys_m: dict) -> None:
+        self._last_sys_metrics = sys_m
         cpu = float(sys_m.get("cpu_percent", 0))
         mem = sys_m.get("memory") or {}
         mem_pct = float(mem.get("percent", 0))
@@ -907,30 +1157,13 @@ class DashboardView(BaseView):
         recv_label = net.get("recv_label", "0 B/s")
         total_label = net.get("total_label", "0 B/s")
 
-        host = sys_m.get("host") or {}
-        sig = (
-            round(cpu),
-            round(mem_pct),
-            round(disk_pct),
-            round(net_pct),
-            total_label,
-            sent_label,
-            recv_label,
-            host.get("hostname"),
-            host.get("uptime_label"),
-            str(host.get("process_count", "")),
-        )
-        if sig == self._sys_metrics_sig:
-            return
-        self._sys_metrics_sig = sig
-        self._last_sys_metrics = sys_m
-
         cpu_count = int(sys_m.get("cpu_count", 0))
         cpu_freq = sys_m.get("cpu_freq_mhz")
         cpu_detail = f"{cpu_count} logical cores"
         if cpu_freq:
             cpu_detail += f" · {cpu_freq:.0f} MHz"
 
+        host = sys_m.get("host") or {}
         hostname = host.get("hostname", "—")
         os_name = host.get("os", "—")
         uptime = host.get("uptime_label", "—")
@@ -968,10 +1201,10 @@ class DashboardView(BaseView):
         host_values = {
             "hostname": hostname,
             "os": os_name,
+            "uptime": uptime,
             "cpu": f"{cpu_count} cores" + (f" @ {cpu_freq:.0f} MHz" if cpu_freq else ""),
             "memory": f"{_format_gb(mem_total_gb)} total",
             "disk": f"{_format_gb(disk_total)} on {disk_path or 'system'}",
-            "uptime": uptime,
             "processes": processes,
         }
         for key, text in host_values.items():
@@ -1011,143 +1244,82 @@ class DashboardView(BaseView):
                 metrics = fetch_database_performance(connection)
             except Exception:
                 metrics = {"connected": False}
-            self._enqueue_ui(lambda m=metrics: self._finish_db_poll(m))
+            try:
+                self.after(0, lambda m=metrics: self._finish_db_poll(m))
+            except RuntimeError:
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _finish_db_poll(self, metrics: dict) -> None:
         self._db_poll_busy = False
-        if not self._timers_active or not self._is_active or not self.winfo_exists():
+        if not self._timers_active or not self.winfo_exists():
             return
         self._last_db_metrics = metrics
         self._apply_db_performance_dashboard(metrics)
         self._apply_health_dashboard(metrics)
+        self._apply_command_center_panels(metrics)
+        self._refresh_key_metrics()
+        self._update_status_footer_from_metrics(metrics)
 
-    def _schedule_fast_poll(self) -> None:
-        if not self._timers_active or not self._is_active or not self.winfo_exists():
+    def _update_status_footer_from_metrics(self, metrics: dict) -> None:
+        """Keep the shell footer in sync with the same poll as the dashboard."""
+        updater = None
+        widget = self.winfo_toplevel()
+        if callable(getattr(widget, "update_status_footer", None)):
+            updater = widget.update_status_footer
+        if not callable(updater):
+            return
+        if self.connection:
+            name = self.connection.saved_name or self.connection.name
+            conn_status = f"● Connected · {name}"
+        else:
+            conn_status = "● Disconnected"
+
+        version = str(metrics.get("version") or "").strip() or "—"
+        uptime = str(metrics.get("uptime") or "—")
+        if metrics.get("connected"):
+            sessions = str(int(metrics.get("connections_num") or 0))
+        else:
+            sessions = "—"
+        last_refresh = datetime.now().strftime("%H:%M:%S")
+
+        updater(
+            connection_status=conn_status,
+            version=version,
+            uptime=uptime,
+            sessions=sessions,
+            last_refresh=last_refresh,
+        )
+
+    def _schedule_system_poll(self) -> None:
+        if not self._timers_active or not self.winfo_exists():
             return
         try:
             sys_m = self.monitoring.get_system_metrics()
             self._apply_system_metrics(sys_m)
         except Exception:
             pass
-        try:
-            self._poll_job = self.after(FAST_POLL_MS, self._schedule_fast_poll)
-        except Exception:
-            self._poll_job = None
 
-    def _schedule_slow_poll(self) -> None:
-        if not self._timers_active or not self._is_active or not self.winfo_exists():
-            return
-        if not self._slow_poll_busy:
-            self._slow_poll_busy = True
-            username = self.owner_username
-            ctx = self._backup_stats_context()
-            conn = self.connection
-            scope = self._connection_scope()
-
-            def work() -> None:
-                payload: dict = {"ctx": ctx, "username": username, "error": None}
-                try:
-                    saved_count = len(load_saved_servers(username))
-                    db_count = 0
-                    if conn:
-                        try:
-                            db_count = len(fetch_server_databases(conn))
-                        except Exception:
-                            db_count = 0
-                    db_type = ctx.get("db_type")
-                    active_jobs, pending_jobs = self.monitoring.count_live_jobs()
-                    if scope:
-                        backup_success, backup_failed = self.monitoring.count_audit_today(
-                            actions=("backup", "restore"), db_type=db_type, user=username, scope=scope,
-                        )
-                        connect_success, connect_failed = self.monitoring.count_audit_today(
-                            actions=("connect",), user=username, scope=scope,
-                        )
-                    else:
-                        backup_success = backup_failed = connect_success = connect_failed = 0
-                    payload["counts"] = (saved_count, db_count)
-                    payload["jobs"] = (active_jobs, pending_jobs, backup_success, backup_failed, connect_success, connect_failed)
-                    payload["security"] = (
-                        self.monitoring.get_security_dashboard_data(user=username, days=7, scope=scope)
-                        if scope
-                        else empty_security_dashboard()
-                    )
-                    storage_mb = 0.0
-                    if scope:
-                        try:
-                            stats = self.monitoring.get_dashboard_stats(
-                                profile=ctx.get("profile", "default"),
-                                db_type=ctx.get("db_type"),
-                                list_remote=ctx.get("list_remote", False),
-                                remote_dir=ctx.get("remote_dir"),
-                                local_dir=ctx.get("local_dir"),
-                            )
-                            storage_mb = stats.storage_used_mb
-                        except Exception:
-                            pass
-                    payload["backup"] = (
-                        self.monitoring.get_backup_analytics_data(
-                            user=username,
-                            storage_mb=storage_mb,
-                            scope=scope,
-                        )
-                        if scope
-                        else empty_backup_analytics()
-                    )
-                    payload["storage_mb"] = storage_mb
-                except Exception as exc:
-                    payload["error"] = str(exc)
-
-                def apply() -> None:
-                    self._slow_poll_busy = False
-                    if not self._timers_active or not self._is_active or not self.winfo_exists():
-                        return
-                    if payload.get("error"):
-                        return
-                    counts = payload.get("counts")
-                    if counts:
-                        self._saved_count_cache, self._db_count_cache = counts
-                        self._counts_cache_ts = time.monotonic()
-                    jobs = payload.get("jobs")
-                    if jobs:
-                        self._apply_key_metrics_from_snapshot(*jobs, counts=counts or (0, 0))
-                    security = payload.get("security")
-                    if security is not None:
-                        self._apply_security_data(security)
-                    backup = payload.get("backup")
-                    if backup is not None:
-                        self._apply_backup_data(backup, storage_mb=payload.get("storage_mb", 0.0))
-
-                self._enqueue_ui(apply)
-
-            threading.Thread(target=work, daemon=True).start()
-        try:
-            self._slow_poll_job = self.after(SLOW_POLL_MS, self._schedule_slow_poll)
-        except Exception:
-            self._slow_poll_job = None
-
-    def _schedule_db_poll(self) -> None:
-        if not self._timers_active or not self._is_active or not self.winfo_exists():
-            return
+        # Live DB metrics apply command-center panels when the worker finishes.
+        # Avoid rebuilding the same panels twice in one cycle (that caused blinking).
         if self.connection:
             self._poll_database_metrics()
-        try:
-            self._db_poll_job = self.after(DB_POLL_MS, self._schedule_db_poll)
-        except Exception:
-            self._db_poll_job = None
+        else:
+            self._apply_command_center_panels()
+            self._refresh_key_metrics()
+            if self._health_panel:
+                self._apply_health_dashboard()
 
-    def _update_badge(self, key: str, text: str, fg: str, text_color: str) -> None:
-        badge = self._metric_badges.get(key)
-        if badge:
-            badge.configure(text=text, fg_color=fg, text_color=text_color)
+        self._apply_security_dashboard()
+        self._poll_job = self.after(5000, self._schedule_system_poll)
 
-    def refresh(self, *, include_sidebar: bool = True) -> None:
+    def refresh(self) -> None:
         try:
-            self.invalidate_counts_cache()
+            self._panel_fingerprint.clear()
+            self._db_list_cache = None
             if self._datetime_label:
-                self._datetime_label.configure(text=_datetime_text())
+                self._datetime_label.configure(text=f"Last updated {_datetime_text()}")
 
             self._refresh_key_metrics()
 
@@ -1167,9 +1339,9 @@ class DashboardView(BaseView):
                 self._apply_health_dashboard(empty)
 
             self._apply_security_dashboard()
-            self._apply_backup_analytics()
+            self._apply_command_center_panels(force=True)
 
-            if include_sidebar and self.sidebar_refresh:
+            if self.sidebar_refresh:
                 self.sidebar_refresh()
 
             self.log("Dashboard refreshed", "SUCCESS")

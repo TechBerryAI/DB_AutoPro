@@ -9,41 +9,10 @@ import customtkinter as ctk
 from desktop.theme import ThemeManager
 
 FONT_FAMILY = "Segoe UI"
-FONT_DISPLAY = "Segoe UI"
 
 
 def font(theme: ThemeManager, size: int, *, weight: str = "normal") -> ctk.CTkFont:
-    family = FONT_DISPLAY if size >= 24 else FONT_FAMILY
-    return ctk.CTkFont(family=family, size=size, weight=weight)
-
-
-def depth_card(
-    parent,
-    theme: ThemeManager,
-    *,
-    radius: str = "lg",
-    padding: int = 0,
-) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
-    """Flat card surface without shadow ring or outline."""
-    card = ctk.CTkFrame(
-        parent,
-        corner_radius=theme.radius(radius),
-        fg_color=theme.c("bg_card"),
-        border_width=0,
-    )
-    return card, card
-
-
-def gradient_accent(parent, theme: ThemeManager, *, height: int = 3) -> None:
-    """Dual-tone accent strip mimicking a gradient header."""
-    strip = ctk.CTkFrame(parent, fg_color="transparent")
-    strip.pack(fill="x")
-    ctk.CTkFrame(strip, height=height, corner_radius=2, fg_color=theme.c("gradient_start")).pack(
-        side="left", fill="x", expand=True, padx=(0, 1)
-    )
-    ctk.CTkFrame(strip, height=height, corner_radius=2, fg_color=theme.c("gradient_end")).pack(
-        side="left", fill="x", expand=True
-    )
+    return ctk.CTkFont(family=FONT_FAMILY, size=size, weight=weight)
 
 
 def glass_surface(
@@ -52,38 +21,26 @@ def glass_surface(
     *,
     radius: str = "lg",
     accent: str | None = None,
-    hover: bool = False,
+    hover: bool = True,
 ) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
     """Layered glass panel with optional accent strip; returns (shell, inner)."""
-    if theme.is_light:
-        shell, inner = depth_card(parent, theme, radius=radius)
-    else:
-        shell = ctk.CTkFrame(
-            parent,
-            corner_radius=theme.radius(radius),
-            fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-            border_width=0,
-        )
-        inner = ctk.CTkFrame(shell, fg_color="transparent")
-        inner.pack(fill="both", expand=True)
-    content = ctk.CTkFrame(inner, fg_color="transparent")
-    content.pack(fill="both", expand=True)
+    shell = ctk.CTkFrame(
+        parent,
+        corner_radius=theme.radius(radius),
+        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
+        border_width=1,
+        border_color=theme.c("border"),
+    )
+    if accent:
+        ctk.CTkFrame(shell, height=3, corner_radius=2, fg_color=accent).pack(fill="x", padx=1, pady=(1, 0))
+    inner = ctk.CTkFrame(shell, fg_color="transparent")
+    inner.pack(fill="both", expand=True)
     if hover:
         normal = theme.c("border")
         hover_c = accent or theme.c("border_focus")
-        target = shell
-
-        def _enter(_e) -> None:
-            if target.winfo_exists():
-                target.configure(border_color=hover_c)
-
-        def _leave(_e) -> None:
-            if target.winfo_exists():
-                target.configure(border_color=normal)
-
-        shell.bind("<Enter>", _enter)
-        shell.bind("<Leave>", _leave)
-    return shell, content
+        shell.bind("<Enter>", lambda _: shell.configure(border_color=hover_c))
+        shell.bind("<Leave>", lambda _: shell.configure(border_color=normal))
+    return shell, inner
 
 
 def elevated_card(
@@ -91,7 +48,7 @@ def elevated_card(
     theme: ThemeManager,
     *,
     accent: str | None = None,
-    hover: bool = False,
+    hover: bool = True,
 ) -> ctk.CTkFrame:
     """Layered card with optional top accent strip (depth / glass feel)."""
     shell, inner = glass_surface(parent, theme, accent=accent, hover=hover)

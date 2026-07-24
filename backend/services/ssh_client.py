@@ -79,9 +79,10 @@ def ssh_options_from_connection(conn: Any) -> dict[str, Any]:
     opts = conn.extra_options or {}
     if not opts.get("ssh_enabled"):
         return {}
+    db_host = opts.get("db_host") or opts.get("mongo_host") or conn.host
     return {
-        "ssh_host": opts.get("ssh_host") or conn.host,
-        "fallback_host": conn.host,
+        "ssh_host": opts.get("ssh_host") or db_host,
+        "fallback_host": db_host,
         "ssh_port": int(opts.get("ssh_port", 22)),
         "username": opts.get("linux_username", ""),
         "password": opts.get("linux_password", ""),
@@ -91,6 +92,17 @@ def ssh_options_from_connection(conn: Any) -> dict[str, Any]:
         ),
         "remote_backup_dir": opts.get("remote_backup_dir", "/mnt/backup"),
     }
+
+
+def pg_endpoint_from_connection(conn: Any) -> tuple[str, int]:
+    """PostgreSQL host/port as seen from the Linux SSH server."""
+    opts = conn.extra_options or {}
+    db_host = str(opts.get("db_host") or opts.get("mongo_host") or conn.host)
+    db_port = int(opts.get("db_port") or opts.get("mongo_port") or conn.port)
+    ssh_host = str(opts.get("ssh_host") or db_host)
+    if db_host in ("127.0.0.1", "localhost") or ssh_host == db_host:
+        return "127.0.0.1", db_port
+    return db_host, db_port
 
 
 def mongo_endpoint_from_connection(conn: Any) -> tuple[str, int]:
@@ -450,6 +462,92 @@ def download_remote_directory(ssh: dict[str, Any], remote_path: str, local_path:
         _sftp_download_tree(sftp, remote_path, local_path)
     finally:
         client.close()
+
+
+def download_remote_file(ssh: dict[str, Any], remote_path: str, local_path: Path) -> None:
+    """Download a single remote file to the local PC via SFTP."""
+    client = _open_ssh_client(ssh)
+    try:
+        sftp = client.open_sftp()
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        sftp.get(remote_path, str(local_path))
+    finally:
+        client.close()
+
+
+def remote_file_size(ssh: dict[str, Any], remote_path: str) -> int:
+    """Return remote file size in bytes, or 0 when missing."""
+    cmd = f"stat -c%s {shlex.quote(remote_path)} 2>/dev/null || echo 0"
+    exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=30, **_ssh_kwargs(ssh))
+    if exit_code != 0:
+        return 0
+    try:
+        return int(stdout.strip())
+    except ValueError:
+        return 0
+
+
+def resolve_remote_pg_dump_path(ssh: dict[str, Any], preferred_path: str | None = None) -> str:
+    """Locate pg_dump on the Linux server over SSH."""
+    kwargs = _ssh_kwargs(ssh)
+    candidates: list[str] = []
+    if preferred_path and preferred_path.strip():
+        candidates.append(preferred_path.strip())
+
+    for candidate in candidates:
+        cmd = f"test -x {shlex.quote(candidate)} && echo {shlex.quote(candidate)}"
+        exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=30, **kwargs)
+        if exit_code == 0:
+            for line in stdout.splitlines():
+                if line.strip():
+                    return line.strip()
+
+    discovery_cmds = (
+        "command -v pg_dump 2>/dev/null",
+        "ls -1 /usr/lib/postgresql/*/bin/pg_dump 2>/dev/null | tail -n 1",
+        "find /usr/bin /usr/local/bin /usr/lib/postgresql -maxdepth 4 -name pg_dump -type f 2>/dev/null | head -n 1",
+    )
+    for cmd in discovery_cmds:
+        exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=45, **kwargs)
+        if exit_code != 0:
+            continue
+        for line in stdout.splitlines():
+            path = line.strip()
+            if path:
+                return path
+
+    raise RuntimeError(
+        "pg_dump was not found on the Linux server. "
+        "Install PostgreSQL client tools on the server (e.g. sudo apt install postgresql-client)."
+    )
+
+
+def build_pg_dump_remote_command(
+    *,
+    pg_dump_path: str,
+    pg_host: str,
+    pg_port: int,
+    username: str,
+    password: str,
+    output_path: str,
+    database: str | None = None,
+    dumpall: bool = False,
+    compress_level: int = 1,
+) -> str:
+    """Build a shell-safe pg_dump / pg_dumpall command for the Linux server."""
+    env = f"PGPASSWORD={shlex.quote(password)}"
+    base = (
+        f"{env} {shlex.quote(pg_dump_path)} "
+        f"-h {shlex.quote(pg_host)} -p {pg_port} -U {shlex.quote(username)} "
+    )
+    if dumpall:
+        return f"{base}-f {shlex.quote(output_path)}"
+    if not database:
+        raise ValueError("database is required for pg_dump")
+    return (
+        f"{base}-d {shlex.quote(database)} -f {shlex.quote(output_path)} "
+        f"--format=custom --compress={compress_level}"
+    )
 
 
 def remove_remote_path(ssh: dict[str, Any], remote_path: str) -> None:

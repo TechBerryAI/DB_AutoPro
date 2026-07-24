@@ -28,15 +28,6 @@ SERVER_SUBCATEGORIES: list[tuple[DatabaseType, str]] = [
 ]
 
 
-def _widget_alive(widget) -> bool:
-    if widget is None:
-        return False
-    try:
-        return bool(widget.winfo_exists())
-    except Exception:
-        return False
-
-
 class ConnectionPanel(ctk.CTkFrame):
     """Inline connection manager — saved targets sidebar + configuration form."""
 
@@ -935,13 +926,11 @@ class ConnectionPanel(ctk.CTkFrame):
 
     def update_session(self, connection: ConnectionResult | None) -> None:
         """Show or hide the active-session strip when connected."""
-        if not _widget_alive(self):
-            return
         if not SHOW_SAVED_CONNECTIONS_SIDEBAR:
             bar = getattr(self, "_main_session_bar", None)
             label = getattr(self, "_main_session_label", None)
             btn = getattr(self, "_main_disconnect_btn", None)
-            if not _widget_alive(bar) or not _widget_alive(label) or not _widget_alive(btn):
+            if not bar or not label or not btn:
                 return
             if connection:
                 label.configure(
@@ -958,8 +947,6 @@ class ConnectionPanel(ctk.CTkFrame):
                 btn.configure(state="disabled")
             return
 
-        if not _widget_alive(self._session_frame) or not _widget_alive(self._session_label):
-            return
         if connection:
             self._session_label.configure(
                 text=(
@@ -975,12 +962,10 @@ class ConnectionPanel(ctk.CTkFrame):
                     pady=(6, 0),
                     before=self._actions_footer,
                 )
-            if _widget_alive(self._disconnect_btn):
-                self._disconnect_btn.configure(state="normal")
+            self._disconnect_btn.configure(state="normal")
         else:
             self._session_frame.pack_forget()
-            if _widget_alive(self._disconnect_btn):
-                self._disconnect_btn.configure(state="disabled")
+            self._disconnect_btn.configure(state="disabled")
 
     def _on_disconnect(self) -> None:
         if self.disconnect_callback:
@@ -1176,8 +1161,6 @@ class ConnectionPanel(ctk.CTkFrame):
             self._set_status(f"Could not delete '{name}'.", "error")
 
     def _set_status(self, message: str, level: str = "info") -> None:
-        if not _widget_alive(self.status_frame):
-            return
         colors = {
             "info": (self.theme.c("text_muted"), self.theme.c("bg_elevated")),
             "warning": (self.theme.c("warning"), self.theme.c("warning_muted")),
@@ -1190,8 +1173,6 @@ class ConnectionPanel(ctk.CTkFrame):
         self.status_frame.configure(fg_color=bg)
 
     def _set_busy(self, *, testing: bool = False, connecting: bool = False) -> None:
-        if not _widget_alive(self):
-            return
         self._testing = testing
         self._connecting = connecting
         busy = testing or connecting
@@ -1249,11 +1230,7 @@ class ConnectionPanel(ctk.CTkFrame):
     def _run_connection_test(self, connection: ConnectionResult, *, on_success_connect: bool) -> None:
         def task() -> None:
             ok, message = test_connection(connection)
-            if _widget_alive(self):
-                self.after(
-                    0,
-                    lambda: self._on_test_complete(ok, message, connection, on_success_connect),
-                )
+            self.after(0, lambda: self._on_test_complete(ok, message, connection, on_success_connect))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -1284,8 +1261,6 @@ class ConnectionPanel(ctk.CTkFrame):
         connection: ConnectionResult,
         on_success_connect: bool,
     ) -> None:
-        if not _widget_alive(self):
-            return
         self._set_busy(testing=False, connecting=False)
         if ok:
             self._set_status(message, "success")
