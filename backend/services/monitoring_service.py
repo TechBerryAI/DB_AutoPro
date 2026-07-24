@@ -342,9 +342,13 @@ class MonitoringService:
         self,
         actions: tuple[str, ...] = ("backup", "restore"),
         db_type: DatabaseType | None = None,
+        *,
+        user: str | None = None,
     ) -> tuple[int, int]:
         """Count success/failed audit entries for today (local calendar day)."""
-        return self.count_audit_for_period("today", actions=actions, db_type=db_type)
+        return self.count_audit_for_period(
+            "today", actions=actions, db_type=db_type, user=user,
+        )
 
     def get_dashboard_report(
         self,

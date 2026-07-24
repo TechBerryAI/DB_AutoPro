@@ -68,6 +68,8 @@ class DatabaseAutomationApp(ctk.CTk):
         self._servers_saved_buttons: dict[str, ctk.CTkButton] = {}
         self._servers_subnav_frame: ctk.CTkFrame | None = None
         self._servers_saved_frame: ctk.CTkFrame | None = None
+        self._servers_nav_expanded = False
+        self._saved_list_expanded = True
         self._servers_filter = "all"
         self._active_saved_connection: str | None = None
         self._t = self.theme_manager
@@ -233,9 +235,15 @@ class DatabaseAutomationApp(ctk.CTk):
 
         for key, label, _ in NAV_ITEMS:
             icon = NAV_ICONS.get(key, "•")
+            if key == "servers":
+                btn_text = f"  {icon}   {label}"
+                btn_command = self._toggle_servers_nav
+            else:
+                btn_text = f"  {icon}   {label}"
+                btn_command = (lambda k=key: self.navigate(k))
             btn = ctk.CTkButton(
                 nav_scroll,
-                text=f"  {icon}   {label}",
+                text=btn_text,
                 anchor="w",
                 height=34,
                 corner_radius=8,
@@ -243,11 +251,7 @@ class DatabaseAutomationApp(ctk.CTk):
                 text_color=self._t.sc("text_secondary") if self._t.is_light else self._t.c("nav_idle_text"),
                 hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
                 font=ctk.CTkFont(size=13),
-                command=(
-                    (lambda: self._navigate_servers("all"))
-                    if key == "servers"
-                    else (lambda k=key: self.navigate(k))
-                ),
+                command=btn_command,
             )
             btn.pack(fill="x", pady=2, padx=4)
             self.nav_buttons[key] = btn
@@ -259,7 +263,7 @@ class DatabaseAutomationApp(ctk.CTk):
 
                 all_btn = ctk.CTkButton(
                     self._servers_subnav_frame,
-                    text="      Saved Connection",
+                    text="    ▼  Saved Connection",
                     anchor="w",
                     height=30,
                     corner_radius=6,
@@ -267,7 +271,7 @@ class DatabaseAutomationApp(ctk.CTk):
                     text_color=self._t.sc("text_muted") if self._t.is_light else self._t.c("text_muted"),
                     hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
                     font=ctk.CTkFont(size=12),
-                    command=lambda: self._navigate_servers("all"),
+                    command=self._toggle_saved_connections_nav,
                 )
                 all_btn.pack(fill="x", pady=1, padx=8)
                 self._servers_sub_buttons["all"] = all_btn
@@ -278,7 +282,7 @@ class DatabaseAutomationApp(ctk.CTk):
                 for sub_key, sub_label in SERVERS_ENGINE_SUBNAV:
                     sub_btn = ctk.CTkButton(
                         self._servers_subnav_frame,
-                        text=f"      {sub_label}",
+                        text=f"    +  {sub_label}",
                         anchor="w",
                         height=30,
                         corner_radius=6,
@@ -435,13 +439,79 @@ class DatabaseAutomationApp(ctk.CTk):
         if name:
             self._active_saved_connection = name
             self._servers_filter = "all"
+            self._saved_list_expanded = True
+        else:
+            self._active_saved_connection = None
         self._refresh_servers_saved_nav()
+        self._style_servers_subnav()
+
+    def _toggle_servers_nav(self) -> None:
+        """Expand/collapse the full Servers sub-menu."""
+        if self._servers_nav_expanded and self._active_nav == "servers":
+            self._servers_nav_expanded = False
+            self._style_servers_subnav()
+            self._update_servers_nav_label()
+            return
+
+        self._servers_nav_expanded = True
+        self._update_servers_nav_label()
+        self._navigate_servers(self._servers_filter or "all")
+
+    def _update_servers_nav_label(self) -> None:
+        btn = self.nav_buttons.get("servers")
+        if btn is None:
+            return
+        icon = NAV_ICONS.get("servers", "•")
+        btn.configure(text=f"  {icon}   Servers")
+
+    def _toggle_saved_connections_nav(self) -> None:
+        """Expand/collapse the Saved Connection list under Servers."""
+        if self._saved_list_expanded and (
+            self._servers_filter == "all" or self._active_saved_connection
+        ):
+            # Currently open → collapse / unclick
+            self._saved_list_expanded = False
+            self._active_saved_connection = None
+            self._apply_saved_list_visibility()
+            self._style_servers_subnav()
+            return
+
+        # Closed → expand and show saved list
+        self._saved_list_expanded = True
+        self._apply_saved_list_visibility()
+        self._navigate_servers("all")
+
+    def _apply_saved_list_visibility(self) -> None:
+        if self._servers_saved_frame is None:
+            return
+        all_btn = self._servers_sub_buttons.get("all")
+        if self._saved_list_expanded:
+            if not self._servers_saved_frame.winfo_manager():
+                if all_btn is not None and all_btn.winfo_manager():
+                    self._servers_saved_frame.pack(after=all_btn, fill="x", padx=4, pady=(0, 4))
+                else:
+                    self._servers_saved_frame.pack(fill="x", padx=4, pady=(0, 4))
+            if all_btn is not None:
+                all_btn.configure(text="    ▼  Saved Connection")
+        else:
+            self._servers_saved_frame.pack_forget()
+            if all_btn is not None:
+                all_btn.configure(text="    ▶  Saved Connection")
 
     def _navigate_servers(self, servers_filter: str) -> None:
         self._active_saved_connection = None
+        self._servers_nav_expanded = True
+        self._update_servers_nav_label()
+        if servers_filter == "all":
+            self._saved_list_expanded = True
+            self._apply_saved_list_visibility()
         self.navigate("servers", view_extra={"servers_filter": servers_filter})
 
     def _navigate_saved_server(self, server_name: str) -> None:
+        self._servers_nav_expanded = True
+        self._update_servers_nav_label()
+        self._saved_list_expanded = True
+        self._apply_saved_list_visibility()
         self._active_saved_connection = server_name
         self.navigate(
             "servers",
@@ -457,6 +527,16 @@ class DatabaseAutomationApp(ctk.CTk):
         self._servers_saved_buttons.clear()
 
         servers = sorted(load_saved_servers(), key=lambda s: s.name.lower())
+        # Hide duplicate names (same label would break click/selection).
+        seen: set[str] = set()
+        unique_servers = []
+        for server in servers:
+            key = server.name.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_servers.append(server)
+        servers = unique_servers
         t = self._t
 
         if not servers:
@@ -488,13 +568,15 @@ class DatabaseAutomationApp(ctk.CTk):
             btn.pack(fill="x", pady=1, padx=12)
             self._servers_saved_buttons[server.name] = btn
 
+        self._apply_saved_list_visibility()
         self._style_servers_subnav()
 
     def _style_servers_subnav(self) -> None:
         t = self._t
         on_servers = self._active_nav == "servers"
+        show_subnav = on_servers and self._servers_nav_expanded
         if self._servers_subnav_frame is not None:
-            if on_servers:
+            if show_subnav:
                 if not self._servers_subnav_frame.winfo_manager():
                     servers_btn = self.nav_buttons.get("servers")
                     if servers_btn is not None:
@@ -504,12 +586,19 @@ class DatabaseAutomationApp(ctk.CTk):
             else:
                 self._servers_subnav_frame.pack_forget()
 
+        self._update_servers_nav_label()
+        self._apply_saved_list_visibility()
+
         for sub_key, btn in self._servers_sub_buttons.items():
             if sub_key == "all":
-                active = on_servers and self._servers_filter == "all" and not self._active_saved_connection
+                active = (
+                    show_subnav
+                    and self._saved_list_expanded
+                    and (self._servers_filter == "all" or bool(self._active_saved_connection))
+                )
             else:
                 active = (
-                    on_servers
+                    show_subnav
                     and self._servers_filter == sub_key
                     and not self._active_saved_connection
                 )
@@ -571,6 +660,8 @@ class DatabaseAutomationApp(ctk.CTk):
                 self._active_saved_connection = None
 
         self._active_nav = key
+        if key != "servers":
+            self._servers_nav_expanded = False
         self._style_navigation(key)
 
         for view in self.views.values():
