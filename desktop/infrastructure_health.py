@@ -151,7 +151,7 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
         raw = (text or "").strip()
         raw_l = raw.lower()
 
-        if raw_l in ("offline", "disconnected", "0 online") or raw.startswith("0 "):
+        if raw_l in ("offline", "disconnected", "not connected", "0 online") or raw.startswith("0 "):
             prefix.configure(text="")
             status.configure(text=raw or "Offline", text_color=self.theme.c("error"))
             self._stop_blink(key)
@@ -173,7 +173,8 @@ class InfrastructureHealthPanel(ctk.CTkFrame):
                 dot.configure(fg_color=self.theme.c("success"))
             return
 
-        if "connected" in raw_l:
+        # Match real "Connected..." states — not the phrase "Not Connected".
+        if raw_l == "connected" or raw_l.startswith("connected"):
             prefix.configure(text="")
             status.configure(text=raw, text_color=self.theme.c("success"))
             if blink_when_online:
