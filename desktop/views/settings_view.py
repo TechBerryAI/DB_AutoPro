@@ -32,12 +32,7 @@ class SettingsView(BaseView):
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, padx=24, pady=(20, 16), sticky="ew")
-        section_header(
-            header,
-            self.theme,
-            "Settings",
-            "Application configuration and environment profile",
-        )
+        section_header(header, self.theme, "Settings", "Application configuration and environment profile")
 
         settings = get_settings()
         info = self.card_frame(self)

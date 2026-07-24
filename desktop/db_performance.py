@@ -8,7 +8,6 @@ from typing import Any
 from backend.connectors.base import BaseConnector, get_connector_from_info
 from backend.models.schemas import DatabaseType
 from desktop.connection import ConnectionResult, apply_connection
-from desktop.ssh_tunnel import resolve_active_connection
 
 
 def _empty_metrics(*, connected: bool = False) -> dict[str, Any]:
@@ -233,8 +232,6 @@ def fetch_database_performance(connection: ConnectionResult | None) -> dict[str,
     """Collect live DB metrics. Never raises; always returns display-ready values."""
     if connection is None:
         return _empty_metrics(connected=False)
-
-    connection = resolve_active_connection(connection)
 
     try:
         apply_connection(connection)

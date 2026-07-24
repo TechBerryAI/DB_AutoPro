@@ -174,18 +174,6 @@ def open_ssh_tunnel(connection: ConnectionResult) -> ConnectionResult:
     return _tunneled_connection(connection, _active_forwarder.local_bind_port)
 
 
-def resolve_active_connection(connection: ConnectionResult) -> ConnectionResult:
-    """Use the open SSH tunnel endpoint for DB operations when one is active."""
-    global _active_forwarder
-    if (
-        _active_forwarder is not None
-        and connection.ssh_enabled
-        and connection.linux_username
-    ):
-        return _tunneled_connection(connection, _active_forwarder.local_bind_port)
-    return connection
-
-
 def close_ssh_tunnel() -> None:
     global _active_forwarder
     if _active_forwarder is not None:
