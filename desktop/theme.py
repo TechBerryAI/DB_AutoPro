@@ -9,29 +9,38 @@ import customtkinter as ctk
 
 THEME_PREF_PATH = Path(__file__).resolve().parent.parent / "config" / "ui_preferences.json"
 
-RADIUS = {"sm": 8, "md": 12, "lg": 14, "xl": 16, "pill": 999}
+RADIUS = {"sm": 12, "md": 16, "lg": 22, "xl": 28, "pill": 999}
 
-# Ultra-modern realistic palette — layered depth, glass surfaces, refined accents
+FONT_DISPLAY = "Segoe UI"
+FONT_UI = "Segoe UI"
+
+# Ultra-realistic modern palette — layered depth, glass surfaces, mesh backgrounds
 THEMES = {
     "dark": {
         "appearance_mode": "dark",
         "color_theme": "blue",
-        "bg_app": "#030508",
-        "bg_sidebar": "#070b12",
-        "bg_content": "#0a0e16",
-        "bg_card": "#0f1520",
-        "bg_card_hover": "#151d2c",
-        "bg_elevated": "#121a28",
+        "bg_app": "#020408",
+        "bg_sidebar": "#060a12",
+        "bg_content": "#0b1018",
+        "bg_card": "#101722",
+        "bg_card_hover": "#161f2e",
+        "bg_elevated": "#141c2a",
         "bg_input": "#0a1018",
-        "bg_glass": "#111827",
+        "bg_glass": "#121a28cc",
         "bg_list": "#0c121c",
-        "border": "#1e2a3d",
-        "border_subtle": "#141c28",
-        "border_focus": "#5b9aff",
-        "primary": "#5b9aff",
-        "primary_hover": "#4a8ef5",
-        "primary_muted": "#152847",
+        "bg_mesh": "#0e1420",
+        "border": "#243044",
+        "border_subtle": "#1a2434",
+        "border_glow": "#3b82f633",
+        "border_focus": "#60a5fa",
+        "shadow_outer": "#000000",
+        "shadow_inner": "#1a2434",
+        "primary": "#3b82f6",
+        "primary_hover": "#2563eb",
+        "primary_muted": "#1e3a5f",
         "primary_glow": "#3b82f640",
+        "gradient_start": "#2563eb",
+        "gradient_end": "#7c3aed",
         "text_primary": "#f8fafc",
         "text_secondary": "#9aa8bc",
         "text_muted": "#6b7a90",
@@ -42,9 +51,9 @@ THEMES = {
         "warning_muted": "#4a3410",
         "error": "#ff6b6b",
         "error_muted": "#4a1515",
-        "destructive_bg": "#3f1515",
-        "destructive_hover": "#5c1d1d",
-        "destructive_text": "#fca5a5",
+        "destructive_bg": "#8b2222",
+        "destructive_hover": "#ef4444",
+        "destructive_text": "#fecaca",
         "accent": "#818cf8",
         "accent_secondary": "#a78bfa",
         "metric_blue": "#5b9aff",
@@ -72,76 +81,82 @@ THEMES = {
         "sidebar_bg_card": "#0f1520",
         "sidebar_bg_hover": "#151d2c",
         "sidebar_bg_list": "#0a0e16",
-        "sidebar_nav_active": "#152847",
-        "sidebar_nav_hover": "#121a28",
-        "bg_primary": "#030508",
-        "bg_secondary": "#0f1520",
-        "bg_sidebar_legacy": "#070b12",
+        "sidebar_nav_active": "#1e3a5f",
+        "sidebar_nav_hover": "#141c2a",
+        "bg_primary": "#020408",
+        "bg_secondary": "#101722",
+        "bg_sidebar_legacy": "#060a12",
     },
     "light": {
         "appearance_mode": "light",
         "color_theme": "blue",
-        "bg_app": "#F7F9FC",
-        "bg_content": "#F7F9FC",
+        "bg_app": "#c8d4e4",
+        "bg_content": "#dce4f0",
         "bg_card": "#ffffff",
         "bg_card_hover": "#f8fafc",
-        "bg_elevated": "#F1F5F9",
+        "bg_elevated": "#f1f5f9",
         "bg_input": "#ffffff",
         "bg_glass": "#ffffff",
-        "bg_list": "#F1F5F9",
-        "border": "#E2E8F0",
-        "border_subtle": "#EEF2F7",
+        "bg_list": "#eef2f8",
+        "bg_mesh": "#d4deec",
+        "border": "#b8c5d6",
+        "border_subtle": "#d8e0eb",
+        "border_glow": "#2563eb22",
         "border_focus": "#2563eb",
+        "shadow_outer": "#b8c4d4",
+        "shadow_inner": "#ffffff",
         "primary": "#2563eb",
         "primary_hover": "#1d4ed8",
-        "primary_muted": "#EFF6FF",
+        "primary_muted": "#dbeafe",
         "primary_glow": "#2563eb18",
-        "text_primary": "#0F172A",
+        "gradient_start": "#2563eb",
+        "gradient_end": "#6366f1",
+        "text_primary": "#0f172a",
         "text_secondary": "#475569",
-        "text_muted": "#64748B",
+        "text_muted": "#64748b",
         "text_on_primary": "#ffffff",
         "success": "#059669",
-        "success_muted": "#ECFDF5",
-        "warning": "#D97706",
-        "warning_muted": "#FFFBEB",
-        "error": "#DC2626",
-        "error_muted": "#FEF2F2",
-        "destructive_bg": "#FEE2E2",
-        "destructive_hover": "#FECACA",
-        "destructive_text": "#B91C1C",
-        "accent": "#4F46E5",
-        "accent_secondary": "#6366F1",
-        "metric_blue": "#2563EB",
-        "metric_blue_bg": "#EFF6FF",
-        "metric_purple": "#7C3AED",
-        "metric_purple_bg": "#F5F3FF",
+        "success_muted": "#ecfdf5",
+        "warning": "#d97706",
+        "warning_muted": "#fffbeb",
+        "error": "#dc2626",
+        "error_muted": "#fef2f2",
+        "destructive_bg": "#991b1b",
+        "destructive_hover": "#dc2626",
+        "destructive_text": "#ffffff",
+        "accent": "#6366f1",
+        "accent_secondary": "#8b5cf6",
+        "metric_blue": "#2563eb",
+        "metric_blue_bg": "#eff6ff",
+        "metric_purple": "#7c3aed",
+        "metric_purple_bg": "#f5f3ff",
         "metric_green": "#059669",
-        "metric_green_bg": "#ECFDF5",
-        "metric_red": "#DC2626",
-        "metric_red_bg": "#FEF2F2",
-        "metric_amber": "#D97706",
-        "metric_amber_bg": "#FFFBEB",
+        "metric_green_bg": "#ecfdf5",
+        "metric_red": "#dc2626",
+        "metric_red_bg": "#fef2f2",
+        "metric_amber": "#d97706",
+        "metric_amber_bg": "#fffbeb",
         "nav_active_text": "#ffffff",
-        "nav_idle_text": "#cbd5e1",
+        "nav_idle_text": "#94a3b8",
         "nav_indicator": "#2563eb",
         "log_info": "#475569",
         "log_success": "#059669",
         "log_warning": "#d97706",
         "log_error": "#dc2626",
         "terminal_bg": "#0f172a",
-        "bg_sidebar": "#0B1220",
-        "sidebar_border": "#1E293B",
-        "sidebar_text_primary": "#F8FAFC",
-        "sidebar_text_secondary": "#CBD5E1",
-        "sidebar_text_muted": "#94A3B8",
+        "bg_sidebar": "#0a1020",
+        "sidebar_border": "#1a2744",
+        "sidebar_text_primary": "#f8fafc",
+        "sidebar_text_secondary": "#cbd5e1",
+        "sidebar_text_muted": "#64748b",
         "sidebar_bg_card": "#111827",
-        "sidebar_bg_hover": "#1E293B",
-        "sidebar_bg_list": "#0B1220",
-        "sidebar_nav_active": "#1D4ED8",
-        "sidebar_nav_hover": "#1E293B",
-        "bg_primary": "#F7F9FC",
-        "bg_secondary": "#FFFFFF",
-        "bg_sidebar_legacy": "#0B1220",
+        "sidebar_bg_hover": "#1e293b",
+        "sidebar_bg_list": "#0c1220",
+        "sidebar_nav_active": "#2563eb",
+        "sidebar_nav_hover": "#1e293b",
+        "bg_primary": "#c8d4e4",
+        "bg_secondary": "#ffffff",
+        "bg_sidebar_legacy": "#0a1020",
     },
 }
 
@@ -190,7 +205,8 @@ class ThemeManager:
         return RADIUS.get(key, RADIUS["md"])
 
     def font(self, size: int, *, weight: str = "normal") -> ctk.CTkFont:
-        return ctk.CTkFont(family="Segoe UI", size=size, weight=weight)
+        family = FONT_DISPLAY if size >= 22 else FONT_UI
+        return ctk.CTkFont(family=family, size=size, weight=weight)
 
     def log_level_color(self, level: str) -> str:
         key = f"log_{level.lower()}"
@@ -259,30 +275,4 @@ def save_last_username(username: str) -> None:
         return
     data = _load_ui_prefs()
     data["last_username"] = name
-    _save_ui_prefs(data)
-
-
-def load_last_password() -> str:
-    return str(_load_ui_prefs().get("last_password", ""))
-
-
-def save_last_credentials(username: str, password: str) -> None:
-    name = username.strip()
-    if not name:
-        return
-    data = _load_ui_prefs()
-    data["last_username"] = name
-    data["last_password"] = password
-    data["remember_password"] = True
-    _save_ui_prefs(data)
-
-
-def load_remember_password() -> bool:
-    return bool(_load_ui_prefs().get("remember_password", True))
-
-
-def clear_last_password() -> None:
-    data = _load_ui_prefs()
-    data.pop("last_password", None)
-    data["remember_password"] = False
     _save_ui_prefs(data)

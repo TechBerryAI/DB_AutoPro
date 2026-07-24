@@ -8,7 +8,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from desktop.dashboard_widgets import analytics_card
-from desktop.design_system import font
+from desktop.design_system import depth_card, font
 from desktop.theme import ThemeManager
 
 
@@ -20,36 +20,44 @@ def _kpi_tile(
     title: str,
     color_key: str,
 ) -> ctk.CTkLabel:
-    card = ctk.CTkFrame(
-        parent,
-        corner_radius=theme.radius("md"),
-        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-        border_width=1,
-        border_color=theme.c("border"),
-    )
-    card.pack(side="left", fill="both", expand=True, padx=4)
+    if theme.is_light:
+        shell, card = depth_card(parent, theme, radius="lg")
+        shell.pack(side="left", fill="both", expand=True, padx=5)
+    else:
+        card = ctk.CTkFrame(
+            parent,
+            corner_radius=theme.radius("lg"),
+            fg_color=theme.c("bg_glass"),
+            border_width=0,
+        )
+        card.pack(side="left", fill="both", expand=True, padx=5)
 
     inner = ctk.CTkFrame(card, fg_color="transparent")
-    inner.pack(fill="both", expand=True, padx=14, pady=12)
+    inner.pack(fill="both", expand=True, padx=16, pady=14)
 
     top = ctk.CTkFrame(inner, fg_color="transparent")
     top.pack(fill="x")
-    ctk.CTkLabel(top, text=icon, font=font(theme, 16), text_color=theme.c(color_key)).pack(side="left")
+    icon_bg = ctk.CTkFrame(top, width=28, height=28, corner_radius=8, fg_color=theme.c("bg_elevated"))
+    icon_bg.pack(side="left")
+    icon_bg.pack_propagate(False)
+    ctk.CTkLabel(icon_bg, text=icon, font=font(theme, 14), text_color=theme.c(color_key)).place(
+        relx=0.5, rely=0.5, anchor="center"
+    )
     ctk.CTkLabel(
         top,
-        text=title,
-        font=font(theme, 10, weight="bold"),
+        text=title.upper(),
+        font=font(theme, 9, weight="bold"),
         text_color=theme.c("text_muted"),
     ).pack(side="right")
 
     value = ctk.CTkLabel(
         inner,
         text="—",
-        font=font(theme, 18, weight="bold"),
+        font=font(theme, 22, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     )
-    value.pack(anchor="w", pady=(8, 2))
+    value.pack(anchor="w", pady=(10, 2))
 
     subtitle = ctk.CTkLabel(
         inner,
@@ -90,11 +98,22 @@ def _multi_line_chart(
     keys = [k for k, _, _ in series_specs]
     colors = [theme.c(c) for _, _, c in series_specs]
     last_series: list[dict] = []
+    last_sig: list[tuple | None] = [None]
 
     def update(series: list[dict] | None = None) -> None:
         nonlocal last_series
         if series is not None:
+            sig = tuple(
+                tuple(pt.get(k, 0) for k in keys) + (pt.get("label", ""),)
+                for pt in series
+            )
+            if sig == last_sig[0] and last_series:
+                # Still allow Configure redraws when series is None.
+                last_series = list(series)
+                return
+            last_sig[0] = sig
             last_series = list(series)
+
         canvas.delete("all")
         if not last_series:
             canvas.create_text(
@@ -105,6 +124,7 @@ def _multi_line_chart(
                 font=("Segoe UI", 10),
             )
             return
+
         canvas.update_idletasks()
         w = max(canvas.winfo_width(), 640)
         h = height
@@ -113,6 +133,7 @@ def _multi_line_chart(
         chart_h = h - pad_t - pad_b
         max_y = max(1.0, max(max(d.get(k, 0) for k in keys) for d in last_series))
         n = len(last_series)
+        label_stride = max(1, n // 6)
         xs = [pad_l + (chart_w * i / max(n - 1, 1)) for i in range(n)]
         for key, color in zip(keys, colors):
             points: list[float] = []
@@ -124,13 +145,14 @@ def _multi_line_chart(
             if len(points) >= 4:
                 canvas.create_line(*points, fill=color, width=2, smooth=True)
         for i, pt in enumerate(last_series):
-            canvas.create_text(
-                xs[i],
-                h - 6,
-                text=pt.get("label", ""),
-                fill=theme.c("text_muted"),
-                font=("Segoe UI", 7),
-            )
+            if i % label_stride == 0 or i == n - 1:
+                canvas.create_text(
+                    xs[i],
+                    h - 6,
+                    text=pt.get("label", ""),
+                    fill=theme.c("text_muted"),
+                    font=("Segoe UI", 7),
+                )
 
     def _on_configure(_event=None) -> None:
         if last_series:
@@ -154,11 +176,12 @@ def _sparkline_row(parent: ctk.CTkFrame, theme: ThemeManager) -> dict[str, ctk.C
             row,
             fg_color=theme.c("bg_elevated"),
             corner_radius=theme.radius("sm"),
-            border_width=1,
-            border_color=theme.c("border_subtle"),
+            border_width=0,
         )
         cell.pack(side="left", fill="x", expand=True, padx=2)
-        ctk.CTkLabel(cell, text=label, font=font(theme, 9), text_color=theme.c("text_muted")).pack(anchor="w", padx=8, pady=(6, 0))
+        ctk.CTkLabel(cell, text=label, font=font(theme, 9), text_color=theme.c("text_muted")).pack(
+            anchor="w", padx=8, pady=(6, 0)
+        )
         val = ctk.CTkLabel(cell, text="—", font=font(theme, 13, weight="bold"), text_color=theme.c(color))
         val.pack(anchor="w", padx=8, pady=(2, 8))
         refs[key] = val
@@ -169,7 +192,6 @@ def build_database_performance_section(parent: ctk.CTkFrame, theme: ThemeManager
     """Build Database Performance: KPI strip + full-width real-time chart."""
     refs: dict = {}
 
-    # ── KPI row ──
     kpi_row = ctk.CTkFrame(parent, fg_color="transparent")
     kpi_row.pack(fill="x", pady=(0, 12))
     refs["kpi_status"] = _kpi_tile(kpi_row, theme, icon="🛡", title="Status", color_key="success")
@@ -183,7 +205,6 @@ def build_database_performance_section(parent: ctk.CTkFrame, theme: ThemeManager
     refs["kpi_throughput"] = _kpi_tile(kpi_row, theme, icon="⇅", title="Activity", color_key="primary")
     refs["kpi_throughput"]._subtitle.configure(text="Lifetime counter")  # type: ignore[attr-defined]
 
-    # ── Full-width performance chart ──
     perf_card, perf_body = analytics_card(
         parent,
         theme,

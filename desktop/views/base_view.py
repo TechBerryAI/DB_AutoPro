@@ -43,6 +43,9 @@ class BaseView(ctk.CTkFrame):
             return self.connection.db_type
         return DatabaseType.POSTGRESQL
 
+    def set_active(self, active: bool) -> None:
+        """Override in views that run background polling."""
+
     def get_active_profile(self) -> str:
         return "default"
 

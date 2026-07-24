@@ -106,14 +106,23 @@ class RestoreService:
             result.status = OperationStatus.COMPLETED
             result.message = "Restore completed successfully"
             result.completed_at = datetime.now(timezone.utc)
-            audit.log("restore", user, request.backup_path, "success")
+            audit.log(
+                "restore",
+                user,
+                request.backup_path,
+                "success",
+                {"db_type": request.db_type.value},
+            )
             logger.info("Restore completed from %s", request.backup_path)
 
         except Exception as exc:
             result.status = OperationStatus.FAILED
             result.message = str(exc)
             result.completed_at = datetime.now(timezone.utc)
-            audit.log("restore", user, request.backup_path, "failed", {"error": str(exc)})
+            audit.log("restore", user, request.backup_path, "failed", {
+                "error": str(exc),
+                "db_type": request.db_type.value,
+            })
             raise RestoreError(str(exc)) from exc
         finally:
             _operations[operation_id] = result

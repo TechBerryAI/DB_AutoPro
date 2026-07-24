@@ -8,6 +8,7 @@ import platform
 import shlex
 import socket
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -26,6 +27,87 @@ logger = get_logger("services.monitoring")
 ReportPeriod = Literal["today", "monthly", "yearly", "custom"]
 
 _NETWORK_BAR_CAP_BPS = 10 * 1024 * 1024  # 10 MB/s reference for utilization bar
+
+
+@dataclass(frozen=True)
+class DashboardConnectionScope:
+    """Active database session used to scope dashboard audit aggregates."""
+
+    resource: str
+    host: str
+    db_type: DatabaseType
+    profile: str = "default"
+    local_dir: str | None = None
+    database: str | None = None
+
+
+def audit_record_matches_scope(data: dict[str, Any], scope: DashboardConnectionScope | None) -> bool:
+    """Return True when an audit record belongs to the active connected database."""
+    if scope is None:
+        return False
+
+    action = str(data.get("action", "")).lower()
+    details = data.get("details") or {}
+    resource = str(data.get("resource", ""))
+    resource_l = resource.lower()
+    scope_resource = scope.resource.lower()
+    scope_host = scope.host.lower()
+    rec_db = details.get("db_type")
+
+    if rec_db and rec_db != scope.db_type.value:
+        return False
+
+    if action == "connect":
+        if resource_l == scope_resource:
+            return True
+        rec_host = str(details.get("host", "")).lower()
+        return rec_host == scope_host
+
+    if action in ("backup", "restore"):
+        if rec_db == scope.db_type.value:
+            return True
+        if scope.local_dir:
+            norm = scope.local_dir.lower().replace("\\", "/")
+            if norm and norm in resource_l.replace("\\", "/"):
+                return True
+        if resource_l == scope.profile.lower():
+            return True
+        return False
+
+    return False
+
+
+def empty_security_dashboard(days: int = 7) -> dict[str, Any]:
+    today = datetime.now().astimezone().date()
+    day_keys = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
+    return {
+        "posture": {"failed_logins": 0, "security_alerts": 0, "compliance": "Compliant"},
+        "overview": {"critical": 0, "warning": 0, "info": 0, "total": 0},
+        "trend": [
+            {"label": d.strftime("%d %b"), "critical": 0, "warning": 0, "info": 0}
+            for d in day_keys
+        ],
+        "recent_alerts": [],
+        "top_risks": [],
+    }
+
+
+def empty_backup_analytics(days: int = 7) -> dict[str, Any]:
+    today = datetime.now().astimezone().date()
+    day_keys = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
+    return {
+        "successful": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total": 0,
+        "success_rate": 0.0,
+        "storage_mb": 0.0,
+        "storage_gb": 0.0,
+        "trend": [
+            {"label": d.strftime("%d %b"), "successful": 0, "failed": 0, "skipped": 0}
+            for d in day_keys
+        ],
+    }
 
 
 def _disk_usage_path() -> str:
@@ -294,6 +376,7 @@ class MonitoringService:
         date_from: date | None = None,
         date_to: date | None = None,
         user: str | None = None,
+        scope: DashboardConnectionScope | None = None,
     ) -> tuple[int, int]:
         """Count success/failed audit entries for the selected time period."""
         success = 0
@@ -310,6 +393,9 @@ class MonitoringService:
                 rec_user = str(data.get("user", "")).strip().lower()
                 if rec_user != user_key:
                     continue
+
+            if scope is not None and not audit_record_matches_scope(data, scope):
+                continue
 
             details = data.get("details") or {}
             if db_type:
@@ -344,10 +430,11 @@ class MonitoringService:
         db_type: DatabaseType | None = None,
         *,
         user: str | None = None,
+        scope: DashboardConnectionScope | None = None,
     ) -> tuple[int, int]:
         """Count success/failed audit entries for today (local calendar day)."""
         return self.count_audit_for_period(
-            "today", actions=actions, db_type=db_type, user=user,
+            "today", actions=actions, db_type=db_type, user=user, scope=scope
         )
 
     def get_dashboard_report(
@@ -609,8 +696,17 @@ class MonitoringService:
         }
         return titles.get((action_l, status_l), f"{action_l.replace('_', ' ').title()} {status_l}")
 
-    def get_security_dashboard_data(self, *, user: str | None = None, days: int = 7) -> dict[str, Any]:
+    def get_security_dashboard_data(
+        self,
+        *,
+        user: str | None = None,
+        days: int = 7,
+        scope: DashboardConnectionScope | None = None,
+    ) -> dict[str, Any]:
         """Aggregate audit log into security dashboard metrics and charts."""
+        if scope is None:
+            return empty_security_dashboard(days=days)
+
         today = datetime.now().astimezone().date()
         user_key = user.strip().lower() if user else None
         day_keys = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
@@ -634,6 +730,9 @@ class MonitoringService:
 
             rec_user = str(data.get("user", "")).strip().lower()
             if user_key and rec_user != user_key:
+                continue
+
+            if not audit_record_matches_scope(data, scope):
                 continue
 
             try:
@@ -746,8 +845,12 @@ class MonitoringService:
         user: str | None = None,
         days: int = 7,
         storage_mb: float = 0.0,
+        scope: DashboardConnectionScope | None = None,
     ) -> dict[str, Any]:
         """Backup success/failure breakdown for dashboard charts."""
+        if scope is None:
+            return empty_backup_analytics(days=days)
+
         today = datetime.now().astimezone().date()
         user_key = user.strip().lower() if user else None
         day_keys = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
@@ -761,6 +864,8 @@ class MonitoringService:
                 continue
             rec_user = str(data.get("user", "")).strip().lower()
             if user_key and rec_user != user_key:
+                continue
+            if not audit_record_matches_scope(data, scope):
                 continue
             try:
                 ts = datetime.fromisoformat(str(record.get("timestamp", "")))
