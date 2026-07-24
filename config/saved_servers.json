@@ -35,9 +35,9 @@
       "linux_password": "pass@123$",
       "ssh_host": "192.168.1.115",
       "ssh_port": 22,
-      "mongodump_path": "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongodump",
-      "remote_backup_dir": "/mnt/backup",
-      "local_output_dir": "backups",
+      "mongodump_path": "",
+      "remote_backup_dir": "",
+      "local_output_dir": "",
       "backup_folder_name": "",
       "backup_collection": "",
       "owner_username": ""
