@@ -8,7 +8,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from desktop.dashboard_widgets import analytics_card
-from desktop.design_system import font
+from desktop.design_system import depth_card, font
 from desktop.theme import ThemeManager
 
 
@@ -20,36 +20,44 @@ def _kpi_tile(
     title: str,
     color_key: str,
 ) -> ctk.CTkLabel:
-    card = ctk.CTkFrame(
-        parent,
-        corner_radius=theme.radius("md"),
-        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-        border_width=1,
-        border_color=theme.c("border"),
-    )
-    card.pack(side="left", fill="both", expand=True, padx=4)
+    if theme.is_light:
+        shell, card = depth_card(parent, theme, radius="lg")
+        shell.pack(side="left", fill="both", expand=True, padx=5)
+    else:
+        card = ctk.CTkFrame(
+            parent,
+            corner_radius=theme.radius("lg"),
+            fg_color=theme.c("bg_glass"),
+            border_width=0,
+        )
+        card.pack(side="left", fill="both", expand=True, padx=5)
 
     inner = ctk.CTkFrame(card, fg_color="transparent")
-    inner.pack(fill="both", expand=True, padx=14, pady=12)
+    inner.pack(fill="both", expand=True, padx=16, pady=14)
 
     top = ctk.CTkFrame(inner, fg_color="transparent")
     top.pack(fill="x")
-    ctk.CTkLabel(top, text=icon, font=font(theme, 16), text_color=theme.c(color_key)).pack(side="left")
+    icon_bg = ctk.CTkFrame(top, width=28, height=28, corner_radius=8, fg_color=theme.c("bg_elevated"))
+    icon_bg.pack(side="left")
+    icon_bg.pack_propagate(False)
+    ctk.CTkLabel(icon_bg, text=icon, font=font(theme, 14), text_color=theme.c(color_key)).place(
+        relx=0.5, rely=0.5, anchor="center"
+    )
     ctk.CTkLabel(
         top,
-        text=title,
-        font=font(theme, 10, weight="bold"),
+        text=title.upper(),
+        font=font(theme, 9, weight="bold"),
         text_color=theme.c("text_muted"),
     ).pack(side="right")
 
     value = ctk.CTkLabel(
         inner,
         text="—",
-        font=font(theme, 18, weight="bold"),
+        font=font(theme, 22, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     )
-    value.pack(anchor="w", pady=(8, 2))
+    value.pack(anchor="w", pady=(10, 2))
 
     subtitle = ctk.CTkLabel(
         inner,
@@ -89,13 +97,20 @@ def _multi_line_chart(
 
     keys = [k for k, _, _ in series_specs]
     colors = [theme.c(c) for _, _, c in series_specs]
+    last_sig: list[tuple | None] = [None]
 
     def update(series: list[dict]) -> None:
+        sig = tuple(
+            tuple(pt.get(k, 0) for k in keys) + (pt.get("label", ""),)
+            for pt in series
+        )
+        if sig == last_sig[0]:
+            return
+        last_sig[0] = sig
         canvas.delete("all")
         if not series:
             canvas.create_text(80, height / 2, text="Connect a database", fill=theme.c("text_muted"), font=("Segoe UI", 10))
             return
-        canvas.update_idletasks()
         w = max(canvas.winfo_width(), 240)
         h = height
         pad_l, pad_r, pad_t, pad_b = 24, 8, 10, 22
@@ -103,6 +118,7 @@ def _multi_line_chart(
         chart_h = h - pad_t - pad_b
         max_y = max(1.0, max(max(d.get(k, 0) for k in keys) for d in series))
         n = len(series)
+        label_stride = max(1, n // 6)
         xs = [pad_l + (chart_w * i / max(n - 1, 1)) for i in range(n)]
         for key, color in zip(keys, colors):
             points: list[float] = []
@@ -114,7 +130,8 @@ def _multi_line_chart(
             if len(points) >= 4:
                 canvas.create_line(*points, fill=color, width=2, smooth=True)
         for i, pt in enumerate(series):
-            canvas.create_text(xs[i], h - 6, text=pt.get("label", ""), fill=theme.c("text_muted"), font=("Segoe UI", 7))
+            if i % label_stride == 0 or i == n - 1:
+                canvas.create_text(xs[i], h - 6, text=pt.get("label", ""), fill=theme.c("text_muted"), font=("Segoe UI", 7))
 
     return update
 
@@ -133,8 +150,7 @@ def _sparkline_row(parent: ctk.CTkFrame, theme: ThemeManager) -> dict[str, ctk.C
             row,
             fg_color=theme.c("bg_elevated"),
             corner_radius=theme.radius("sm"),
-            border_width=1,
-            border_color=theme.c("border_subtle"),
+            border_width=0,
         )
         cell.pack(side="left", fill="x", expand=True, padx=2)
         ctk.CTkLabel(cell, text=label, font=font(theme, 9), text_color=theme.c("text_muted")).pack(anchor="w", padx=8, pady=(6, 0))
@@ -156,16 +172,24 @@ def _backup_donut(parent: ctk.CTkFrame, theme: ThemeManager, *, height: int = 14
 
     legend = ctk.CTkFrame(parent, fg_color="transparent")
     legend.pack(side="left", fill="y", padx=(8, 0))
+    legend_labels: list[ctk.CTkLabel] = []
+    for name in ("Successful", "Failed", "Skipped"):
+        lbl = ctk.CTkLabel(legend, text="", font=font(theme, 10), anchor="w")
+        lbl.pack(anchor="w", pady=2)
+        legend_labels.append(lbl)
+    last_sig: list[tuple | None] = [None]
 
     def update(data: dict) -> None:
-        canvas.delete("all")
-        for child in legend.winfo_children():
-            child.destroy()
         ok = int(data.get("successful", 0))
         fail = int(data.get("failed", 0))
         skip = int(data.get("skipped", 0))
         total = ok + fail + skip
         rate = float(data.get("success_rate", 0))
+        sig = (ok, fail, skip, round(rate, 1))
+        if sig == last_sig[0]:
+            return
+        last_sig[0] = sig
+        canvas.delete("all")
         cx, cy = height * 0.45, height / 2
         outer, inner = height * 0.38, height * 0.22
         if total <= 0:
@@ -181,9 +205,12 @@ def _backup_donut(parent: ctk.CTkFrame, theme: ThemeManager, *, height: int = 14
         canvas.create_oval(cx - inner, cy - inner, cx + inner, cy + inner, fill=theme.c("bg_card"), outline="")
         canvas.create_text(cx, cy - 4, text=f"{rate:.1f}%", font=("Segoe UI", 14, "bold"), fill=theme.c("text_primary"))
         canvas.create_text(cx, cy + 12, text="Success Rate", font=("Segoe UI", 8), fill=theme.c("text_muted"))
-        for name, count, color in [("Successful", ok, theme.c("success")), ("Failed", fail, theme.c("error")), ("Skipped", skip, theme.c("text_muted"))]:
+        for lbl, (name, count, color) in zip(
+            legend_labels,
+            [("Successful", ok, theme.c("success")), ("Failed", fail, theme.c("error")), ("Skipped", skip, theme.c("text_muted"))],
+        ):
             pct = f"{count / total * 100:.1f}%" if total else "0%"
-            ctk.CTkLabel(legend, text=f"{name}  {count}  ({pct})", font=font(theme, 10), text_color=color, anchor="w").pack(anchor="w", pady=2)
+            lbl.configure(text=f"{name}  {count}  ({pct})", text_color=color)
 
     return update
 
@@ -212,10 +239,14 @@ def _load_gauge(parent: ctk.CTkFrame, theme: ThemeManager, *, height: int = 120)
     canvas.pack(fill="both", expand=True)
     label = ctk.CTkLabel(parent, text="Current Load", font=font(theme, 10), text_color=theme.c("text_muted"))
     label.pack(pady=(0, 4))
+    last_pct: list[float | None] = [None]
 
     def update(pct: float) -> None:
+        rounded = round(pct)
+        if last_pct[0] == rounded:
+            return
+        last_pct[0] = rounded
         canvas.delete("all")
-        canvas.update_idletasks()
         w = max(canvas.winfo_width(), 120)
         cx, cy = w / 2, height - 10
         r = min(w / 2 - 10, height - 20)
@@ -238,17 +269,27 @@ def _conn_donut(parent: ctk.CTkFrame, theme: ThemeManager, *, height: int = 130)
     canvas.pack(fill="both", expand=True)
     legend = ctk.CTkFrame(parent, fg_color="transparent")
     legend.pack(fill="x", pady=(4, 0))
+    legend_rows: list[tuple[ctk.CTkFrame, ctk.CTkLabel]] = []
+    for _ in range(4):
+        row = ctk.CTkFrame(legend, fg_color="transparent")
+        row.pack(fill="x", pady=1)
+        lbl = ctk.CTkLabel(row, text="", font=font(theme, 10), text_color=theme.c("text_secondary"))
+        lbl.pack(side="left")
+        legend_rows.append((row, lbl))
+    last_sig: list[tuple | None] = [None]
 
     def update(dist: dict) -> None:
-        canvas.delete("all")
-        for child in legend.winfo_children():
-            child.destroy()
         specs = [
             ("active", "Active", "success"),
             ("idle", "Idle", "primary"),
             ("blocked", "Blocked", "warning"),
             ("waiting", "Waiting", "error"),
         ]
+        sig = tuple(int(dist.get(k, 0)) for k, _, _ in specs)
+        if sig == last_sig[0]:
+            return
+        last_sig[0] = sig
+        canvas.delete("all")
         total = sum(int(dist.get(k, 0)) for k, _, _ in specs) or 1
         cx, cy = height * 0.42, height / 2
         outer, inner = height * 0.36, height * 0.22
@@ -263,13 +304,11 @@ def _conn_donut(parent: ctk.CTkFrame, theme: ThemeManager, *, height: int = 130)
         canvas.create_oval(cx - inner, cy - inner, cx + inner, cy + inner, fill=theme.c("bg_card"), outline="")
         canvas.create_text(cx, cy - 2, text=str(total), font=("Segoe UI", 14, "bold"), fill=theme.c("text_primary"))
         canvas.create_text(cx, cy + 14, text="Total", font=("Segoe UI", 8), fill=theme.c("text_muted"))
-        for key, name, color_key in specs:
+        for (row, lbl), (key, name, color_key) in zip(legend_rows, specs):
             val = int(dist.get(key, 0))
             pct = f"{val / total * 100:.0f}%" if total else "0%"
-            row = ctk.CTkFrame(legend, fg_color="transparent")
             row.pack(fill="x", pady=1)
-            ctk.CTkFrame(row, width=8, height=8, corner_radius=4, fg_color=theme.c(color_key)).pack(side="left", padx=(0, 6))
-            ctk.CTkLabel(row, text=f"{name}  {val}  ({pct})", font=font(theme, 10), text_color=theme.c("text_secondary")).pack(side="left")
+            lbl.configure(text=f"{name}  {val}  ({pct})")
 
     return update
 

@@ -15,28 +15,30 @@ def section_block(
     *,
     subtitle: str = "",
 ) -> ctk.CTkFrame:
-    """Titled dashboard section — typography hierarchy only."""
+    """Titled dashboard section with inner content area."""
     wrap = ctk.CTkFrame(parent, fg_color="transparent")
-    wrap.pack(fill="x", pady=(0, 14))
+    wrap.pack(fill="x", pady=(0, 28))
 
     header = ctk.CTkFrame(wrap, fg_color="transparent")
-    header.pack(fill="x", pady=(0, 10))
+    header.pack(fill="x", pady=(0, 16))
 
+    col = ctk.CTkFrame(header, fg_color="transparent")
+    col.pack(side="left", fill="x", expand=True)
     ctk.CTkLabel(
-        header,
+        col,
         text=title,
-        font=font(theme, 17, weight="bold"),
+        font=font(theme, 22, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     ).pack(anchor="w")
     if subtitle:
         ctk.CTkLabel(
-            header,
+            col,
             text=subtitle,
             font=font(theme, 12),
             text_color=theme.c("text_muted"),
             anchor="w",
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(anchor="w", pady=(5, 0))
 
     body = ctk.CTkFrame(wrap, fg_color="transparent")
     body.pack(fill="x")
@@ -58,7 +60,7 @@ def analytics_card(
     *,
     accent: str | None = None,
 ) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
-    shell, inner = glass_surface(parent, theme, accent=accent, hover=True)
+    shell, inner = glass_surface(parent, theme, accent=accent, hover=False)
     ctk.CTkLabel(
         inner,
         text=title.upper(),
@@ -103,8 +105,7 @@ def resource_gauge(
         parent,
         fg_color=theme.c("bg_elevated"),
         corner_radius=theme.radius("md"),
-        border_width=1,
-        border_color=theme.c("border_subtle"),
+        border_width=0,
     )
     card.pack(fill="x", pady=6)
 
@@ -168,8 +169,7 @@ def host_stat_row(
         parent,
         fg_color=theme.c("bg_elevated"),
         corner_radius=theme.radius("sm"),
-        border_width=1,
-        border_color=theme.c("border_subtle"),
+        border_width=0,
     )
     row.pack(fill="x", pady=3)
     inner = ctk.CTkFrame(row, fg_color="transparent")
@@ -224,8 +224,7 @@ def recent_activity_row(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) 
         parent,
         fg_color=theme.c("bg_elevated"),
         corner_radius=theme.radius("md"),
-        border_width=1,
-        border_color=theme.c("border_subtle"),
+        border_width=0,
     )
     row.pack(fill="x", pady=4)
     action = str(event.get("action", "event")).replace("_", " ").title()
@@ -246,8 +245,7 @@ def alert_row(parent: ctk.CTkFrame, theme: ThemeManager, event: dict) -> None:
         parent,
         fg_color=theme.c("bg_elevated"),
         corner_radius=theme.radius("md"),
-        border_width=1,
-        border_color=theme.c("border_subtle"),
+        border_width=0,
     )
     row.pack(fill="x", pady=4)
     inner = ctk.CTkFrame(row, fg_color="transparent")
