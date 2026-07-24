@@ -294,6 +294,8 @@ class BackupService:
             cmd.extend(["--db", db])
         if request.collection:
             cmd.extend(["--collection", request.collection])
+        if request.gzip_archive:
+            cmd.append("--gzip")
         cmd.extend(["--out", str(dump_dir)])
         try:
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -364,6 +366,7 @@ class BackupService:
             database=db,
             output_dir=remote_stage,
             collection=request.collection,
+            gzip=bool(request.gzip_archive),
         )
         exit_code, stdout, stderr = run_ssh_command(
             ssh_host=ssh["ssh_host"],
@@ -472,6 +475,7 @@ class BackupService:
             database=db,
             output_dir=remote_out,
             collection=request.collection,
+            gzip=bool(request.gzip_archive),
         )
         exit_code, stdout, stderr = run_ssh_command(
             ssh_host=ssh["ssh_host"],

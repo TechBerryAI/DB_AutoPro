@@ -110,7 +110,7 @@ def primary_button(
     text: str,
     command: Callable | None = None,
     width: int | None = None,
-    height: int = 44,
+    height: int = 36,
 ) -> ctk.CTkButton:
     kwargs: dict = {
         "text": text,
@@ -135,7 +135,7 @@ def secondary_button(
     text: str,
     command: Callable | None = None,
     width: int | None = None,
-    height: int = 44,
+    height: int = 36,
 ) -> ctk.CTkButton:
     kwargs: dict = {
         "text": text,
@@ -182,7 +182,7 @@ def destructive_button(
     text: str,
     command: Callable | None = None,
     width: int | None = None,
-    height: int = 44,
+    height: int = 36,
 ) -> ctk.CTkButton:
     kwargs: dict = {
         "text": text,
@@ -206,8 +206,10 @@ def text_input(
     placeholder: str = "",
     height: int = 44,
     show: str | None = None,
+    width: int = 420,
 ) -> ctk.CTkEntry:
     kwargs: dict = {
+        "width": width,
         "height": height,
         "placeholder_text": placeholder,
         "corner_radius": theme.radius("md"),

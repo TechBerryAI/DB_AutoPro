@@ -129,6 +129,7 @@ class BackupRequest(BaseModel):
     remote_output_dir: str | None = None
     backup_folder_name: str | None = None
     collection: str | None = None
+    gzip_archive: bool = False
 
 
 class RestoreRequest(BaseModel):

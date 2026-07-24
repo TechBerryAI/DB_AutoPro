@@ -50,8 +50,15 @@ class ServersView(BaseView):
         self._panel.grid(row=0, column=0, sticky="nsew")
 
         if self._pending_saved_server:
-            self._panel.load_saved_by_name(self._pending_saved_server)
+            loaded = self._panel.load_saved_by_name(self._pending_saved_server)
             self._pending_saved_server = None
+            if not loaded and self.connection:
+                self._panel.load_from_connection(self.connection)
+        elif self.connection and (self.connection.saved_name or self.connection.name):
+            # After connect/reload, keep showing the active connection — not a blank PostgreSQL form.
+            name = self.connection.saved_name or self.connection.name
+            if not self._panel.load_saved_by_name(name):
+                self._panel.load_from_connection(self.connection)
         else:
             self._panel.set_servers_filter(self._servers_filter)
         self._update_session()
