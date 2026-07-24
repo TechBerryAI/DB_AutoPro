@@ -97,42 +97,64 @@ def _multi_line_chart(
 
     keys = [k for k, _, _ in series_specs]
     colors = [theme.c(c) for _, _, c in series_specs]
+    last_series: list[dict] = []
     last_sig: list[tuple | None] = [None]
 
-    def update(series: list[dict]) -> None:
-        sig = tuple(
-            tuple(pt.get(k, 0) for k in keys) + (pt.get("label", ""),)
-            for pt in series
-        )
-        if sig == last_sig[0]:
-            return
-        last_sig[0] = sig
+    def update(series: list[dict] | None = None) -> None:
+        nonlocal last_series
+        if series is not None:
+            sig = tuple(
+                tuple(pt.get(k, 0) for k in keys) + (pt.get("label", ""),)
+                for pt in series
+            )
+            if sig == last_sig[0]:
+                return
+            last_sig[0] = sig
+            last_series = list(series)
         canvas.delete("all")
-        if not series:
-            canvas.create_text(80, height / 2, text="Connect a database", fill=theme.c("text_muted"), font=("Segoe UI", 10))
+        if not last_series:
+            canvas.create_text(
+                120,
+                height / 2,
+                text="Connect a database",
+                fill=theme.c("text_muted"),
+                font=("Segoe UI", 10),
+            )
             return
-        w = max(canvas.winfo_width(), 240)
+        canvas.update_idletasks()
+        w = max(canvas.winfo_width(), 640)
         h = height
-        pad_l, pad_r, pad_t, pad_b = 24, 8, 10, 22
+        pad_l, pad_r, pad_t, pad_b = 28, 12, 12, 24
         chart_w = w - pad_l - pad_r
         chart_h = h - pad_t - pad_b
-        max_y = max(1.0, max(max(d.get(k, 0) for k in keys) for d in series))
-        n = len(series)
+        max_y = max(1.0, max(max(d.get(k, 0) for k in keys) for d in last_series))
+        n = len(last_series)
         label_stride = max(1, n // 6)
         xs = [pad_l + (chart_w * i / max(n - 1, 1)) for i in range(n)]
         for key, color in zip(keys, colors):
             points: list[float] = []
-            for i, pt in enumerate(series):
+            for i, pt in enumerate(last_series):
                 val = float(pt.get(key, 0))
                 y = pad_t + chart_h - (val / max_y) * chart_h
                 points.extend([xs[i], y])
                 canvas.create_oval(xs[i] - 2, y - 2, xs[i] + 2, y + 2, fill=color, outline=color)
             if len(points) >= 4:
                 canvas.create_line(*points, fill=color, width=2, smooth=True)
-        for i, pt in enumerate(series):
+        for i, pt in enumerate(last_series):
             if i % label_stride == 0 or i == n - 1:
-                canvas.create_text(xs[i], h - 6, text=pt.get("label", ""), fill=theme.c("text_muted"), font=("Segoe UI", 7))
+                canvas.create_text(
+                    xs[i],
+                    h - 6,
+                    text=pt.get("label", ""),
+                    fill=theme.c("text_muted"),
+                    font=("Segoe UI", 7),
+                )
 
+    def _on_configure(_event=None) -> None:
+        if last_series:
+            update()
+
+    canvas.bind("<Configure>", _on_configure)
     return update
 
 
