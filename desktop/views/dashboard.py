@@ -476,33 +476,6 @@ class DashboardView(BaseView):
         if replication_spark:
             replication_spark.configure(text=str(metrics.get("replication_lag", "N/A")))
 
-        self._update_slow_query_rows(slow_frame := refs.get("slow_frame"), metrics, metrics_live)
-
-        load_pct = float(metrics.get("load_pct") or 0)
-        load_fn = refs.get("update_load")
-        if load_fn:
-            pct = load_pct if metrics_live else 0.0
-            if self._last_load_pct != pct:
-                self._last_load_pct = pct
-                load_fn(pct)
-
-        max_c = metrics.get("max_connections")
-        if refs.get("load_cpu"):
-            if metrics_live:
-                pool = f"{conn_n} / {max_c or '—'} max ({load_pct:.0f}%)" if max_c else f"{conn_n} active"
-                refs["load_cpu"].configure(text=f"Connection pool: {pool}")
-            else:
-                refs["load_cpu"].configure(text="Connection pool: —")
-        if refs.get("load_mem"):
-            slow_n = metrics.get("slow_num", "—")
-            refs["load_mem"].configure(
-                text=f"Slow queries: {slow_n if metrics_live else '—'}"
-            )
-
-        conn_fn = refs.get("update_conn_donut")
-        if conn_fn:
-            conn_fn(metrics.get("conn_distribution") or {})
-
     def _update_slow_query_rows(
         self,
         slow_frame: ctk.CTkFrame | None,
