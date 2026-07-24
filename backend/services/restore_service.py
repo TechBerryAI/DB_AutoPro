@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import os
 import shlex
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from backend.models.schemas import DatabaseType, OperationResult, OperationStatu
 from backend.services.backup_service import BackupService
 from backend.services.mongo_restore import MongorestorePlan, plan_mongorestore
 from backend.services.mongo_tools import resolve_local_mongo_tool
+from backend.services.pg_tools import is_pg_custom_dump, resolve_local_pg_tool
 
 logger = get_logger("services.restore")
 audit = get_audit_logger()
@@ -176,14 +178,34 @@ class RestoreService:
         progress_callback: Callable[[float, str], None] | None,
     ) -> None:
         conn = resolve_connection(request.profile)
-        env = {"PGPASSWORD": conn.password}
+        env = {**os.environ, "PGPASSWORD": conn.password}
         db = request.database or conn.database
 
         if backup_path.is_dir():
             raise RestoreError("Use pg_restore for directory format backups via CLI")
 
+        if is_pg_custom_dump(backup_path):
+            pg_restore = resolve_local_pg_tool("pg_restore")
+            cmd = [
+                pg_restore,
+                "-h", conn.host,
+                "-p", str(conn.port),
+                "-U", conn.username,
+                "-d", db,
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                str(backup_path),
+            ]
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RestoreError(f"PostgreSQL restore failed: {detail}")
+            return
+
+        psql = resolve_local_pg_tool("psql")
         cmd = [
-            "psql",
+            psql,
             "-h", conn.host,
             "-p", str(conn.port),
             "-U", conn.username,

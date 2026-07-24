@@ -7,8 +7,6 @@ import shutil
 import sys
 from pathlib import Path
 
-_PG_TOOLS = ("pg_dump", "pg_dumpall", "pg_basebackup", "pg_receivewal", "pg_restore", "psql")
-
 
 def resolve_local_pg_tool(tool: str, preferred_path: str | None = None) -> str:
     """
@@ -66,3 +64,15 @@ def resolve_local_pg_tool(tool: str, preferred_path: str | None = None) -> str:
             return str(path)
 
     raise FileNotFoundError(name)
+
+
+def is_pg_custom_dump(path: Path | str) -> bool:
+    """True when the file is a pg_dump custom-format archive (magic PGDMP)."""
+    target = Path(path)
+    if not target.is_file():
+        return False
+    try:
+        with target.open("rb") as handle:
+            return handle.read(5) == b"PGDMP"
+    except OSError:
+        return False

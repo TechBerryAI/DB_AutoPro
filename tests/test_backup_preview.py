@@ -10,7 +10,7 @@ from backend.services.backup_catalog import describe_backup_command
 from backend.services.pg_tools import resolve_local_pg_tool
 
 
-def test_describe_backup_command_shows_remote_host_with_ssh_tunnel_note():
+def test_describe_backup_command_shows_remote_pg_dump_over_ssh():
     conn = ConnectionInfo(
         host="127.0.0.1",
         port=59495,
@@ -19,10 +19,10 @@ def test_describe_backup_command_shows_remote_host_with_ssh_tunnel_note():
         password="secret",
         extra_options={
             "ssh_enabled": True,
+            "ssh_host": "192.168.1.57",
+            "linux_username": "ubuntu",
             "db_host": "192.168.1.57",
             "db_port": 5432,
-            "mongo_host": "192.168.1.57",
-            "mongo_port": 5432,
         },
     )
     request = BackupRequest(
@@ -35,9 +35,11 @@ def test_describe_backup_command_shows_remote_host_with_ssh_tunnel_note():
     with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
         preview = describe_backup_command(request)
 
-    assert "pg_dump -h 192.168.1.57 -p 5432" in preview
-    assert "127.0.0.1:59495" in preview
-    assert "192.168.1.57:5432" in preview
+    assert "ssh ubuntu@192.168.1.57" in preview
+    assert "pg_dump -h 127.0.0.1 -p 5432" in preview
+    assert "--format=custom" in preview
+    assert "Runs on Linux server" in preview
+    assert "SSH tunnel" not in preview
 
 
 def test_describe_backup_command_direct_connection_no_tunnel_note():
@@ -60,6 +62,17 @@ def test_describe_backup_command_direct_connection_no_tunnel_note():
     assert "pg_dump -h 192.168.1.57 -p 5432" in preview
     assert "SSH tunnel" not in preview
 
+
+def test_is_pg_custom_dump_detects_archive(tmp_path):
+    from backend.services.pg_tools import is_pg_custom_dump
+
+    plain = tmp_path / "plain.sql"
+    plain.write_text("SELECT 1;", encoding="utf-8")
+    assert not is_pg_custom_dump(plain)
+
+    custom = tmp_path / "backup.dump"
+    custom.write_bytes(b"PGDMP" + b"\x00" * 20)
+    assert is_pg_custom_dump(custom)
 
 @pytest.mark.skipif(
     not __import__("pathlib").Path(r"C:\Program Files\PostgreSQL").exists(),

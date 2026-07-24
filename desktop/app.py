@@ -9,7 +9,7 @@ import customtkinter as ctk
 from backend.core.config import get_settings
 from desktop.connection import ConnectionResult, apply_connection
 from backend.core.logging import setup_logging
-from desktop.ssh_tunnel import close_ssh_tunnel, open_ssh_tunnel
+from desktop.ssh_tunnel import close_ssh_tunnel, open_ssh_tunnel, resolve_active_connection
 from desktop.employee_store import EmployeeSession
 from desktop.constants import APP_NAME
 from desktop.execution_log import ExecutionLogPanel, ExecutionLogStore
@@ -391,7 +391,7 @@ class DatabaseAutomationApp(ctk.CTk):
             if profile in settings.connections:
                 settings.connections[profile].host = effective.host
                 settings.connections[profile].port = effective.port
-        self.set_connection(connection, navigate_to=navigate_to)
+        self.set_connection(effective, navigate_to=navigate_to)
 
     def set_connection(
         self,
@@ -399,7 +399,7 @@ class DatabaseAutomationApp(ctk.CTk):
         *,
         navigate_to: str | None = None,
     ) -> None:
-        self.connection = connection
+        self.connection = resolve_active_connection(connection)
         # Keep Servers workspace on the profile we just connected (avoid reset to New PostgreSQL).
         saved = connection.saved_name or connection.name
         if saved:
@@ -407,9 +407,10 @@ class DatabaseAutomationApp(ctk.CTk):
             self._servers_filter = "all"
             self._saved_list_expanded = True
             self._refresh_servers_saved_nav()
-        self.append_log(f"Connected: {connection.name} ({connection.host})")
+        endpoint = self.connection.endpoint_label
+        self.append_log(f"Connected: {self.connection.name} ({endpoint})")
         self.update_status_footer(
-            connection_status=f"● Connected · {connection.name}",
+            connection_status=f"● Connected · {self.connection.name}",
         )
         self._reload_views()
         if navigate_to:

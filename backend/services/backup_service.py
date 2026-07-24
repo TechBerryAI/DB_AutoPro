@@ -100,9 +100,6 @@ class BackupService:
             if not handler:
                 raise BackupError(f"Unsupported database type: {request.db_type}")
 
-            if progress_callback:
-                progress_callback(0.3, f"Running {request.method.value}...")
-
             final_path = handler(request, output_path, progress_callback)
 
             physical = backup_method_category(request.method) == BackupCategory.PHYSICAL
@@ -197,6 +194,13 @@ class BackupService:
 
             folder = remote_backup_folder_name(request.backup_folder_name, db_name)
             return base_dir / folder
+
+        if (
+            request.db_type == DatabaseType.POSTGRESQL
+            and request.method == BackupMethod.PG_DUMP
+            and request.backup_mode == BackupMode.FULL
+        ):
+            return base_dir / f"{request.db_type.value}_{db_name}_full_{timestamp}.dump"
 
         if request.backup_mode != BackupMode.FULL:
             if request.db_type == DatabaseType.POSTGRESQL:

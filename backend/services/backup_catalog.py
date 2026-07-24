@@ -13,7 +13,7 @@ from backend.models.schemas import (
 
 
 _METHOD_LABELS: dict[BackupMethod, str] = {
-    BackupMethod.PG_DUMP: "pg_dump (single database SQL export)",
+    BackupMethod.PG_DUMP: "pg_dump (compressed custom format)",
     BackupMethod.PG_DUMPALL: "pg_dumpall (cluster-wide SQL export)",
     BackupMethod.PG_BASEBACKUP: "pg_basebackup (physical cluster copy)",
     BackupMethod.MYSQLDUMP: "mysqldump (logical SQL export)",
@@ -95,10 +95,6 @@ def _mongo_collection_arg(request: BackupRequest) -> str:
     return ""
 
 
-def _mongo_gzip_arg(request: BackupRequest) -> str:
-    return " --gzip" if request.gzip_archive else ""
-
-
 def _mongo_target_database(request: BackupRequest) -> str | None:
     """Explicit database from backup form only; None means dump all databases."""
     if request.database and request.database.strip():
@@ -165,12 +161,38 @@ def describe_backup_command(request: BackupRequest) -> str:
                 f"# Requires wal_level=replica|logical; run Full backup first to establish chain"
                 f"{tunnel}"
             )
+        if ssh_enabled and request.method in (BackupMethod.PG_DUMP, BackupMethod.PG_DUMPALL):
+            from backend.services.ssh_client import pg_endpoint_from_connection
+
+            opts = conn.extra_options or {}
+            ssh_user = opts.get("linux_username", "linux_user")
+            ssh_host = opts.get("ssh_host") or host
+            pg_host, pg_port = pg_endpoint_from_connection(conn)
+            local_hint = _local_output_hint(
+                request,
+                "<output.dump>" if request.method == BackupMethod.PG_DUMP else "<output.sql>",
+            )
+            if request.method == BackupMethod.PG_DUMPALL:
+                remote_cmd = (
+                    f"pg_dumpall -h {pg_host} -p {pg_port} -U {user} "
+                    f"-f /tmp/<output.sql>"
+                )
+            else:
+                db = request.database or conn.database
+                remote_cmd = (
+                    f"pg_dump -h {pg_host} -p {pg_port} -U {user} -d {db} "
+                    f"-f /tmp/<output.dump> --format=custom --compress=1"
+                )
+            return (
+                f"ssh {ssh_user}@{ssh_host} → {remote_cmd}\n"
+                f"# Runs on Linux server (local to PostgreSQL); downloaded to {local_hint}"
+            )
         if request.method == BackupMethod.PG_DUMPALL:
             return f"pg_dumpall -h {host} -p {port} -U {user} -f <output.sql>{tunnel}"
         db = request.database or conn.database
         return (
             f"pg_dump -h {host} -p {port} -U {user} -d {db} "
-            f"-f <output.sql> --format=plain{tunnel}"
+            f"-f <output.dump> --format=custom --compress=1{tunnel}"
         )
 
     if request.db_type == DatabaseType.MYSQL:
@@ -193,7 +215,6 @@ def describe_backup_command(request: BackupRequest) -> str:
         mongo_port = opts.get("mongo_port", port)
         folder_name = _mongo_folder_preview(request)
         coll = _mongo_collection_arg(request)
-        gzip = _mongo_gzip_arg(request)
         db_arg = _mongo_db_arg(request)
         auth = (
             f"--username {user} --password **** "
@@ -213,7 +234,7 @@ def describe_backup_command(request: BackupRequest) -> str:
                 return (
                     f"ssh {ssh_user}@{ssh_host} → "
                     f"{mongodump} --host {mongo_host} --port {mongo_port} "
-                    f"{auth}{db_arg}{coll}{gzip} "
+                    f"{auth}{db_arg}{coll} "
                     f"--out {out_dir}/{folder_name}\n"
                     f"Local output dir (this PC): {local_dir}"
                 )
@@ -222,12 +243,12 @@ def describe_backup_command(request: BackupRequest) -> str:
                 f"ssh {ssh_user}@{ssh_host} → run mongodump on Linux server, "
                 f"then download to this PC:\n"
                 f"{mongodump} --host {mongo_host} --port {mongo_port} "
-                f"{auth}{db_arg}{coll}{gzip} "
+                f"{auth}{db_arg}{coll} "
                 f"--out {local_dir}/{folder_name}"
             )
         return (
             f"mongodump --host {host} --port {port} "
-            f"{auth}{db_arg}{coll}{gzip} "
+            f"{auth}{db_arg}{coll} "
             f"--out {_local_output_hint(request, folder_name)}"
         )
 
