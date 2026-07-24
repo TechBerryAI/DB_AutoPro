@@ -1051,23 +1051,36 @@ class DashboardView(BaseView):
         if not self._health_panel:
             return
         metrics = db_metrics if db_metrics is not None else self._last_db_metrics
-        saved_count = len(load_saved_servers(self.owner_username))
-        connected = bool(self.connection and metrics.get("connected"))
+        saved = load_saved_servers(self.owner_username)
+        if not saved and self.owner_username:
+            saved = load_saved_servers()
+        saved_count = len(saved)
 
-        if connected:
-            servers = f"{saved_count} Saved · 1 Connected" if saved_count else "1 Connected"
+        # App session is the source of truth for "are we connected?"
+        # Probe metrics refine health quality; they should not flip the row to
+        # "Not Connected" while the footer still shows Connected · mongodb.
+        session_active = bool(self.connection)
+        probe_ok = bool(metrics.get("connected")) if metrics else False
+
+        if session_active:
+            servers = f"{saved_count} Saved · 1 Active" if saved_count else "1 Active"
         elif saved_count:
             servers = f"{saved_count} Saved"
         else:
             servers = "None Saved"
 
-        if connected:
+        if session_active:
             try:
-                db_count = len(fetch_server_databases(self.connection))
+                db_count = len(self._cached_server_databases())
             except Exception:
                 db_count = 0
-            suffix = f" ({db_count} DB{'s' if db_count != 1 else ''})" if db_count else ""
-            databases = f"Connected{suffix}"
+            name = self.connection.saved_name or self.connection.name
+            engine = self.connection.db_type.value.upper()
+            suffix = f" · {db_count} DB{'s' if db_count != 1 else ''}" if db_count else ""
+            if probe_ok:
+                databases = f"Connected · {engine} {name}{suffix}"
+            else:
+                databases = f"Connected · {engine} {name} (checking…)"
         else:
             databases = "Not Connected"
 
@@ -1082,7 +1095,7 @@ class DashboardView(BaseView):
         else:
             backup = "No Backups Today"
 
-        if not connected:
+        if not session_active:
             replication = "N/A"
         else:
             replication = str(metrics.get("replication_lag") or "N/A")
@@ -1343,6 +1356,37 @@ class DashboardView(BaseView):
         self._apply_health_dashboard(metrics)
         self._apply_command_center_panels(metrics)
         self._refresh_key_metrics()
+        self._update_status_footer_from_metrics(metrics)
+
+    def _update_status_footer_from_metrics(self, metrics: dict) -> None:
+        """Keep the shell footer in sync with the same poll as the dashboard."""
+        updater = None
+        widget = self.winfo_toplevel()
+        if callable(getattr(widget, "update_status_footer", None)):
+            updater = widget.update_status_footer
+        if not callable(updater):
+            return
+        if self.connection:
+            name = self.connection.saved_name or self.connection.name
+            conn_status = f"● Connected · {name}"
+        else:
+            conn_status = "● Disconnected"
+
+        version = str(metrics.get("version") or "").strip() or "—"
+        uptime = str(metrics.get("uptime") or "—")
+        if metrics.get("connected"):
+            sessions = str(int(metrics.get("connections_num") or 0))
+        else:
+            sessions = "—"
+        last_refresh = datetime.now().strftime("%H:%M:%S")
+
+        updater(
+            connection_status=conn_status,
+            version=version,
+            uptime=uptime,
+            sessions=sessions,
+            last_refresh=last_refresh,
+        )
 
     def _schedule_system_poll(self) -> None:
         if not self._timers_active or not self.winfo_exists():
