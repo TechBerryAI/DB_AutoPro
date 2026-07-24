@@ -98,8 +98,9 @@ def _server_belongs_to_user(server: SavedServer, owner_username: str) -> bool:
     owner = (server.owner_username or "").strip().lower()
     user = owner_username.strip().lower()
     if not owner:
-        # Legacy entries without an owner are visible to admin only.
-        return user == "admin"
+        # Legacy / shared profiles without an owner are visible to every signed-in user
+        # (Servers sidebar already lists them unfiltered).
+        return bool(user)
     return owner == user
 
 

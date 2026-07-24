@@ -13,7 +13,7 @@ from desktop.ssh_tunnel import close_ssh_tunnel, open_ssh_tunnel
 from desktop.employee_store import EmployeeSession
 from desktop.constants import APP_NAME
 from desktop.execution_log import ExecutionLogPanel, ExecutionLogStore
-from desktop.nav_icons import NAV_ICONS
+from desktop.lucide_icons import lucide_ctk_image
 from desktop.status_footer import StatusFooterBar
 from desktop.theme import ThemeManager
 from desktop.views.backup_view import BackupView
@@ -46,11 +46,6 @@ SERVERS_ENGINE_SUBNAV: list[tuple[str, str]] = [
     (db_type.value, label) for db_type, label in SERVER_SUBCATEGORIES
 ]
 
-# Disconnect always uses strong red (same in light and dark mode).
-DISCONNECT_BTN_FG = "#7f1d1d"
-DISCONNECT_BTN_HOVER = "#ef4444"
-DISCONNECT_BTN_TEXT = "#fecaca"
-
 
 class DatabaseAutomationApp(ctk.CTk):
     """Database Automation Pro desktop application."""
@@ -78,6 +73,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._brand_subtitle: ctk.CTkLabel | None = None
         self._nav_header: ctk.CTkLabel | None = None
         self._theme_btn: ctk.CTkButton | None = None
+        self._sign_out_btn: ctk.CTkButton | None = None
         self._employee_name_label: ctk.CTkLabel | None = None
         self._employee_role_label: ctk.CTkLabel | None = None
         self._brand_card: ctk.CTkFrame | None = None
@@ -131,7 +127,7 @@ class DatabaseAutomationApp(ctk.CTk):
 
         # Row 0: brand card
         brand_outer = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        brand_outer.grid(row=0, column=0, sticky="ew", padx=14, pady=(16, 10))
+        brand_outer.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
 
         brand_card = ctk.CTkFrame(
             brand_outer,
@@ -140,16 +136,16 @@ class DatabaseAutomationApp(ctk.CTk):
             border_width=1,
             border_color=self._t.sc("border"),
         )
-        brand_card.pack(fill="x", padx=2, pady=2)
+        brand_card.pack(fill="x")
         self._brand_card = brand_card
 
         brand_inner = ctk.CTkFrame(brand_card, fg_color="transparent")
-        brand_inner.pack(fill="x", padx=14, pady=12)
+        brand_inner.pack(fill="x", padx=12, pady=10)
 
         self._brand_title = ctk.CTkLabel(
             brand_inner,
             text="DB Automation Pro",
-            font=ctk.CTkFont(size=15, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
             text_color=self._t.sc("text_primary"),
             anchor="w",
         )
@@ -158,7 +154,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._brand_subtitle = ctk.CTkLabel(
             brand_inner,
             text="Enterprise DBA Platform",
-            font=ctk.CTkFont(size=11),
+            font=ctk.CTkFont(family="Segoe UI", size=10),
             text_color=self._t.sc("text_muted"),
             anchor="w",
         )
@@ -166,7 +162,7 @@ class DatabaseAutomationApp(ctk.CTk):
 
         # Row 1: employee profile
         profile_outer = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        profile_outer.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
+        profile_outer.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
 
         profile_card = ctk.CTkFrame(
             profile_outer,
@@ -179,14 +175,14 @@ class DatabaseAutomationApp(ctk.CTk):
         self._profile_card = profile_card
 
         profile_row = ctk.CTkFrame(profile_card, fg_color="transparent")
-        profile_row.pack(fill="x", padx=12, pady=12)
+        profile_row.pack(fill="x", padx=10, pady=8)
 
         initials = self._employee_initials()
         avatar = ctk.CTkFrame(
             profile_row,
-            width=40,
-            height=40,
-            corner_radius=20,
+            width=30,
+            height=30,
+            corner_radius=15,
             fg_color=self._t.c("primary"),
         )
         avatar.pack(side="left")
@@ -194,7 +190,7 @@ class DatabaseAutomationApp(ctk.CTk):
         ctk.CTkLabel(
             avatar,
             text=initials,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
             text_color=self._t.c("text_on_primary"),
         ).place(relx=0.5, rely=0.5, anchor="center")
 
@@ -206,7 +202,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._employee_name_label = ctk.CTkLabel(
             info,
             text=emp_name,
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             text_color=self._t.sc("text_primary"),
             anchor="w",
         )
@@ -214,7 +210,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._employee_role_label = ctk.CTkLabel(
             info,
             text=emp_role,
-            font=ctk.CTkFont(size=11),
+            font=ctk.CTkFont(family="Segoe UI", size=10),
             text_color=self._t.sc("text_muted"),
             anchor="w",
         )
@@ -227,33 +223,33 @@ class DatabaseAutomationApp(ctk.CTk):
         self._nav_header = ctk.CTkLabel(
             nav_scroll,
             text="NAVIGATION",
-            font=ctk.CTkFont(size=10, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
             text_color=self._t.sc("text_muted"),
             anchor="w",
         )
         self._nav_header.pack(anchor="w", padx=10, pady=(0, 6))
 
+        idle_icon = self._t.sc("text_secondary") if self._t.is_light else self._t.c("nav_idle_text")
         for key, label, _ in NAV_ITEMS:
-            icon = NAV_ICONS.get(key, "•")
-            if key == "servers":
-                btn_text = f"  {icon}   {label}"
-                btn_command = self._toggle_servers_nav
-            else:
-                btn_text = f"  {icon}   {label}"
-                btn_command = (lambda k=key: self.navigate(k))
+            btn_command = self._toggle_servers_nav if key == "servers" else (lambda k=key: self.navigate(k))
+            icon_img = lucide_ctk_image(key, idle_icon, size=16)
             btn = ctk.CTkButton(
                 nav_scroll,
-                text=btn_text,
+                text=f"  {label}",
+                image=icon_img,
+                compound="left",
                 anchor="w",
-                height=34,
+                height=40,
                 corner_radius=8,
                 fg_color="transparent",
-                text_color=self._t.sc("text_secondary") if self._t.is_light else self._t.c("nav_idle_text"),
+                text_color=idle_icon,
                 hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
-                font=ctk.CTkFont(size=13),
+                font=ctk.CTkFont(family="Segoe UI", size=13),
                 command=btn_command,
             )
-            btn.pack(fill="x", pady=2, padx=4)
+            btn._lucide_key = key  # type: ignore[attr-defined]
+            btn._lucide_image = icon_img  # type: ignore[attr-defined]
+            btn.pack(fill="x", pady=1, padx=4)
             self.nav_buttons[key] = btn
 
             if key == "servers":
@@ -270,7 +266,7 @@ class DatabaseAutomationApp(ctk.CTk):
                     fg_color="transparent",
                     text_color=self._t.sc("text_muted") if self._t.is_light else self._t.c("text_muted"),
                     hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
-                    font=ctk.CTkFont(size=12),
+                    font=ctk.CTkFont(family="Segoe UI", size=12),
                     command=self._toggle_saved_connections_nav,
                 )
                 all_btn.pack(fill="x", pady=1, padx=8)
@@ -289,7 +285,7 @@ class DatabaseAutomationApp(ctk.CTk):
                         fg_color="transparent",
                         text_color=self._t.sc("text_muted") if self._t.is_light else self._t.c("text_muted"),
                         hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
-                        font=ctk.CTkFont(size=12),
+                        font=ctk.CTkFont(family="Segoe UI", size=12),
                         command=lambda sk=sub_key: self._navigate_servers(sk),
                     )
                     sub_btn.pack(fill="x", pady=1, padx=8)
@@ -299,34 +295,35 @@ class DatabaseAutomationApp(ctk.CTk):
 
         # Row 3: theme toggle
         footer = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        footer.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 14))
+        footer.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
 
         self._theme_btn = ctk.CTkButton(
             footer,
             text=f"{self._theme_button_label()}  Theme",
-            height=34,
+            height=36,
             corner_radius=8,
             fg_color=self._t.sc("bg_card"),
             hover_color=self._t.sc("bg_hover"),
             border_width=1,
             border_color=self._t.sc("border"),
             text_color=self._t.sc("text_primary"),
-            font=ctk.CTkFont(size=13),
+            font=ctk.CTkFont(family="Segoe UI", size=13),
             command=self._toggle_theme,
         )
         self._theme_btn.pack(fill="x", pady=(0, 8))
 
-        ctk.CTkButton(
+        self._sign_out_btn = ctk.CTkButton(
             footer,
             text="Sign Out",
-            height=34,
+            height=36,
             corner_radius=8,
-            fg_color=DISCONNECT_BTN_FG,
-            hover_color=DISCONNECT_BTN_HOVER,
-            text_color=DISCONNECT_BTN_TEXT,
-            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=self._t.c("destructive_bg"),
+            hover_color=self._t.c("destructive_hover"),
+            text_color=self._t.c("destructive_text"),
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             command=self._sign_out,
-        ).pack(fill="x")
+        )
+        self._sign_out_btn.pack(fill="x")
 
         self.content = ctk.CTkFrame(self, corner_radius=0, fg_color=self._t.c("bg_content"))
         self.content.grid(row=0, column=1, sticky="nsew")
@@ -403,6 +400,13 @@ class DatabaseAutomationApp(ctk.CTk):
         navigate_to: str | None = None,
     ) -> None:
         self.connection = connection
+        # Keep Servers workspace on the profile we just connected (avoid reset to New PostgreSQL).
+        saved = connection.saved_name or connection.name
+        if saved:
+            self._active_saved_connection = saved
+            self._servers_filter = "all"
+            self._saved_list_expanded = True
+            self._refresh_servers_saved_nav()
         self.append_log(f"Connected: {connection.name} ({connection.host})")
         self.update_status_footer(
             connection_status=f"● Connected · {connection.name}",
@@ -461,8 +465,19 @@ class DatabaseAutomationApp(ctk.CTk):
         btn = self.nav_buttons.get("servers")
         if btn is None:
             return
-        icon = NAV_ICONS.get("servers", "•")
-        btn.configure(text=f"  {icon}   Servers")
+        btn.configure(text="  Servers")
+
+    def _nav_icon_color(self, *, active: bool) -> str:
+        t = self._t
+        if active:
+            return t.c("nav_active_text")
+        return t.sc("text_secondary") if t.is_light else t.c("nav_idle_text")
+
+    def _apply_nav_icon(self, key: str, btn: ctk.CTkButton, *, active: bool) -> None:
+        color = self._nav_icon_color(active=active)
+        img = lucide_ctk_image(key, color, size=16)
+        btn.configure(image=img)
+        btn._lucide_image = img  # type: ignore[attr-defined]
 
     def _toggle_saved_connections_nav(self) -> None:
         """Expand/collapse the Saved Connection list under Servers."""
@@ -635,12 +650,12 @@ class DatabaseAutomationApp(ctk.CTk):
     def _style_navigation(self, key: str) -> None:
         t = self._t
         for k, btn in self.nav_buttons.items():
-            if k == key:
+            active = k == key
+            if active:
                 btn.configure(
-                    fg_color=t.sc("nav_active") if t.is_light else t.c("primary_muted"),
+                    fg_color=t.sc("nav_active"),
                     text_color=t.c("nav_active_text"),
-                    border_width=1,
-                    border_color=t.c("primary"),
+                    border_width=0,
                 )
             else:
                 btn.configure(
@@ -648,6 +663,7 @@ class DatabaseAutomationApp(ctk.CTk):
                     text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
                     border_width=0,
                 )
+            self._apply_nav_icon(k, btn, active=active)
         self._style_servers_subnav()
 
     def navigate(self, key: str, *, log: bool = True, view_extra: dict | None = None) -> None:
@@ -686,6 +702,13 @@ class DatabaseAutomationApp(ctk.CTk):
                         kwargs["disconnect_callback"] = self.clear_connection
                         kwargs["saved_servers_changed_callback"] = self._on_saved_connection_changed
                         kwargs.setdefault("servers_filter", self._servers_filter)
+                        # Restore the active/connected profile after view rebuild (e.g. post-connect).
+                        if "saved_server" not in kwargs:
+                            restore = self._active_saved_connection
+                            if not restore and self.connection:
+                                restore = self.connection.saved_name or self.connection.name
+                            if restore:
+                                kwargs["saved_server"] = restore
                     if view_cls is LogsView:
                         kwargs["log_store"] = self.log_store
                         kwargs["register_log_panel"] = self._register_log_panel
@@ -774,6 +797,12 @@ class DatabaseAutomationApp(ctk.CTk):
                 hover_color=t.sc("bg_hover"),
                 border_color=t.sc("border"),
                 text_color=t.sc("text_primary"),
+            )
+        if self._sign_out_btn:
+            self._sign_out_btn.configure(
+                fg_color=t.c("destructive_bg"),
+                hover_color=t.c("destructive_hover"),
+                text_color=t.c("destructive_text"),
             )
         if self._employee_name_label:
             self._employee_name_label.configure(text_color=t.sc("text_primary"))

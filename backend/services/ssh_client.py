@@ -188,6 +188,7 @@ def build_mongodump_remote_command(
     output_dir: str,
     database: str | None = None,
     collection: str | None = None,
+    gzip: bool = False,
 ) -> str:
     """Build a shell-safe mongodump command for execution on the Linux server."""
     cmd = (
@@ -205,6 +206,8 @@ def build_mongodump_remote_command(
         cmd += f"--db {shlex.quote(database)} "
     if collection:
         cmd += f"--collection {shlex.quote(collection)} "
+    if gzip:
+        cmd += "--gzip "
     cmd += f"--out {shlex.quote(output_dir)}"
     return cmd
 

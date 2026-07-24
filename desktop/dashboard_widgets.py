@@ -15,37 +15,28 @@ def section_block(
     *,
     subtitle: str = "",
 ) -> ctk.CTkFrame:
-    """Titled dashboard section with inner content area."""
+    """Titled dashboard section — typography hierarchy only."""
     wrap = ctk.CTkFrame(parent, fg_color="transparent")
-    wrap.pack(fill="x", pady=(0, 24))
+    wrap.pack(fill="x", pady=(0, 14))
 
     header = ctk.CTkFrame(wrap, fg_color="transparent")
-    header.pack(fill="x", pady=(0, 14))
+    header.pack(fill="x", pady=(0, 10))
 
-    accent_col = ctk.CTkFrame(header, width=4, fg_color="transparent")
-    accent_col.pack(side="left", fill="y", padx=(0, 14))
-    ctk.CTkFrame(accent_col, width=4, height=28, corner_radius=3, fg_color=theme.c("primary")).pack(anchor="n")
-    ctk.CTkFrame(accent_col, width=4, height=10, corner_radius=3, fg_color=theme.c("accent")).pack(anchor="n", pady=(4, 0))
-
-    col = ctk.CTkFrame(header, fg_color="transparent")
-    col.pack(side="left", fill="x", expand=True)
     ctk.CTkLabel(
-        col,
+        header,
         text=title,
-        font=font(theme, 20, weight="bold"),
+        font=font(theme, 17, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     ).pack(anchor="w")
     if subtitle:
         ctk.CTkLabel(
-            col,
+            header,
             text=subtitle,
             font=font(theme, 12),
             text_color=theme.c("text_muted"),
             anchor="w",
-        ).pack(anchor="w", pady=(4, 0))
-
-    ctk.CTkFrame(wrap, height=1, fg_color=theme.c("border_subtle")).pack(fill="x", pady=(0, 16))
+        ).pack(anchor="w", pady=(2, 0))
 
     body = ctk.CTkFrame(wrap, fg_color="transparent")
     body.pack(fill="x")
