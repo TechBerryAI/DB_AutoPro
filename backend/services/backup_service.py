@@ -104,11 +104,47 @@ class BackupService:
 
             physical = backup_method_category(request.method) == BackupCategory.PHYSICAL
             remote = bool(request.use_remote_exec)
+
+            # Plain SQL dumps expand far beyond on-disk DB size (text encoding).
+            # Always gzip them so the saved file stays closer to the database size.
+            if (
+                not physical
+                and final_path.is_file()
+                and request.db_type == DatabaseType.POSTGRESQL
+                and request.method in (BackupMethod.PG_DUMP, BackupMethod.PG_DUMPALL)
+            ):
+                from backend.services.backup_catalog import resolve_pg_dump_format
+                from backend.models.schemas import PgDumpFormat
+
+                fmt = resolve_pg_dump_format(request)
+                if (
+                    request.method == BackupMethod.PG_DUMPALL
+                    or fmt == PgDumpFormat.PLAIN
+                ) and not final_path.name.endswith(".gz"):
+                    if progress_callback:
+                        progress_callback(0.88, "Compressing Plain SQL with gzip (reduces size)...")
+                    final_path = self._compress(final_path)
+
+            if (
+                not physical
+                and final_path.is_file()
+                and request.db_type == DatabaseType.MYSQL
+                and request.method == BackupMethod.MYSQLDUMP
+            ):
+                from backend.services.backup_catalog import mysql_wants_gzip
+
+                if mysql_wants_gzip(request) and not final_path.name.endswith(".gz"):
+                    if progress_callback:
+                        progress_callback(0.88, "Compressing MySQL dump with gzip (.sql.gz)...")
+                    final_path = self._compress(final_path)
+
             if (
                 request.compress
                 and self.settings.backup.compression
                 and not physical
                 and not remote
+                and final_path.is_file()
+                and not final_path.name.endswith(".gz")
             ):
                 if progress_callback:
                     progress_callback(0.8, "Compressing backup...")
@@ -186,6 +222,8 @@ class BackupService:
 
         if request.method == BackupMethod.PG_BASEBACKUP:
             return base_dir / f"{request.db_type.value}_physical_{mode_tag}_{timestamp}"
+        if request.method == BackupMethod.MYSQL_PHYSICAL:
+            return base_dir / f"{request.db_type.value}_{db_name}_physical_{mode_tag}_{timestamp}.tar.gz"
         if request.method == BackupMethod.MSSQL_BACKUP:
             ext = ".trn" if request.backup_mode == BackupMode.INCREMENTAL else ".bak"
             return base_dir / f"{request.db_type.value}_{db_name}_{mode_tag}_{timestamp}{ext}"
@@ -200,7 +238,21 @@ class BackupService:
             and request.method == BackupMethod.PG_DUMP
             and request.backup_mode == BackupMode.FULL
         ):
-            return base_dir / f"{request.db_type.value}_{db_name}_full_{timestamp}.dump"
+            from backend.services.backup_catalog import resolve_pg_dump_format, resolve_pg_file_extension
+            from backend.models.schemas import PgDumpFormat
+
+            if resolve_pg_dump_format(request) == PgDumpFormat.DIRECTORY:
+                return base_dir / f"{request.db_type.value}_{db_name}_full_{timestamp}"
+            ext = resolve_pg_file_extension(request)
+            return base_dir / f"{request.db_type.value}_{db_name}_full_{timestamp}.{ext}"
+
+        if (
+            request.db_type == DatabaseType.MYSQL
+            and request.method == BackupMethod.MYSQLDUMP
+            and request.backup_mode == BackupMode.FULL
+        ):
+            # Always stage as .sql; BackupService gzips when Compressed SQL is selected.
+            return base_dir / f"{request.db_type.value}_{db_name}_full_{timestamp}.sql"
 
         if request.backup_mode != BackupMode.FULL:
             if request.db_type == DatabaseType.POSTGRESQL:
@@ -648,8 +700,11 @@ class BackupService:
         if not scan_dir.exists():
             return []
 
+        skip_names = {".db_autopro_chain", "__pycache__", ".git"}
         local: list[dict] = []
         for item in sorted(scan_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if item.name in skip_names or item.name.startswith("."):
+                continue
             stat = item.stat()
             local.append({
                 "name": item.name,

@@ -7,7 +7,7 @@ import shutil
 import socket
 import stat
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def resolve_ssh_host(ssh_host: str | None, fallback_host: str) -> str:
@@ -41,8 +41,15 @@ def run_ssh_command(
     password: str,
     command: str,
     timeout: int = 600,
+    on_progress: Callable[[int], None] | None = None,
 ) -> tuple[int, str, str]:
-    """Run a command on a remote Linux host over SSH."""
+    """Run a command on a remote Linux host over SSH.
+
+    on_progress receives elapsed seconds while the remote command is still running.
+    """
+    import select
+    import time
+
     try:
         import paramiko
     except ImportError as exc:
@@ -60,14 +67,74 @@ def run_ssh_command(
             allow_agent=False,
             look_for_keys=False,
             timeout=15,
+            banner_timeout=30,
+            auth_timeout=30,
         )
         _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        return exit_code, stdout.read().decode("utf-8", errors="replace"), stderr.read().decode(
-            "utf-8", errors="replace"
-        )
+        channel = stdout.channel
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        started = time.monotonic()
+        deadline = started + max(1, timeout)
+        last_progress_at = 0.0
+
+        # Drain both streams while waiting so full buffers cannot deadlock
+        # recv_exit_status() (common Paramiko hang with long commands).
+        while True:
+            now = time.monotonic()
+            if now > deadline:
+                try:
+                    channel.close()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"SSH command timed out after {timeout}s. "
+                    "The remote command may still be running on the server."
+                )
+
+            if channel.recv_ready():
+                chunk = channel.recv(65536)
+                if chunk:
+                    stdout_chunks.append(chunk)
+            if channel.recv_stderr_ready():
+                chunk = channel.recv_stderr(65536)
+                if chunk:
+                    stderr_chunks.append(chunk)
+
+            if on_progress and (now - last_progress_at) >= 1.5:
+                on_progress(int(now - started))
+                last_progress_at = now
+
+            if channel.exit_status_ready():
+                while channel.recv_ready():
+                    chunk = channel.recv(65536)
+                    if not chunk:
+                        break
+                    stdout_chunks.append(chunk)
+                while channel.recv_stderr_ready():
+                    chunk = channel.recv_stderr(65536)
+                    if not chunk:
+                        break
+                    stderr_chunks.append(chunk)
+                break
+
+            transport = channel.get_transport()
+            if transport is not None:
+                try:
+                    select.select([channel], [], [], 0.5)
+                except (OSError, ValueError, TypeError):
+                    time.sleep(0.25)
+            else:
+                time.sleep(0.25)
+
+        exit_code = channel.recv_exit_status()
+        out_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+        err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        return exit_code, out_text, err_text
     except paramiko.AuthenticationException as exc:
         raise RuntimeError(f"SSH authentication failed for Linux user '{username}'.") from exc
+    except RuntimeError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"SSH connection failed: {exc}") from exc
     finally:
@@ -464,27 +531,231 @@ def download_remote_directory(ssh: dict[str, Any], remote_path: str, local_path:
         client.close()
 
 
-def download_remote_file(ssh: dict[str, Any], remote_path: str, local_path: Path) -> None:
-    """Download a single remote file to the local PC via SFTP."""
+def download_remote_file(
+    ssh: dict[str, Any],
+    remote_path: str,
+    local_path: Path,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> None:
+    """Download a single remote file to the local PC via SFTP.
+
+    on_progress(transferred_bytes, total_bytes) is invoked periodically.
+    Uses SFTP prefetch + large reads for multi-GB dumps.
+    """
+    import time
+
     client = _open_ssh_client(ssh)
     try:
+        transport = client.get_transport()
+        if transport is not None:
+            # Enlarge the SSH window so large SFTP transfers stay pipelined.
+            try:
+                transport.default_window_size = 64 * 1024 * 1024
+                transport.packetizer.REKEY_BYTES = pow(2, 40)
+                transport.packetizer.REKEY_PACKETS = pow(2, 40)
+            except Exception:
+                pass
+
         sftp = client.open_sftp()
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        sftp.get(remote_path, str(local_path))
+        try:
+            total = int(sftp.stat(remote_path).st_size)
+        except OSError:
+            total = 0
+
+        transferred = 0
+        last_report = 0.0
+        chunk_size = 1024 * 1024  # 1 MiB
+
+        with sftp.open(remote_path, "rb") as remote_file:
+            try:
+                # Prefetch dramatically speeds multi-GB downloads over Paramiko.
+                if total > 0 and hasattr(remote_file, "prefetch"):
+                    remote_file.prefetch(total)
+            except Exception:
+                pass
+            with open(local_path, "wb") as local_file:
+                while True:
+                    data = remote_file.read(chunk_size)
+                    if not data:
+                        break
+                    local_file.write(data)
+                    transferred += len(data)
+                    now = time.monotonic()
+                    if on_progress and (now - last_report) >= 0.75:
+                        on_progress(transferred, total or transferred)
+                        last_report = now
+
+        if on_progress:
+            on_progress(transferred, total or transferred)
+    finally:
+        client.close()
+
+
+def stream_ssh_stdout_to_file(
+    ssh: dict[str, Any],
+    command: str,
+    local_path: Path,
+    *,
+    timeout: int = 7200,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> tuple[int, str]:
+    """Run a remote command and stream its stdout to a local file.
+
+    Faster than dump-to-/tmp then SFTP for large pg_dump archives: one transfer.
+    on_progress(bytes_written, elapsed_seconds, latest_stderr_tail).
+    Returns (exit_code, stderr_text).
+    """
+    import select
+    import time
+
+    try:
+        import paramiko
+    except ImportError as exc:
+        raise RuntimeError("paramiko is not installed. Run: pip install paramiko") from exc
+
+    kwargs = _ssh_kwargs(ssh)
+    resolved_host = resolve_ssh_host(kwargs["ssh_host"], kwargs["fallback_host"])
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    stderr_chunks: list[bytes] = []
+    written = 0
+    started = time.monotonic()
+    deadline = started + max(1, timeout)
+    last_progress_at = 0.0
+
+    try:
+        client.connect(
+            hostname=resolved_host,
+            port=kwargs["ssh_port"],
+            username=kwargs["username"],
+            password=kwargs["password"] or None,
+            allow_agent=False,
+            look_for_keys=False,
+            timeout=15,
+            banner_timeout=30,
+            auth_timeout=30,
+        )
+        transport = client.get_transport()
+        if transport is not None:
+            try:
+                transport.default_window_size = 64 * 1024 * 1024
+                transport.packetizer.REKEY_BYTES = pow(2, 40)
+                transport.packetizer.REKEY_PACKETS = pow(2, 40)
+            except Exception:
+                pass
+
+        _stdin, stdout, stderr = client.exec_command(command, timeout=timeout, bufsize=0)
+        channel = stdout.channel
+        # Request a large receive window for high-throughput streaming.
+        try:
+            channel.set_combine_stderr(False)
+        except Exception:
+            pass
+
+        with open(local_path, "wb") as local_file:
+            while True:
+                now = time.monotonic()
+                if now > deadline:
+                    try:
+                        channel.close()
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"SSH stream timed out after {timeout}s while receiving the backup."
+                    )
+
+                if channel.recv_ready():
+                    chunk = channel.recv(1024 * 1024)
+                    if chunk:
+                        local_file.write(chunk)
+                        written += len(chunk)
+
+                if channel.recv_stderr_ready():
+                    err_chunk = channel.recv_stderr(65536)
+                    if err_chunk:
+                        stderr_chunks.append(err_chunk)
+                        # Cap retained stderr so -v dumps do not exhaust memory.
+                        if sum(len(c) for c in stderr_chunks) > 2 * 1024 * 1024:
+                            stderr_chunks[:] = stderr_chunks[-8:]
+
+                if on_progress and (now - last_progress_at) >= 1.0:
+                    tail = b"".join(stderr_chunks[-2:]).decode("utf-8", errors="replace")
+                    on_progress(written, int(now - started), tail[-240:])
+                    last_progress_at = now
+
+                if channel.exit_status_ready():
+                    while channel.recv_ready():
+                        chunk = channel.recv(1024 * 1024)
+                        if not chunk:
+                            break
+                        local_file.write(chunk)
+                        written += len(chunk)
+                    while channel.recv_stderr_ready():
+                        err_chunk = channel.recv_stderr(65536)
+                        if err_chunk:
+                            stderr_chunks.append(err_chunk)
+                    break
+
+                if transport is not None:
+                    try:
+                        select.select([channel], [], [], 0.25)
+                    except (OSError, ValueError, TypeError):
+                        time.sleep(0.1)
+                else:
+                    time.sleep(0.1)
+
+                # Avoid stalling forever with no data when remote is still working.
+                if not channel.recv_ready() and not channel.recv_stderr_ready():
+                    time.sleep(0.05)
+
+        exit_code = channel.recv_exit_status()
+        err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        if on_progress:
+            on_progress(written, int(time.monotonic() - started), err_text[-240:])
+        return exit_code, err_text
+    except paramiko.AuthenticationException as exc:
+        raise RuntimeError(
+            f"SSH authentication failed for Linux user '{kwargs['username']}'."
+        ) from exc
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"SSH stream failed: {exc}") from exc
     finally:
         client.close()
 
 
 def remote_file_size(ssh: dict[str, Any], remote_path: str) -> int:
-    """Return remote file size in bytes, or 0 when missing."""
-    cmd = f"stat -c%s {shlex.quote(remote_path)} 2>/dev/null || echo 0"
+    """Return remote file or directory size in bytes, or 0 when missing.
+
+    Only measures the exact dump path — never a parent like /tmp.
+    """
+    path = (remote_path or "").strip()
+    if not path or path in ("/", "/tmp", "/tmp/", "/var", "/var/tmp", "/var/tmp/"):
+        return 0
+
+    # Prefer a single-file size; for directories sum contents of that path only.
+    cmd = (
+        f"path={shlex.quote(path)}; "
+        f"if [ -f \"$path\" ]; then stat -c%s \"$path\"; "
+        f"elif [ -d \"$path\" ]; then du -sb \"$path\" | cut -f1; "
+        f"else echo 0; fi"
+    )
     exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=30, **_ssh_kwargs(ssh))
     if exit_code != 0:
         return 0
     try:
-        return int(stdout.strip())
-    except ValueError:
+        # Take the last numeric token only (ignore banners / warnings).
+        for line in reversed(stdout.splitlines()):
+            token = line.strip().split()[0] if line.strip() else ""
+            if token.isdigit():
+                return int(token)
+    except (ValueError, IndexError):
         return 0
+    return 0
 
 
 def resolve_remote_pg_dump_path(ssh: dict[str, Any], preferred_path: str | None = None) -> str:
@@ -522,6 +793,44 @@ def resolve_remote_pg_dump_path(ssh: dict[str, Any], preferred_path: str | None 
     )
 
 
+def can_use_postgres_peer_auth(ssh: dict[str, Any]) -> bool:
+    """True when the SSH session can run pg_dump as the postgres OS user."""
+    kwargs = _ssh_kwargs(ssh)
+    username = str(kwargs.get("username") or "").strip()
+    if username == "postgres":
+        return True
+    # root can usually switch user without a password prompt
+    if username == "root":
+        exit_code, _out, _err = run_ssh_command(
+            command="id -u postgres >/dev/null 2>&1",
+            timeout=20,
+            **kwargs,
+        )
+        return exit_code == 0
+    # passwordless sudo to postgres
+    exit_code, _out, _err = run_ssh_command(
+        command="sudo -n -u postgres true",
+        timeout=20,
+        **kwargs,
+    )
+    return exit_code == 0
+
+
+def wrap_command_as_postgres_os_user(ssh_username: str, command: str) -> str:
+    """Run a shell command as the postgres OS user on the Linux server."""
+    user = (ssh_username or "").strip()
+    if user == "postgres":
+        return command
+    if user == "root":
+        # Prefer runuser/su so we do not depend on sudoers configuration.
+        return (
+            f"if command -v runuser >/dev/null 2>&1; then "
+            f"runuser -u postgres -- bash -lc {shlex.quote(command)}; "
+            f"else su -s /bin/bash postgres -c {shlex.quote(command)}; fi"
+        )
+    return f"sudo -n -u postgres -- bash -lc {shlex.quote(command)}"
+
+
 def build_pg_dump_remote_command(
     *,
     pg_dump_path: str,
@@ -533,12 +842,59 @@ def build_pg_dump_remote_command(
     database: str | None = None,
     dumpall: bool = False,
     compress_level: int = 1,
+    custom_format: bool | None = None,
+    format_args: list[str] | None = None,
+    extra_args: list[str] | None = None,
+    peer_auth: bool = False,
+    ssh_username: str | None = None,
 ) -> str:
-    """Build a shell-safe pg_dump / pg_dumpall command for the Linux server."""
-    env = f"PGPASSWORD={shlex.quote(password)}"
+    """Build a shell-safe pg_dump / pg_dumpall command for the Linux server.
+
+    peer_auth=True runs as the postgres OS user over the local socket (superuser),
+    which avoids permission-denied errors from limited DB roles.
+
+    Use output_path='-' to write the archive to stdout (streamed over SSH).
+    """
+    if format_args is not None:
+        resolved_format = " ".join(shlex.quote(arg) for arg in format_args)
+    elif custom_format is False:
+        resolved_format = "--format=plain"
+    else:
+        resolved_format = f"--format=custom --compress={compress_level}"
+    extra = " ".join(shlex.quote(arg) for arg in (extra_args or []))
+    extra = f"{extra} " if extra else ""
+    to_stdout = (output_path or "").strip() == "-"
+
+    if peer_auth:
+        # Local socket / peer authentication as OS user postgres (DB superuser).
+        if dumpall:
+            dump_cmd = f"{shlex.quote(pg_dump_path)} -f {shlex.quote(output_path)}"
+        else:
+            if not database:
+                raise ValueError("database is required for pg_dump")
+            dump_cmd = (
+                f"{shlex.quote(pg_dump_path)} -d {shlex.quote(database)} "
+                f"-f {shlex.quote(output_path)} {extra}{resolved_format}"
+            )
+        wrapped = wrap_command_as_postgres_os_user(ssh_username or "", dump_cmd)
+        if to_stdout:
+            return wrapped
+        # Make the dump readable for SFTP download by the SSH login user.
+        # Keep dump exit status (do not mask failures with `|| true` on the whole chain).
+        chmod_cmd = (
+            f"status=$?; chmod -R a+rX {shlex.quote(output_path)} 2>/dev/null || true; "
+            f"exit $status"
+        )
+        return f"{wrapped}; {chmod_cmd}"
+
+    env = (
+        f"PGPASSWORD={shlex.quote(password)} "
+        f"PGCONNECT_TIMEOUT=20"
+    )
     base = (
         f"{env} {shlex.quote(pg_dump_path)} "
         f"-h {shlex.quote(pg_host)} -p {pg_port} -U {shlex.quote(username)} "
+        f"--no-password "
     )
     if dumpall:
         return f"{base}-f {shlex.quote(output_path)}"
@@ -546,7 +902,7 @@ def build_pg_dump_remote_command(
         raise ValueError("database is required for pg_dump")
     return (
         f"{base}-d {shlex.quote(database)} -f {shlex.quote(output_path)} "
-        f"--format=custom --compress={compress_level}"
+        f"{extra}{resolved_format}"
     )
 
 

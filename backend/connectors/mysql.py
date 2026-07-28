@@ -18,14 +18,19 @@ class MySQLConnector(BaseConnector):
         try:
             import mysql.connector
 
-            return mysql.connector.connect(
-                host=self.config.host,
-                port=self.config.port,
-                database=self.config.database,
-                user=self.config.username,
-                password=self.config.password,
-                connection_timeout=(self.config.extra_options or {}).get("connect_timeout", 10),
-            )
+            kwargs: dict[str, Any] = {
+                "host": self.config.host,
+                "port": self.config.port,
+                "user": self.config.username,
+                "password": self.config.password,
+                "connection_timeout": (self.config.extra_options or {}).get(
+                    "connect_timeout", 10
+                ),
+            }
+            # Omit database for server-level ops (SHOW DATABASES / SCHEMATA).
+            if self.config.database:
+                kwargs["database"] = self.config.database
+            return mysql.connector.connect(**kwargs)
         except ImportError as exc:
             raise ConnectorError("mysql-connector-python not installed") from exc
         except Exception as exc:

@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from backend.connectors.base import ConnectionInfo
-from backend.models.schemas import BackupMethod, BackupMode, BackupRequest, DatabaseType
+from backend.models.schemas import BackupMethod, BackupMode, BackupRequest, DatabaseType, PgDumpFormat
 from backend.services.backup_catalog import describe_backup_command
 from backend.services.pg_tools import resolve_local_pg_tool
 
@@ -31,6 +31,7 @@ def test_describe_backup_command_shows_remote_pg_dump_over_ssh():
         method=BackupMethod.PG_DUMP,
         backup_mode=BackupMode.FULL,
         database="postgres",
+        pg_dump_format=PgDumpFormat.CUSTOM,
     )
     with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
         preview = describe_backup_command(request)
@@ -38,8 +39,128 @@ def test_describe_backup_command_shows_remote_pg_dump_over_ssh():
     assert "ssh ubuntu@192.168.1.57" in preview
     assert "pg_dump -h 127.0.0.1 -p 5432" in preview
     assert "--format=custom" in preview
-    assert "Runs on Linux server" in preview
+    assert "-f -" in preview
+    assert "Streams pg_dump over SSH" in preview
     assert "SSH tunnel" not in preview
+
+
+def test_describe_backup_command_pg_plain_sql_format():
+    conn = ConnectionInfo(
+        host="192.168.1.95",
+        port=5432,
+        database="labdb",
+        username="labdb",
+        password="secret",
+    )
+    request = BackupRequest(
+        profile="default",
+        db_type=DatabaseType.POSTGRESQL,
+        method=BackupMethod.PG_DUMP,
+        backup_mode=BackupMode.FULL,
+        database="labdb",
+        pg_dump_format=PgDumpFormat.PLAIN,
+    )
+    with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
+        preview = describe_backup_command(request)
+
+    assert "--format=plain" in preview
+    assert "<output.sql>" in preview
+    assert "--format=custom" not in preview
+
+
+def test_describe_backup_command_pg_tar_format():
+    conn = ConnectionInfo(
+        host="192.168.1.95",
+        port=5432,
+        database="labdb",
+        username="labdb",
+        password="secret",
+    )
+    request = BackupRequest(
+        profile="default",
+        db_type=DatabaseType.POSTGRESQL,
+        method=BackupMethod.PG_DUMP,
+        backup_mode=BackupMode.FULL,
+        database="labdb",
+        pg_dump_format=PgDumpFormat.TAR,
+    )
+    with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
+        preview = describe_backup_command(request)
+
+    assert "--format=tar" in preview
+    assert "<output.tar>" in preview
+
+
+def test_describe_backup_command_pg_directory_format():
+    conn = ConnectionInfo(
+        host="192.168.1.95",
+        port=5432,
+        database="labdb",
+        username="labdb",
+        password="secret",
+    )
+    request = BackupRequest(
+        profile="default",
+        db_type=DatabaseType.POSTGRESQL,
+        method=BackupMethod.PG_DUMP,
+        backup_mode=BackupMode.FULL,
+        database="labdb",
+        pg_dump_format=PgDumpFormat.DIRECTORY,
+    )
+    with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
+        preview = describe_backup_command(request)
+
+    assert "--format=directory" in preview
+    assert "<output_dir>" in preview
+
+
+def test_describe_backup_command_pg_selected_tables_scope():
+    conn = ConnectionInfo(
+        host="192.168.1.95",
+        port=5432,
+        database="labdb",
+        username="labdb",
+        password="secret",
+    )
+    request = BackupRequest(
+        profile="default",
+        db_type=DatabaseType.POSTGRESQL,
+        method=BackupMethod.PG_DUMP,
+        backup_mode=BackupMode.FULL,
+        database="labdb",
+        pg_dump_format=PgDumpFormat.CUSTOM,
+        pg_backup_scope="selected_tables",
+        pg_scope_targets=["public.users", "public.orders"],
+    )
+    with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
+        preview = describe_backup_command(request)
+
+    assert "--table=public.users" in preview
+    assert "--table=public.orders" in preview
+    assert "--format=custom" in preview
+
+
+def test_describe_backup_command_legacy_sql_extension_maps_to_plain():
+    conn = ConnectionInfo(
+        host="192.168.1.95",
+        port=5432,
+        database="labdb",
+        username="labdb",
+        password="secret",
+    )
+    request = BackupRequest(
+        profile="default",
+        db_type=DatabaseType.POSTGRESQL,
+        method=BackupMethod.PG_DUMP,
+        backup_mode=BackupMode.FULL,
+        database="labdb",
+        pg_file_extension="sql",
+    )
+    with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
+        preview = describe_backup_command(request)
+
+    assert "--format=plain" in preview
+    assert "<output.sql>" in preview
 
 
 def test_describe_backup_command_direct_connection_no_tunnel_note():
@@ -73,6 +194,7 @@ def test_is_pg_custom_dump_detects_archive(tmp_path):
     custom = tmp_path / "backup.dump"
     custom.write_bytes(b"PGDMP" + b"\x00" * 20)
     assert is_pg_custom_dump(custom)
+
 
 @pytest.mark.skipif(
     not __import__("pathlib").Path(r"C:\Program Files\PostgreSQL").exists(),
