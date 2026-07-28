@@ -34,6 +34,35 @@ class BackupMode(str, Enum):
     DIFFERENTIAL = "differential"
 
 
+class PgBackupScope(str, Enum):
+    ENTIRE_DATABASE = "entire_database"
+    SINGLE_SCHEMA = "single_schema"
+    MULTIPLE_SCHEMAS = "multiple_schemas"
+    SELECTED_TABLES = "selected_tables"
+    DATA_ONLY = "data_only"
+    SCHEMA_ONLY = "schema_only"
+    SELECTED_OBJECTS = "selected_objects"
+
+
+class PgDumpFormat(str, Enum):
+    PLAIN = "plain"
+    CUSTOM = "custom"
+    TAR = "tar"
+    DIRECTORY = "directory"
+
+
+class MySQLBackupScope(str, Enum):
+    ENTIRE_DATABASE = "entire_database"
+    SELECTED_TABLES = "selected_tables"
+    DATA_ONLY = "data_only"
+    SCHEMA_ONLY = "schema_only"
+
+
+class MySQLDumpFormat(str, Enum):
+    PLAIN = "plain"
+    COMPRESSED = "compressed"
+
+
 class MongoRestoreScope(str, Enum):
     ALL_DATABASES = "all_databases"
     SPECIFIC_DATABASE = "specific_database"
@@ -46,6 +75,7 @@ class BackupMethod(str, Enum):
     PG_DUMPALL = "pg_dumpall"
     PG_BASEBACKUP = "pg_basebackup"
     MYSQLDUMP = "mysqldump"
+    MYSQL_PHYSICAL = "mysql_physical"
     MONGODUMP = "mongodump"
     MONGORESTORE = "mongorestore"
     MSSQL_BACKUP = "mssql_backup"
@@ -59,6 +89,7 @@ _BACKUP_METHODS: dict[tuple[DatabaseType, BackupCategory], list[BackupMethod]] =
     ],
     (DatabaseType.POSTGRESQL, BackupCategory.PHYSICAL): [BackupMethod.PG_BASEBACKUP],
     (DatabaseType.MYSQL, BackupCategory.LOGICAL): [BackupMethod.MYSQLDUMP],
+    (DatabaseType.MYSQL, BackupCategory.PHYSICAL): [BackupMethod.MYSQL_PHYSICAL],
     (DatabaseType.MONGODB, BackupCategory.LOGICAL): [BackupMethod.MONGODUMP],
     (DatabaseType.MSSQL, BackupCategory.PHYSICAL): [BackupMethod.MSSQL_BACKUP],
     (DatabaseType.ORACLE, BackupCategory.LOGICAL): [BackupMethod.ORACLE_EXPDP],
@@ -97,7 +128,11 @@ def backup_modes_for(
 
 def backup_method_category(method: BackupMethod) -> BackupCategory:
     """Classify a backup method as logical or physical."""
-    if method in (BackupMethod.PG_BASEBACKUP, BackupMethod.MSSQL_BACKUP):
+    if method in (
+        BackupMethod.PG_BASEBACKUP,
+        BackupMethod.MSSQL_BACKUP,
+        BackupMethod.MYSQL_PHYSICAL,
+    ):
         return BackupCategory.PHYSICAL
     return BackupCategory.LOGICAL
 
@@ -130,6 +165,17 @@ class BackupRequest(BaseModel):
     backup_folder_name: str | None = None
     collection: str | None = None
     gzip_archive: bool = False
+    # PostgreSQL logical pg_dump format: plain | custom | tar | directory
+    # Legacy aliases still accepted via pg_file_extension: sql→plain, dump→custom.
+    pg_dump_format: PgDumpFormat | None = None
+    pg_file_extension: str | None = None
+    pg_backup_scope: PgBackupScope | None = None
+    pg_scope_targets: list[str] = Field(default_factory=list)
+    pg_advanced_args: str | None = None
+    # MySQL logical mysqldump options
+    mysql_dump_format: MySQLDumpFormat | None = None
+    mysql_backup_scope: MySQLBackupScope | None = None
+    mysql_scope_targets: list[str] = Field(default_factory=list)
 
 
 class RestoreRequest(BaseModel):

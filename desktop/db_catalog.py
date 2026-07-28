@@ -36,30 +36,83 @@ def fetch_server_databases(connection: ConnectionResult) -> list[dict[str, Any]]
         return [_normalize_row(row) for row in rows]
 
     if db_type == DatabaseType.MYSQL:
-        rows = connector.execute_query(
-            """
-            SELECT
-                s.SCHEMA_NAME AS name,
-                s.DEFAULT_CHARACTER_SET_NAME AS encoding,
-                COALESCE(
-                    ROUND(SUM(t.DATA_LENGTH + t.INDEX_LENGTH) / 1024 / 1024, 2),
-                    0
-                ) AS size_mb
-            FROM information_schema.SCHEMATA s
-            LEFT JOIN information_schema.TABLES t
-                ON t.TABLE_SCHEMA = s.SCHEMA_NAME
-            GROUP BY s.SCHEMA_NAME, s.DEFAULT_CHARACTER_SET_NAME
-            ORDER BY s.SCHEMA_NAME
-            """
+        from dataclasses import replace
+
+        from desktop.explorer.mysql_inventory import (
+            fetch_schema_sizes_via_ssh,
+            list_database_names_via_ssh,
         )
+
+        # List against information_schema so inventory is server-wide,
+        # not limited to the login database name on the connection.
+        catalog = replace(connection, database="information_schema")
+        connector = get_connector_from_info(catalog.db_type, catalog.to_connection_info())
+
+        names: list[str] = []
+        try:
+            show_rows = connector.execute_query("SHOW DATABASES")
+            for r in show_rows:
+                name = r.get("Database") or r.get("database")
+                if name is None and r:
+                    name = next(iter(r.values()), None)
+                if name is not None and str(name).strip():
+                    names.append(str(name).strip())
+        except Exception:
+            names = []
+
+        ssh_names = list_database_names_via_ssh(connection)
+        if ssh_names and len(ssh_names) >= len(names):
+            names = ssh_names
+
+        size_by_name: dict[str, float] = {}
+        encoding_by_name: dict[str, str] = {}
+        try:
+            meta_rows = connector.execute_query(
+                """
+                SELECT
+                    s.SCHEMA_NAME AS name,
+                    s.DEFAULT_CHARACTER_SET_NAME AS encoding,
+                    COALESCE(
+                        ROUND(SUM(t.DATA_LENGTH + t.INDEX_LENGTH) / 1024 / 1024, 2),
+                        0
+                    ) AS size_mb
+                FROM information_schema.SCHEMATA s
+                LEFT JOIN information_schema.TABLES t
+                    ON t.TABLE_SCHEMA = s.SCHEMA_NAME
+                GROUP BY s.SCHEMA_NAME, s.DEFAULT_CHARACTER_SET_NAME
+                ORDER BY s.SCHEMA_NAME
+                """
+            )
+            for row in meta_rows:
+                key = str(row.get("name") or "").strip()
+                if not key:
+                    continue
+                encoding_by_name[key] = str(row.get("encoding") or "")
+                try:
+                    size_by_name[key] = float(row.get("size_mb") or 0)
+                except (TypeError, ValueError):
+                    size_by_name[key] = 0.0
+                if key not in names:
+                    names.append(key)
+        except Exception:
+            pass
+
+        ssh_sizes = fetch_schema_sizes_via_ssh(connection)
+        for key, size_bytes in ssh_sizes.items():
+            size_by_name[key] = round(float(size_bytes) / 1024 / 1024, 2)
+
         return [
             {
-                "name": row["name"],
-                "owner": row.get("encoding") or "—",
-                "size": f"{row['size_mb']:.1f} MB" if row.get("size_mb") else "—",
+                "name": name,
+                "owner": encoding_by_name.get(name) or "—",
+                "size": (
+                    f"{size_by_name[name]:.1f} MB"
+                    if name in size_by_name and size_by_name[name]
+                    else "—"
+                ),
                 "status": "online",
             }
-            for row in rows
+            for name in names
         ]
 
     if db_type == DatabaseType.MSSQL:
@@ -151,3 +204,148 @@ def fetch_mongodb_collections(
     info = connection.to_connection_info()
     connector = get_connector_from_info(connection.db_type, info)
     return connector.list_collections(database_name.strip())
+
+
+def fetch_postgresql_schemas(
+    connection: ConnectionResult, database_name: str
+) -> list[str]:
+    """Return non-system schema names from a PostgreSQL database."""
+    if connection.db_type != DatabaseType.POSTGRESQL:
+        return []
+    db = database_name.strip()
+    if not db:
+        raise ValueError("Database name is required to list schemas.")
+
+    from dataclasses import replace
+
+    scoped = replace(connection, database=db)
+    connector = get_connector_from_info(scoped.db_type, scoped.to_connection_info())
+    rows = connector.execute_query(
+        """
+        SELECT nspname AS name
+        FROM pg_catalog.pg_namespace
+        WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+          AND nspname NOT LIKE 'pg_toast%'
+          AND nspname NOT LIKE 'pg_temp_%'
+        ORDER BY nspname
+        """
+    )
+    return [str(row["name"]) for row in rows if row.get("name")]
+
+
+def fetch_postgresql_tables(
+    connection: ConnectionResult,
+    database_name: str,
+    schema: str | None = None,
+) -> list[str]:
+    """Return table names from a PostgreSQL database.
+
+    When ``schema`` is set, returns unqualified table names in that schema.
+    Otherwise returns schema-qualified ``schema.table`` names.
+    """
+    if connection.db_type != DatabaseType.POSTGRESQL:
+        return []
+    db = database_name.strip()
+    if not db:
+        raise ValueError("Database name is required to list tables.")
+
+    from dataclasses import replace
+
+    scoped = replace(connection, database=db)
+    connector = get_connector_from_info(scoped.db_type, scoped.to_connection_info())
+    schema_name = (schema or "").strip()
+    if schema_name:
+        rows = connector.execute_query(
+            """
+            SELECT tablename AS name
+            FROM pg_catalog.pg_tables
+            WHERE schemaname = %s
+            ORDER BY tablename
+            """,
+            (schema_name,),
+        )
+        return [str(row["name"]) for row in rows if row.get("name")]
+
+    rows = connector.execute_query(
+        """
+        SELECT schemaname || '.' || tablename AS name
+        FROM pg_catalog.pg_tables
+        WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY schemaname, tablename
+        """
+    )
+    return [str(row["name"]) for row in rows if row.get("name")]
+
+
+def fetch_mysql_tables(connection: ConnectionResult, database_name: str) -> list[str]:
+    """Return table names from a MySQL database for backup scope selection."""
+    if connection.db_type != DatabaseType.MYSQL:
+        return []
+    db = database_name.strip()
+    if not db:
+        raise ValueError("Database name is required to list tables.")
+
+    from dataclasses import replace
+
+    scoped = replace(connection, database=db)
+    try:
+        connector = get_connector_from_info(scoped.db_type, scoped.to_connection_info())
+        rows = connector.execute_query(
+            """
+            SELECT TABLE_NAME AS name
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = %s AND TABLE_TYPE = 'BASE TABLE'
+            ORDER BY TABLE_NAME
+            """,
+            (db,),
+        )
+        names = [str(row["name"]) for row in rows if row.get("name")]
+        if names:
+            return names
+    except Exception:
+        names = []
+
+    # Fallback: privileged SHOW TABLES over SSH (same path as full DB inventory).
+    if connection.ssh_enabled and connection.linux_username:
+        import shlex
+
+        from backend.services.ssh_client import run_ssh_command
+        from desktop.explorer.mysql_inventory import _ssh_params
+
+        params = _ssh_params(connection)
+        if not params:
+            return names
+        db_q = shlex.quote(db)
+        commands = [
+            f"mysql -Nse {shlex.quote(f'SHOW TABLES FROM {db}')}",
+            f"sudo -n mysql -Nse {shlex.quote(f'SHOW TABLES FROM {db}')}",
+        ]
+        if params.get("password"):
+            pw = shlex.quote(params["password"])
+            commands.append(
+                f"printf '%s\\n' {pw} | sudo -S -p '' mysql -Nse "
+                f"{shlex.quote(f'SHOW TABLES FROM {db}')}"
+            )
+        for command in commands:
+            try:
+                code, out, _err = run_ssh_command(
+                    ssh_host=params["ssh_host"],
+                    fallback_host=params["fallback_host"],
+                    ssh_port=params["ssh_port"],
+                    username=params["username"],
+                    password=params["password"],
+                    command=command,
+                    timeout=45,
+                )
+            except Exception:
+                continue
+            if code != 0 or not (out or "").strip():
+                continue
+            found = [
+                line.strip()
+                for line in out.splitlines()
+                if line.strip() and " " not in line.strip()
+            ]
+            if found:
+                return found
+    return names

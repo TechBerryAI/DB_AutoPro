@@ -198,7 +198,6 @@ class DatabaseAutomationApp(ctk.CTk):
         info.pack(side="left", fill="x", expand=True, padx=(10, 0))
 
         emp_name = self.employee.full_name if self.employee else "User"
-        emp_role = self._employee_role_text()
         self._employee_name_label = ctk.CTkLabel(
             info,
             text=emp_name,
@@ -207,14 +206,7 @@ class DatabaseAutomationApp(ctk.CTk):
             anchor="w",
         )
         self._employee_name_label.pack(anchor="w")
-        self._employee_role_label = ctk.CTkLabel(
-            info,
-            text=emp_role,
-            font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color=self._t.sc("text_muted"),
-            anchor="w",
-        )
-        self._employee_role_label.pack(anchor="w")
+        self._employee_role_label = None
 
         # Row 2: navigation
         nav_scroll = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")

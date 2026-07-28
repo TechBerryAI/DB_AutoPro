@@ -76,7 +76,8 @@ class ConnectionResult:
         if self.ssh_enabled:
             opts.update({
                 "ssh_enabled": True,
-                "ssh_host": self.ssh_host or self.host,
+                # Prefer the real Linux host, never the local tunnel bind address.
+                "ssh_host": self.ssh_host or self.endpoint_host,
                 "ssh_port": self.ssh_port,
                 "linux_username": self.linux_username,
                 "linux_password": self.linux_password,

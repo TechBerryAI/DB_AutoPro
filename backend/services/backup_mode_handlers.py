@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -21,8 +22,8 @@ from backend.models.schemas import (
 from backend.services.backup_chain import anchor_for_mode, load_chain, record_backup
 from backend.services.pg_tools import resolve_local_pg_tool
 
-# Level 1 keeps custom-format backups small without the heavy CPU cost of level 9.
-PG_DUMP_COMPRESS_LEVEL = 1
+# Level 6 keeps custom-format backups much smaller than level 1 with acceptable CPU cost.
+PG_DUMP_COMPRESS_LEVEL = 6
 
 
 def _pg_executable(tool: str, cli_not_found_error: Callable[[str], BackupError]) -> str:
@@ -59,17 +60,15 @@ def _run_pg_dump_command(
                 elapsed = int(time.monotonic() - started)
                 written_mb = 0.0
                 if output_path.exists():
-                    written_mb = output_path.stat().st_size / (1024 * 1024)
-                if expected_bytes and expected_bytes > 0:
-                    expected_mb = expected_bytes / (1024 * 1024)
-                    ratio = min(1.0, (written_mb * 1024 * 1024) / expected_bytes)
-                    progress = min(0.92, 0.08 + ratio * 0.84)
-                    message = (
-                        f"Running {tool}... {written_mb:.1f} / ~{expected_mb:.0f} MB ({elapsed}s)"
-                    )
-                else:
-                    progress = min(0.92, 0.08 + written_mb / 120.0)
-                    message = f"Running {tool}... {written_mb:.1f} MB written ({elapsed}s)"
+                    if output_path.is_file():
+                        written_mb = output_path.stat().st_size / (1024 * 1024)
+                    elif output_path.is_dir():
+                        written_mb = sum(
+                            p.stat().st_size for p in output_path.rglob("*") if p.is_file()
+                        ) / (1024 * 1024)
+                # Report only the growing backup file size (not database size estimates).
+                progress = min(0.92, 0.08 + min(written_mb / 50.0, 0.80))
+                message = f"Running {tool}... backup file {written_mb:.1f} MB ({elapsed}s)"
                 progress_callback(progress, message)
             time.sleep(0.8)
     finally:
@@ -197,7 +196,11 @@ def _postgresql_logical_full(
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> Path:
     conn = resolve_connection(request.profile)
-    env = {**os.environ, "PGPASSWORD": conn.password}
+    env = {
+        **os.environ,
+        "PGPASSWORD": conn.password,
+        "PGCONNECT_TIMEOUT": "20",
+    }
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if request.method == BackupMethod.PG_DUMPALL:
@@ -206,32 +209,40 @@ def _postgresql_logical_full(
             "-h", conn.host,
             "-p", str(conn.port),
             "-U", conn.username,
+            "--no-password",
             "-f", str(output_path),
         ]
     else:
         tool = "pg_dump"
         db = request.database or conn.database
+        from backend.services.backup_catalog import (
+            build_pg_dump_extra_args,
+            resolve_pg_dump_format,
+        )
+        from backend.models.schemas import PgDumpFormat
+
+        # Directory format requires the target path itself to not exist yet.
+        if (
+            resolve_pg_dump_format(request) == PgDumpFormat.DIRECTORY
+            and output_path.exists()
+        ):
+            raise BackupError(
+                f"Directory format output already exists: {output_path}. "
+                "Choose a new backup or remove the existing folder."
+            )
+
         args = [
             "-h", conn.host,
             "-p", str(conn.port),
             "-U", conn.username,
+            "--no-password",
             "-d", db,
             "-f", str(output_path),
-            "--format=custom",
-            f"--compress={PG_DUMP_COMPRESS_LEVEL}",
         ]
-
-    expected_bytes = None
-    if tool == "pg_dump":
-        db_name = request.database or conn.database
-        expected_bytes = _pg_database_size_bytes(request.profile, db_name)
+        args.extend(build_pg_dump_extra_args(request))
 
     if progress_callback:
-        if expected_bytes:
-            expected_mb = expected_bytes / (1024 * 1024)
-            progress_callback(0.08, f"Running {tool}... (~{expected_mb:.0f} MB database)")
-        else:
-            progress_callback(0.08, f"Running {tool}...")
+        progress_callback(0.08, f"Running {tool}...")
     _run_pg_dump_command(
         tool,
         args,
@@ -239,10 +250,14 @@ def _postgresql_logical_full(
         output_path,
         cli_not_found_error=cli_not_found_error,
         progress_callback=progress_callback,
-        expected_bytes=expected_bytes,
+        expected_bytes=None,
     )
     if progress_callback:
-        progress_callback(0.9, f"{tool} completed")
+        if output_path.is_file():
+            size_mb = output_path.stat().st_size / (1024 * 1024)
+            progress_callback(0.9, f"{tool} completed — backup file {size_mb:.1f} MB")
+        else:
+            progress_callback(0.9, f"{tool} completed")
     _record_postgresql_chain(request, output_path.parent, str(output_path))
     return output_path
 
@@ -256,23 +271,55 @@ def _postgresql_logical_full_via_ssh(
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> Path:
     """Run pg_dump on the Linux server, then download the archive to this PC."""
+    from backend.models.schemas import PgDumpFormat
+    from backend.services.backup_catalog import (
+        build_pg_dump_common_args,
+        build_pg_dump_format_args,
+        build_pg_dump_scope_args,
+        resolve_pg_dump_format,
+        resolve_pg_file_extension,
+    )
     from backend.services.ssh_client import (
         _ssh_kwargs,
         build_pg_dump_remote_command,
+        can_use_postgres_peer_auth,
+        download_remote_directory,
         download_remote_file,
         pg_endpoint_from_connection,
         remote_file_size,
         remove_remote_path,
         resolve_remote_pg_dump_path,
         run_ssh_command,
+        stream_ssh_stdout_to_file,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pg_host, pg_port = pg_endpoint_from_connection(conn)
     db = request.database or conn.database
     dumpall = request.method == BackupMethod.PG_DUMPALL
-    remote_name = output_path.name if output_path.suffix else f"{output_path.name}.dump"
+    fmt = None if dumpall else resolve_pg_dump_format(request)
+    is_directory = fmt == PgDumpFormat.DIRECTORY
+    # Stream archive formats over SSH (one pass). Directory format still uses /tmp + SFTP.
+    use_stream = not is_directory
+
+    if dumpall:
+        remote_name = output_path.name if output_path.suffix else f"{output_path.name}.sql"
+    elif is_directory:
+        remote_name = output_path.name
+    else:
+        ext = resolve_pg_file_extension(request)
+        remote_name = (
+            output_path.name
+            if output_path.suffix
+            else f"{output_path.name}.{ext or 'dump'}"
+        )
     remote_path = f"/tmp/{remote_name}"
+
+    if is_directory and output_path.exists():
+        raise BackupError(
+            f"Directory format output already exists: {output_path}. "
+            "Choose a new backup or remove the existing folder."
+        )
 
     if progress_callback:
         progress_callback(0.12, "Locating pg_dump on Linux server...")
@@ -281,51 +328,300 @@ def _postgresql_logical_full_via_ssh(
     except RuntimeError as exc:
         raise BackupError(str(exc)) from exc
 
-    expected_bytes = None if dumpall else _pg_database_size_bytes(request.profile, db)
+    # Prefer postgres OS peer auth so limited DB roles do not block table locks.
+    peer_auth = False
+    try:
+        peer_auth = can_use_postgres_peer_auth(ssh)
+    except Exception:
+        peer_auth = False
 
-    command = build_pg_dump_remote_command(
-        pg_dump_path=pg_dump_path,
-        pg_host=pg_host,
-        pg_port=pg_port,
-        username=conn.username,
-        password=conn.password,
-        output_path=remote_path,
-        database=db,
-        dumpall=dumpall,
-        compress_level=PG_DUMP_COMPRESS_LEVEL,
-    )
+    if not use_stream:
+        try:
+            remove_remote_path(ssh, remote_path)
+        except Exception:
+            pass
+
+    ssh_user = str((_ssh_kwargs(ssh).get("username") or "")).strip()
+    format_args = None if dumpall else build_pg_dump_format_args(request)
+    scope_args = None
+    if not dumpall:
+        scope_args = build_pg_dump_common_args(request) + build_pg_dump_scope_args(request)
+
+    def _build_command(*, use_peer: bool, stream: bool) -> str:
+        return build_pg_dump_remote_command(
+            pg_dump_path=pg_dump_path,
+            pg_host=pg_host,
+            pg_port=pg_port,
+            username=conn.username,
+            password=conn.password,
+            output_path="-" if stream else remote_path,
+            database=db,
+            dumpall=dumpall,
+            compress_level=PG_DUMP_COMPRESS_LEVEL,
+            format_args=format_args,
+            extra_args=scope_args,
+            peer_auth=use_peer,
+            ssh_username=ssh_user,
+        )
+
+    def _raise_dump_error(stderr: str) -> None:
+        detail = (stderr or "").strip() or "pg_dump failed on Linux server"
+        lowered = detail.lower()
+        if "permission denied" in lowered:
+            detail = (
+                f"{detail}\n\n"
+                f"The database user '{conn.username}' cannot read one or more tables. "
+                "Grant SELECT (or use a superuser), for example:\n"
+                f"  GRANT SELECT ON ALL TABLES IN SCHEMA public TO {conn.username};\n"
+                "Or connect with Linux root/sudo so backup can run as the postgres OS user."
+            )
+        elif "password" in lowered or "authentication" in lowered:
+            detail = (
+                f"{detail}\n\nCheck the PostgreSQL username/password on the server. "
+                "Remote pg_dump uses the same DB credentials as your connection."
+            )
+        elif "could not connect" in lowered or "connection refused" in lowered:
+            detail = (
+                f"{detail}\n\nPostgreSQL was not reachable from the Linux server at "
+                f"{pg_host}:{pg_port}. Confirm PostgreSQL is running and listening locally."
+            )
+        elif "timeout" in lowered:
+            detail = (
+                f"{detail}\n\nTimed out connecting to PostgreSQL at {pg_host}:{pg_port} "
+                "from the Linux server."
+            )
+        raise BackupError(detail)
+
+    started = time.monotonic()
+
+    if use_stream:
+        if progress_callback:
+            label = "pg_dumpall" if dumpall else "pg_dump"
+            mode = "as postgres OS user" if peer_auth else f"as DB user '{conn.username}'"
+            progress_callback(
+                0.15,
+                f"Streaming {label} from Linux server {mode} (no /tmp copy)...",
+            )
+
+        def _on_stream_progress(bytes_written: int, elapsed: int, _stderr_tail: str) -> None:
+            if not progress_callback:
+                return
+            mb = bytes_written / (1024 * 1024)
+            # Map received size into 0.15–0.90 while streaming continues.
+            progress = min(0.90, 0.15 + min(mb / 80.0, 0.70))
+            progress_callback(
+                progress,
+                f"Streaming backup to this PC... {mb:.1f} MB received ({elapsed}s)",
+            )
+
+        command = _build_command(use_peer=peer_auth, stream=True)
+        try:
+            exit_code, stderr = stream_ssh_stdout_to_file(
+                ssh,
+                command,
+                output_path,
+                timeout=7200,
+                on_progress=_on_stream_progress,
+            )
+        except RuntimeError as exc:
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
+            raise BackupError(str(exc)) from exc
+
+        if (
+            exit_code != 0
+            and not peer_auth
+            and "permission denied" in (stderr or "").lower()
+        ):
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
+            if can_use_postgres_peer_auth(ssh):
+                if progress_callback:
+                    progress_callback(
+                        0.18,
+                        "DB user lacks table access — retrying stream as postgres OS user...",
+                    )
+                peer_auth = True
+                command = _build_command(use_peer=True, stream=True)
+                try:
+                    exit_code, stderr = stream_ssh_stdout_to_file(
+                        ssh,
+                        command,
+                        output_path,
+                        timeout=7200,
+                        on_progress=_on_stream_progress,
+                    )
+                except RuntimeError as exc:
+                    if output_path.exists():
+                        try:
+                            output_path.unlink()
+                        except OSError:
+                            pass
+                    raise BackupError(str(exc)) from exc
+
+        if exit_code != 0:
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
+            _raise_dump_error(stderr)
+
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            raise BackupError("Streamed backup finished but the local file is empty.")
+
+        if progress_callback:
+            local_mb = output_path.stat().st_size / (1024 * 1024)
+            elapsed = int(time.monotonic() - started)
+            progress_callback(
+                0.92,
+                f"Backup saved ({local_mb:.1f} MB in {elapsed}s)",
+            )
+        if not dumpall:
+            _record_postgresql_chain(request, output_path.parent, str(output_path))
+        return output_path
+
+    # ---- Directory format (or legacy file-to-/tmp path) ----
+    command = _build_command(use_peer=peer_auth, stream=False)
 
     if progress_callback:
         label = "pg_dumpall" if dumpall else "pg_dump"
-        if expected_bytes:
-            expected_mb = expected_bytes / (1024 * 1024)
-            progress_callback(0.18, f"Running {label} on Linux server (~{expected_mb:.0f} MB DB)...")
-        else:
-            progress_callback(0.18, f"Running {label} on Linux server...")
+        mode = "as postgres OS user" if peer_auth else f"as DB user '{conn.username}'"
+        progress_callback(0.18, f"Running {label} on Linux server {mode}...")
 
-    started = time.monotonic()
-    exit_code, _stdout, stderr = run_ssh_command(command=command, timeout=7200, **_ssh_kwargs(ssh))
+    latest_dump_bytes: list[int] = [0]
+    stop_size_poll = threading.Event()
+
+    def _poll_dump_size() -> None:
+        while not stop_size_poll.wait(2.0):
+            try:
+                latest_dump_bytes[0] = remote_file_size(ssh, remote_path)
+            except Exception:
+                pass
+
+    size_thread = threading.Thread(target=_poll_dump_size, daemon=True)
+    size_thread.start()
+
+    def _on_dump_progress(elapsed: int) -> None:
+        if not progress_callback:
+            return
+        label = "pg_dumpall" if dumpall else "pg_dump"
+        written = latest_dump_bytes[0]
+        written_mb = written / (1024 * 1024)
+        if written > 0:
+            progress = min(0.70, 0.18 + min(written_mb / 50.0, 0.50))
+            progress_callback(
+                progress,
+                f"Running {label} on Linux server... backup file {written_mb:.1f} MB ({elapsed}s)",
+            )
+        else:
+            progress = min(0.70, 0.18 + min(elapsed, 900) / 1500.0)
+            progress_callback(
+                progress,
+                f"Running {label} on Linux server... creating backup file ({elapsed}s)",
+            )
+
+    try:
+        exit_code, _stdout, stderr = run_ssh_command(
+            command=command,
+            timeout=7200,
+            on_progress=_on_dump_progress,
+            **_ssh_kwargs(ssh),
+        )
+    except RuntimeError as exc:
+        stop_size_poll.set()
+        remove_remote_path(ssh, remote_path)
+        raise BackupError(str(exc)) from exc
+
+    if (
+        exit_code != 0
+        and not peer_auth
+        and "permission denied" in (stderr or "").lower()
+    ):
+        try:
+            remove_remote_path(ssh, remote_path)
+        except Exception:
+            pass
+        latest_dump_bytes[0] = 0
+        if can_use_postgres_peer_auth(ssh):
+            if progress_callback:
+                progress_callback(
+                    0.20,
+                    "DB user lacks table access — retrying as postgres OS user...",
+                )
+            peer_auth = True
+            command = _build_command(use_peer=True, stream=False)
+            try:
+                exit_code, _stdout, stderr = run_ssh_command(
+                    command=command,
+                    timeout=7200,
+                    on_progress=_on_dump_progress,
+                    **_ssh_kwargs(ssh),
+                )
+            except RuntimeError as exc:
+                stop_size_poll.set()
+                remove_remote_path(ssh, remote_path)
+                raise BackupError(str(exc)) from exc
+
+    stop_size_poll.set()
+
     if exit_code != 0:
         remove_remote_path(ssh, remote_path)
-        detail = stderr.strip() or "pg_dump failed on Linux server"
-        raise BackupError(detail)
+        _raise_dump_error(stderr)
+
+    dump_bytes = remote_file_size(ssh, remote_path)
+    if dump_bytes <= 0:
+        remove_remote_path(ssh, remote_path)
+        raise BackupError("pg_dump finished but the backup file is missing or empty on the server.")
 
     if progress_callback:
         elapsed = int(time.monotonic() - started)
-        remote_mb = remote_file_size(ssh, remote_path) / (1024 * 1024)
-        progress_callback(0.72, f"Downloading backup ({remote_mb:.1f} MB, server finished in {elapsed}s)...")
+        remote_mb = dump_bytes / (1024 * 1024)
+        progress_callback(
+            0.72,
+            f"Downloading backup file ({remote_mb:.1f} MB, created in {elapsed}s)...",
+        )
+
+    def _on_download_progress(transferred: int, total: int) -> None:
+        if not progress_callback:
+            return
+        done_mb = transferred / (1024 * 1024)
+        total_mb = (total or transferred) / (1024 * 1024)
+        ratio = (transferred / total) if total > 0 else 0.0
+        progress = min(0.90, 0.72 + (0.18 * ratio))
+        progress_callback(
+            progress,
+            f"Downloading backup... {done_mb:.1f} / {total_mb:.1f} MB",
+        )
 
     try:
-        download_remote_file(ssh, remote_path, output_path)
+        if is_directory:
+            download_remote_directory(ssh, remote_path, output_path)
+        else:
+            download_remote_file(
+                ssh, remote_path, output_path, on_progress=_on_download_progress
+            )
     finally:
         remove_remote_path(ssh, remote_path)
 
-    if not output_path.exists() or output_path.stat().st_size <= 0:
+    if is_directory:
+        if not output_path.is_dir() or not any(output_path.iterdir()):
+            raise BackupError("Backup download completed but the local directory is empty.")
+    elif not output_path.exists() or output_path.stat().st_size <= 0:
         raise BackupError("Backup download completed but the local file is empty.")
 
     if progress_callback:
-        local_mb = output_path.stat().st_size / (1024 * 1024)
-        progress_callback(0.92, f"Backup saved ({local_mb:.1f} MB)")
+        if is_directory:
+            progress_callback(0.92, f"Backup saved to {output_path.name}/")
+        else:
+            local_mb = output_path.stat().st_size / (1024 * 1024)
+            progress_callback(0.92, f"Backup saved ({local_mb:.1f} MB)")
 
     if not dumpall:
         _record_postgresql_chain(request, output_path.parent, str(output_path))
@@ -451,43 +747,433 @@ def backup_mysql(
     output_path: Path,
     progress_callback: Callable[[float, str], None] | None,
 ) -> Path:
+    if request.method == BackupMethod.MYSQL_PHYSICAL:
+        return _mysql_physical(request, output_path, progress_callback)
     if request.backup_mode == BackupMode.FULL:
-        return _mysql_full(request, output_path)
+        return _mysql_full(request, output_path, progress_callback)
     return _mysql_incremental(request, output_path, progress_callback)
 
 
-def _mysql_full(request: BackupRequest, output_path: Path) -> Path:
+def _mysql_full(
+    request: BackupRequest,
+    output_path: Path,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> Path:
     conn = resolve_connection(request.profile)
+    from backend.services.ssh_client import ssh_options_from_connection
+
+    ssh = ssh_options_from_connection(conn)
+    if ssh:
+        return _mysql_full_via_ssh(request, output_path, conn, ssh, progress_callback)
+    return _mysql_full_local(request, output_path, conn, progress_callback)
+
+
+def _mysql_full_local(
+    request: BackupRequest,
+    output_path: Path,
+    conn,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> Path:
+    from backend.services.backup_catalog import (
+        build_mysqldump_scope_args,
+        mysqldump_table_targets,
+        resolve_mysql_backup_scope,
+    )
+    from backend.models.schemas import MySQLBackupScope
+
     db = request.database or conn.database
+    if not db:
+        raise BackupError("Select a MySQL database to back up.")
+
+    scope = resolve_mysql_backup_scope(request)
+    tables = mysqldump_table_targets(request)
+    if scope == MySQLBackupScope.SELECTED_TABLES and not tables:
+        raise BackupError("Selected Tables scope requires at least one table.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Always write plain SQL first; gzip is applied by BackupService when requested.
+    sql_path = output_path if output_path.suffix.lower() == ".sql" else output_path.with_suffix(".sql")
+    if sql_path.suffix.lower() != ".sql":
+        sql_path = Path(str(sql_path) + ".sql")
+
     cmd = [
         "mysqldump",
         "-h", conn.host,
         "-P", str(conn.port),
         "-u", conn.username,
         f"-p{conn.password}",
-        db,
+        *build_mysqldump_scope_args(request),
         "--single-transaction",
-        "--flush-logs",
-        "--master-data=2",
-        "--result-file", str(output_path),
+        "--routines",
+        "--triggers",
+        "--events",
+        "--result-file", str(sql_path),
+        db,
+        *tables,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Avoid putting password in process list when possible — keep for compatibility.
+    if progress_callback:
+        progress_callback(0.15, "Running mysqldump...")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except FileNotFoundError as exc:
+        raise BackupError(
+            "'mysqldump' was not found on this PC. Install MySQL client tools and add them to PATH."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise BackupError("mysqldump timed out.") from exc
     if result.returncode != 0:
-        raise BackupError(f"mysqldump failed: {result.stderr}")
+        detail = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
+        raise BackupError(f"mysqldump failed: {detail}")
 
-    status = _mysql_binlog_status(request.profile)
+    _record_mysql_full_chain(request, sql_path, db)
+    if progress_callback:
+        size_mb = sql_path.stat().st_size / (1024 * 1024) if sql_path.exists() else 0
+        progress_callback(0.85, f"mysqldump completed — {size_mb:.1f} MB")
+    return sql_path
+
+
+def _mysql_full_via_ssh(
+    request: BackupRequest,
+    output_path: Path,
+    conn,
+    ssh: dict,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> Path:
+    """Run mysqldump on the Linux host, then download the SQL file to this PC."""
+    import shlex
+
+    from backend.models.schemas import MySQLBackupScope
+    from backend.services.backup_catalog import (
+        build_mysqldump_scope_args,
+        mysqldump_table_targets,
+        resolve_mysql_backup_scope,
+    )
+    from backend.services.ssh_client import (
+        _ssh_kwargs,
+        download_remote_file,
+        pg_endpoint_from_connection,
+        remove_remote_path,
+        run_ssh_command,
+    )
+
+    db = request.database or conn.database
+    if not db:
+        raise BackupError("Select a MySQL database to back up.")
+    scope = resolve_mysql_backup_scope(request)
+    tables = mysqldump_table_targets(request)
+    if scope == MySQLBackupScope.SELECTED_TABLES and not tables:
+        raise BackupError("Selected Tables scope requires at least one table.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sql_path = output_path if str(output_path).lower().endswith(".sql") else Path(str(output_path) + ".sql")
+    remote_name = sql_path.name
+    remote_path = f"/tmp/{remote_name}"
+
+    # From the Linux host, MySQL is usually on localhost.
+    mysql_host, mysql_port = pg_endpoint_from_connection(conn)
+    user = conn.username
+    password = conn.password
+    scope_flags = " ".join(shlex.quote(a) for a in build_mysqldump_scope_args(request))
+    table_args = " ".join(shlex.quote(t) for t in tables)
+    common_flags = (
+        f"--single-transaction --routines --triggers --events "
+        f"--result-file={shlex.quote(remote_path)}"
+    )
+    db_q = shlex.quote(db)
+
+    # Prefer socket/privileged mysqldump (sees all schemas); fall back to DB user.
+    linux_password = str(ssh.get("password") or "")
+    candidates = [
+        (
+            f"mysqldump -h {shlex.quote(mysql_host)} -P {mysql_port} "
+            f"{scope_flags} {common_flags} {db_q} {table_args}"
+        ).strip(),
+        (
+            f"sudo -n mysqldump -h {shlex.quote(mysql_host)} -P {mysql_port} "
+            f"{scope_flags} {common_flags} {db_q} {table_args}"
+        ).strip(),
+        (
+            f"MYSQL_PWD={shlex.quote(password)} mysqldump "
+            f"-h {shlex.quote(mysql_host)} -P {mysql_port} -u {shlex.quote(user)} "
+            f"{scope_flags} {common_flags} {db_q} {table_args}"
+        ).strip(),
+    ]
+    if linux_password:
+        pw = shlex.quote(linux_password)
+        candidates.insert(
+            1,
+            (
+                f"printf '%s\\n' {pw} | sudo -S -p '' mysqldump "
+                f"-h {shlex.quote(mysql_host)} -P {mysql_port} "
+                f"{scope_flags} {common_flags} {db_q} {table_args}"
+            ).strip(),
+        )
+
+    if progress_callback:
+        progress_callback(0.12, "Running mysqldump on Linux server...")
+
+    remove_remote_path(ssh, remote_path)
+    last_err = ""
+    ok = False
+    for command in candidates:
+        try:
+            code, _out, err = run_ssh_command(
+                command=command,
+                timeout=3600,
+                **_ssh_kwargs(ssh),
+            )
+        except Exception as exc:
+            last_err = str(exc)
+            continue
+        if code == 0:
+            ok = True
+            break
+        last_err = (err or "").strip() or f"exit {code}"
+        remove_remote_path(ssh, remote_path)
+
+    if not ok:
+        raise BackupError(f"Remote mysqldump failed: {last_err}")
+
+    if progress_callback:
+        progress_callback(0.7, "Downloading MySQL dump to this PC...")
+    try:
+        download_remote_file(ssh, remote_path, sql_path)
+    finally:
+        remove_remote_path(ssh, remote_path)
+
+    if not sql_path.exists() or sql_path.stat().st_size <= 0:
+        raise BackupError("Remote mysqldump produced an empty file.")
+
+    _record_mysql_full_chain(request, sql_path, db)
+    if progress_callback:
+        size_mb = sql_path.stat().st_size / (1024 * 1024)
+        progress_callback(0.88, f"mysqldump completed — {size_mb:.1f} MB")
+    return sql_path
+
+
+def _record_mysql_full_chain(request: BackupRequest, sql_path: Path, db: str) -> None:
+    try:
+        status = _mysql_binlog_status(request.profile)
+    except Exception:
+        status = {"log_file": "", "log_pos": 0}
     record_backup(
-        output_path.parent,
+        sql_path.parent,
         request,
         {
-            "path": str(output_path),
-            "log_file": status["log_file"],
-            "log_pos": status["log_pos"],
+            "path": str(sql_path),
+            "log_file": status.get("log_file", ""),
+            "log_pos": status.get("log_pos", 0),
             "database": db,
         },
         BackupMode.FULL,
     )
-    return output_path
+
+
+def _mysql_physical(
+    request: BackupRequest,
+    output_path: Path,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> Path:
+    """Physical backup via mysqlbackup (MEB) when present, else SSH datadir archive."""
+    conn = resolve_connection(request.profile)
+    from backend.services.ssh_client import ssh_options_from_connection
+
+    ssh = ssh_options_from_connection(conn)
+    if ssh:
+        return _mysql_physical_via_ssh(request, output_path, conn, ssh, progress_callback)
+
+    # Local MEB attempt
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_dir = output_path if not output_path.suffix else output_path.with_suffix("")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "mysqlbackup",
+        f"--host={conn.host}",
+        f"--port={conn.port}",
+        f"--user={conn.username}",
+        f"--password={conn.password}",
+        f"--backup-dir={backup_dir}",
+        "backup",
+    ]
+    if progress_callback:
+        progress_callback(0.2, "Running MySQL Enterprise Backup (mysqlbackup)...")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    except FileNotFoundError as exc:
+        raise BackupError(
+            "Physical MySQL backup requires MySQL Enterprise Backup (`mysqlbackup`) "
+            "on this PC, or an SSH-enabled connection for a filesystem datadir snapshot."
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise BackupError(f"mysqlbackup failed: {detail}")
+    record_backup(
+        backup_dir.parent,
+        request,
+        {"path": str(backup_dir), "database": request.database or conn.database, "kind": "mysqlbackup"},
+        BackupMode.FULL,
+    )
+    return backup_dir
+
+
+def _mysql_physical_via_ssh(
+    request: BackupRequest,
+    output_path: Path,
+    conn,
+    ssh: dict,
+    progress_callback: Callable[[float, str], None] | None = None,
+) -> Path:
+    """Prefer remote mysqlbackup; fall back to consistent datadir tar snapshot."""
+    import shlex
+
+    from backend.services.ssh_client import (
+        _ssh_kwargs,
+        download_remote_file,
+        pg_endpoint_from_connection,
+        remove_remote_path,
+        run_ssh_command,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    archive = (
+        output_path
+        if str(output_path).lower().endswith((".tar.gz", ".tgz"))
+        else Path(str(output_path) + ".tar.gz")
+    )
+    remote_archive = f"/tmp/{archive.name}"
+    mysql_host, mysql_port = pg_endpoint_from_connection(conn)
+    linux_password = str(ssh.get("password") or "")
+    user = conn.username
+    password = conn.password
+
+    if progress_callback:
+        progress_callback(0.1, "Attempting MySQL Enterprise Backup on Linux...")
+
+    meb_dir = f"/tmp/meb_{archive.stem}"
+    meb_cmds = [
+        (
+            f"mysqlbackup --host={shlex.quote(mysql_host)} --port={mysql_port} "
+            f"--user={shlex.quote(user)} --password={shlex.quote(password)} "
+            f"--backup-dir={shlex.quote(meb_dir)} backup "
+            f"&& tar -czf {shlex.quote(remote_archive)} -C {shlex.quote(meb_dir)} . "
+            f"&& rm -rf {shlex.quote(meb_dir)}"
+        ),
+    ]
+    remove_remote_path(ssh, remote_archive)
+    meb_ok = False
+    for command in meb_cmds:
+        try:
+            code, _out, _err = run_ssh_command(
+                command=command,
+                timeout=7200,
+                **_ssh_kwargs(ssh),
+            )
+            if code == 0:
+                meb_ok = True
+                break
+        except Exception:
+            continue
+
+    if not meb_ok:
+        if progress_callback:
+            progress_callback(0.25, "Creating filesystem snapshot of MySQL datadir...")
+        # Hold FTWRL in the mysql client session while tar runs via \! shell escape.
+        remote_archive_q = shlex.quote(remote_archive)
+        snapshot = f"""
+set -e
+DATADIR=$(mysql -Nse 'SELECT @@datadir' 2>/dev/null || sudo -n mysql -Nse 'SELECT @@datadir' 2>/dev/null || true)
+if [ -z "$DATADIR" ]; then
+  DATADIR=$(printf '%s\\n' {shlex.quote(linux_password)} | sudo -S -p '' mysql -Nse 'SELECT @@datadir' 2>/dev/null || true)
+fi
+test -n "$DATADIR"
+MYSQL_BIN=mysql
+if ! command -v mysql >/dev/null 2>&1; then
+  echo 'mysql client not found' >&2
+  exit 1
+fi
+$MYSQL_BIN --batch <<EOF
+FLUSH TABLES WITH READ LOCK;
+\\\\! tar -czf {remote_archive_q} -C "$DATADIR" .
+UNLOCK TABLES;
+EOF
+test -s {remote_archive_q}
+""".strip()
+        # Also try sudo mysql client for privilege
+        snapshot_sudo = f"""
+set -e
+DATADIR=$(sudo -n mysql -Nse 'SELECT @@datadir')
+test -n "$DATADIR"
+sudo -n mysql --batch <<EOF
+FLUSH TABLES WITH READ LOCK;
+\\\\! tar -czf {remote_archive_q} -C "$DATADIR" .
+UNLOCK TABLES;
+EOF
+test -s {remote_archive_q}
+""".strip()
+        snapshot_sudo_pw = ""
+        if linux_password:
+            pw = shlex.quote(linux_password)
+            snapshot_sudo_pw = f"""
+set -e
+DATADIR=$(printf '%s\\n' {pw} | sudo -S -p '' mysql -Nse 'SELECT @@datadir')
+test -n "$DATADIR"
+printf '%s\\n' {pw} | sudo -S -p '' mysql --batch <<EOF
+FLUSH TABLES WITH READ LOCK;
+\\\\! tar -czf {remote_archive_q} -C "$DATADIR" .
+UNLOCK TABLES;
+EOF
+test -s {remote_archive_q}
+""".strip()
+
+        commands = [c for c in (snapshot_sudo, snapshot_sudo_pw, snapshot) if c]
+        snap_ok = False
+        last_err = ""
+        for command in commands:
+            try:
+                code, _out, err = run_ssh_command(
+                    command=command,
+                    timeout=7200,
+                    **_ssh_kwargs(ssh),
+                )
+            except Exception as exc:
+                last_err = str(exc)
+                continue
+            if code == 0:
+                snap_ok = True
+                break
+            last_err = (err or "").strip() or f"exit {code}"
+            remove_remote_path(ssh, remote_archive)
+        if not snap_ok:
+            raise BackupError(
+                "Physical MySQL backup failed. Install MySQL Enterprise Backup "
+                f"(mysqlbackup) on the server, or ensure SSH can archive @@datadir. {last_err}"
+            )
+
+    if progress_callback:
+        progress_callback(0.75, "Downloading physical MySQL archive...")
+    try:
+        download_remote_file(ssh, remote_archive, archive)
+    finally:
+        remove_remote_path(ssh, remote_archive)
+
+    if not archive.exists() or archive.stat().st_size <= 0:
+        raise BackupError("Physical MySQL backup archive is empty.")
+
+    record_backup(
+        archive.parent,
+        request,
+        {
+            "path": str(archive),
+            "database": request.database or conn.database,
+            "kind": "mysqlbackup" if meb_ok else "filesystem_snapshot",
+        },
+        BackupMode.FULL,
+    )
+    if progress_callback:
+        size_mb = archive.stat().st_size / (1024 * 1024)
+        progress_callback(0.95, f"Physical backup ready — {size_mb:.1f} MB")
+    return archive
 
 
 def _mysql_binlog_status(profile: str) -> dict[str, str | int]:

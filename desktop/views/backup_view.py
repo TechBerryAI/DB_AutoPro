@@ -12,6 +12,10 @@ from backend.models.schemas import (
     BackupMethod,
     BackupRequest,
     DatabaseType,
+    MySQLBackupScope,
+    MySQLDumpFormat,
+    PgBackupScope,
+    PgDumpFormat,
     backup_methods_for,
 )
 from backend.services.backup_catalog import (
@@ -21,9 +25,51 @@ from backend.services.backup_catalog import (
 )
 from backend.services.backup_service import BackupService
 from desktop.connection_store import SavedServer, load_saved_servers, upsert_server
-from desktop.db_catalog import fetch_mongodb_collections
+from desktop.db_catalog import (
+    fetch_mongodb_collections,
+    fetch_mysql_tables,
+    fetch_postgresql_schemas,
+    fetch_postgresql_tables,
+    fetch_server_databases,
+)
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
+
+PG_SCOPE_LABELS: list[tuple[str, PgBackupScope]] = [
+    ("Entire Database", PgBackupScope.ENTIRE_DATABASE),
+    ("Single Schema", PgBackupScope.SINGLE_SCHEMA),
+    ("Multiple Schemas", PgBackupScope.MULTIPLE_SCHEMAS),
+    ("Selected Tables", PgBackupScope.SELECTED_TABLES),
+    ("Data Only", PgBackupScope.DATA_ONLY),
+    ("Schema Only", PgBackupScope.SCHEMA_ONLY),
+    ("Selected Objects (Advanced)", PgBackupScope.SELECTED_OBJECTS),
+]
+
+PG_SCOPE_LABEL_TO_VALUE = {label: value for label, value in PG_SCOPE_LABELS}
+PG_SCOPE_VALUE_TO_LABEL = {value: label for label, value in PG_SCOPE_LABELS}
+
+PG_FORMAT_LABELS: list[tuple[str, PgDumpFormat]] = [
+    ("Plain SQL", PgDumpFormat.PLAIN),
+    ("Custom Format", PgDumpFormat.CUSTOM),
+    ("Tar Format", PgDumpFormat.TAR),
+    ("Directory Format", PgDumpFormat.DIRECTORY),
+]
+PG_FORMAT_LABEL_TO_VALUE = {label: value for label, value in PG_FORMAT_LABELS}
+PG_FORMAT_VALUE_TO_LABEL = {value: label for label, value in PG_FORMAT_LABELS}
+
+MYSQL_SCOPE_LABELS: list[tuple[str, MySQLBackupScope]] = [
+    ("Entire Database", MySQLBackupScope.ENTIRE_DATABASE),
+    ("Selected Tables", MySQLBackupScope.SELECTED_TABLES),
+    ("Data Only", MySQLBackupScope.DATA_ONLY),
+    ("Schema Only", MySQLBackupScope.SCHEMA_ONLY),
+]
+MYSQL_SCOPE_LABEL_TO_VALUE = {label: value for label, value in MYSQL_SCOPE_LABELS}
+
+MYSQL_FORMAT_LABELS: list[tuple[str, MySQLDumpFormat]] = [
+    ("Plain SQL (.sql)", MySQLDumpFormat.PLAIN),
+    ("Compressed SQL (.sql.gz)", MySQLDumpFormat.COMPRESSED),
+]
+MYSQL_FORMAT_LABEL_TO_VALUE = {label: value for label, value in MYSQL_FORMAT_LABELS}
 
 
 class BackupView(BaseView):
@@ -40,6 +86,10 @@ class BackupView(BaseView):
         self._mongodb_collections: list[dict] = []
         self._collection_rows: list[ctk.CTkFrame] = []
         self._selected_collection_name: str | None = None
+        self._scope_selected_targets: list[str] = []
+        self._scope_available_names: list[str] = []
+        self._tables_schema: str | None = None
+        self._schema_available_names: list[str] = []
         self._build_ui()
         self._init_remote_defaults()
         self._refresh_methods()
@@ -142,9 +192,37 @@ class BackupView(BaseView):
         conn_label = self.connection.name if self.connection else "default"
         ctk.CTkLabel(form, text=conn_label).grid(row=1, column=1, padx=16, pady=10, sticky="w")
 
-        ctk.CTkLabel(form, text="Backup Type:").grid(row=2, column=0, padx=16, pady=10, sticky="nw")
+        self.database_label = ctk.CTkLabel(form, text="Database:")
+        self.database_label.grid(row=2, column=0, padx=16, pady=10, sticky="nw")
+        db_col = ctk.CTkFrame(form, fg_color="transparent")
+        db_col.grid(row=2, column=1, padx=16, pady=10, sticky="ew")
+        db_col.grid_columnconfigure(0, weight=1)
+
+        self.database = ctk.CTkComboBox(
+            db_col,
+            values=[],
+            command=self._on_database_changed,
+        )
+        if self.connection and self.get_active_db_type() != DatabaseType.MONGODB:
+            self.database.set(self.connection.database or "")
+        self.database.pack(fill="x")
+
+        self.database_hint = ctk.CTkLabel(
+            db_col,
+            text="MongoDB: leave empty for a full server backup (all databases). Type a name to backup one database only.",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        )
+        self.database_hint.pack(anchor="w", pady=(6, 0))
+
+        self._populate_database_dropdown()
+
+        ctk.CTkLabel(form, text="Backup Type:").grid(row=3, column=0, padx=16, pady=10, sticky="nw")
         type_frame = ctk.CTkFrame(form, fg_color="transparent")
-        type_frame.grid(row=2, column=1, padx=16, pady=10, sticky="ew")
+        type_frame.grid(row=3, column=1, padx=16, pady=10, sticky="ew")
         type_frame.grid_columnconfigure(0, weight=1)
 
         self.category_seg = ctk.CTkSegmentedButton(
@@ -165,40 +243,118 @@ class BackupView(BaseView):
         )
         self.category_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
-        ctk.CTkLabel(form, text="Command:").grid(row=3, column=0, padx=16, pady=10, sticky="nw")
-        self.method = ctk.CTkComboBox(
-            form, values=["pg_dump"], command=self._on_method_changed
+        self.scope_label = ctk.CTkLabel(form, text="Backup Scope:")
+        self.scope_label.grid(row=4, column=0, padx=16, pady=10, sticky="nw")
+        self.scope_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self.scope_frame.grid(row=4, column=1, padx=16, pady=10, sticky="ew")
+        self.scope_frame.grid_columnconfigure(0, weight=1)
+
+        self.scope_combo = ctk.CTkComboBox(
+            self.scope_frame,
+            values=[label for label, _ in PG_SCOPE_LABELS],
+            command=self._on_scope_changed,
         )
-        self.method.set("pg_dump")
-        self.method.grid(row=3, column=1, padx=16, pady=10, sticky="ew")
+        self.scope_combo.set("Entire Database")
+        self.scope_combo.grid(row=0, column=0, sticky="ew")
 
-        ctk.CTkLabel(form, text="Database:").grid(row=4, column=0, padx=16, pady=10, sticky="nw")
-        db_col = ctk.CTkFrame(form, fg_color="transparent")
-        db_col.grid(row=4, column=1, padx=16, pady=10, sticky="ew")
-        db_col.grid_columnconfigure(0, weight=1)
-
-        self.database = ctk.CTkEntry(
-            db_col,
-            placeholder_text="Leave empty to backup all databases",
-        )
-        if self.connection and self.get_active_db_type() != DatabaseType.MONGODB:
-            self.database.insert(0, self.connection.database)
-        self.database.pack(fill="x")
-        self.database.bind("<KeyRelease>", self._on_database_changed)
-
-        self.database_hint = ctk.CTkLabel(
-            db_col,
-            text="MongoDB: leave empty for a full server backup (all databases). Type a name to backup one database only.",
+        self.scope_hint = ctk.CTkLabel(
+            self.scope_frame,
+            text="Full pg_dump of the selected PostgreSQL database.",
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             justify="left",
             anchor="w",
-            wraplength=520,
+            wraplength=560,
         )
-        self.database_hint.pack(anchor="w", pady=(6, 0))
+        self.scope_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        # Schema picker — shown only for PostgreSQL "Selected Tables".
+        self.schema_pick_label = ctk.CTkLabel(self.scope_frame, text="Schema:")
+        self.schema_pick_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.schema_pick_combo = ctk.CTkComboBox(
+            self.scope_frame,
+            values=["Select a schema first"],
+            command=self._on_tables_schema_selected,
+        )
+        self.schema_pick_combo.set("")
+        self.schema_pick_combo.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        self.schema_pick_hint = ctk.CTkLabel(
+            self.scope_frame,
+            text="Choose a schema first, then pick tables from that schema.",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=560,
+        )
+        self.schema_pick_hint.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        self.schema_pick_label.grid_remove()
+        self.schema_pick_combo.grid_remove()
+        self.schema_pick_hint.grid_remove()
+
+        self.scope_target_label = ctk.CTkLabel(self.scope_frame, text="Scope target(s):")
+        self.scope_target_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
+
+        self.scope_target_combo = ctk.CTkComboBox(
+            self.scope_frame,
+            values=["Loading..."],
+            command=self._on_scope_target_selected,
+        )
+        self.scope_target_combo.set("")
+        self.scope_target_combo.grid(row=6, column=0, sticky="ew", pady=(6, 0))
+
+        self.scope_target_entry = ctk.CTkEntry(self.scope_frame)
+        self.scope_target_entry.grid(row=6, column=0, sticky="ew", pady=(6, 0))
+        self.scope_target_entry.bind("<KeyRelease>", lambda _e: self._update_command_preview())
+        self.scope_target_entry.grid_remove()
+
+        self.scope_target_hint = ctk.CTkLabel(
+            self.scope_frame,
+            text="Choose a name from the dropdown.",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=560,
+        )
+        self.scope_target_hint.grid(row=7, column=0, sticky="ew", pady=(6, 0))
+
+        self.file_ext_label = ctk.CTkLabel(form, text="Backup Format:")
+        self.file_ext_label.grid(row=5, column=0, padx=16, pady=10, sticky="nw")
+        self.format_col = ctk.CTkFrame(form, fg_color="transparent")
+        self.format_col.grid(row=5, column=1, padx=16, pady=10, sticky="ew")
+        self.format_col.grid_columnconfigure(0, weight=1)
+        self.file_ext = ctk.CTkComboBox(
+            self.format_col,
+            values=[label for label, _ in PG_FORMAT_LABELS],
+            command=self._on_file_extension_changed,
+        )
+        self.file_ext.set("Custom Format")
+        self.file_ext.grid(row=0, column=0, sticky="ew")
+        self.format_hint = ctk.CTkLabel(
+            self.format_col,
+            text=(
+                "Custom Format is compressed and usually near DB size. "
+                "Plain SQL is text and can be many times larger — gzip is applied after dump."
+            ),
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=560,
+        )
+        self.format_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        self.command_label = ctk.CTkLabel(form, text="Command:")
+        self.command_label.grid(row=6, column=0, padx=16, pady=10, sticky="nw")
+        self.method = ctk.CTkComboBox(
+            form, values=["pg_dump"], command=self._on_method_changed
+        )
+        self.method.set("pg_dump")
+        self.method.grid(row=6, column=1, padx=16, pady=10, sticky="ew")
 
         self.collections_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.collections_frame.grid(row=5, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.collections_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.collections_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self.collections_frame, text="Collection:").grid(row=0, column=0, sticky="w", pady=6)
@@ -260,7 +416,7 @@ class BackupView(BaseView):
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.output_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.output_frame.grid(row=6, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.output_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.output_frame.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(self.output_frame, text="Output dir:").grid(row=0, column=0, sticky="w", pady=6)
@@ -323,7 +479,7 @@ class BackupView(BaseView):
         self.gzip_cb.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         self.remote_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.remote_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.remote_frame.grid(row=10, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.remote_frame.grid_columnconfigure(1, weight=1)
 
         self.use_remote_var = ctk.BooleanVar(value=False)
@@ -348,13 +504,13 @@ class BackupView(BaseView):
         self.remote_dir_entry.grid(row=2, column=1, padx=(12, 0), pady=6, sticky="ew")
         self.remote_dir_entry.bind("<KeyRelease>", lambda _e: self._update_command_preview())
 
-        ctk.CTkLabel(form, text="Preview:").grid(row=8, column=0, padx=16, pady=10, sticky="nw")
+        ctk.CTkLabel(form, text="Preview:").grid(row=11, column=0, padx=16, pady=10, sticky="nw")
         self.command_preview = ctk.CTkTextbox(form, height=88, activate_scrollbars=True)
-        self.command_preview.grid(row=8, column=1, padx=16, pady=10, sticky="ew")
+        self.command_preview.grid(row=11, column=1, padx=16, pady=10, sticky="ew")
         self.command_preview.configure(state="disabled")
 
         btn_frame = ctk.CTkFrame(form, fg_color="transparent")
-        btn_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
+        btn_frame.grid(row=12, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
 
         ctk.CTkButton(
             btn_frame,
@@ -412,6 +568,647 @@ class BackupView(BaseView):
         self.category_hint.configure(text=category_description(self._category))
         self._refresh_methods()
 
+    def _on_file_extension_changed(self, _value: str | None = None) -> None:
+        self._update_command_preview()
+
+    def _show_pg_scope(self) -> bool:
+        return (
+            self._active_db_type() == DatabaseType.POSTGRESQL
+            and self._category == BackupCategory.LOGICAL
+            and self._selected_method_value() == BackupMethod.PG_DUMP.value
+        )
+
+    def _show_mysql_scope(self) -> bool:
+        return (
+            self._active_db_type() == DatabaseType.MYSQL
+            and self._category == BackupCategory.LOGICAL
+            and self._selected_method_value() == BackupMethod.MYSQLDUMP.value
+        )
+
+    def _show_logical_scope(self) -> bool:
+        return self._show_pg_scope() or self._show_mysql_scope()
+
+    def _selected_pg_scope(self) -> PgBackupScope:
+        label = self.scope_combo.get()
+        return PG_SCOPE_LABEL_TO_VALUE.get(label, PgBackupScope.ENTIRE_DATABASE)
+
+    def _selected_mysql_scope(self) -> MySQLBackupScope:
+        label = self.scope_combo.get()
+        return MYSQL_SCOPE_LABEL_TO_VALUE.get(label, MySQLBackupScope.ENTIRE_DATABASE)
+
+    def _pg_scope_requires_targets(self, scope: PgBackupScope) -> bool:
+        return scope in (
+            PgBackupScope.SINGLE_SCHEMA,
+            PgBackupScope.MULTIPLE_SCHEMAS,
+            PgBackupScope.SELECTED_TABLES,
+            PgBackupScope.SELECTED_OBJECTS,
+        )
+
+    def _mysql_scope_requires_targets(self, scope: MySQLBackupScope) -> bool:
+        return scope == MySQLBackupScope.SELECTED_TABLES
+
+    def _pg_scope_uses_advanced_args(self, scope: PgBackupScope) -> bool:
+        return scope == PgBackupScope.SELECTED_OBJECTS
+
+    def _pg_scope_hint_text(self, scope: PgBackupScope) -> tuple[str, str, str]:
+        if scope == PgBackupScope.SINGLE_SCHEMA:
+            return (
+                "Back up one schema from the selected PostgreSQL database.",
+                "Schema:",
+                "Choose a schema from the dropdown.",
+            )
+        if scope == PgBackupScope.MULTIPLE_SCHEMAS:
+            return (
+                "Back up multiple schemas from the selected PostgreSQL database.",
+                "Schemas:",
+                "Choose schemas from the dropdown. Pick again to add another; all chosen names stay shown.",
+            )
+        if scope == PgBackupScope.SELECTED_TABLES:
+            return (
+                "Back up only the selected tables. Choose a schema first, then tables.",
+                "Tables:",
+                "Choose tables from the selected schema. Pick again to add another; all chosen names stay shown.",
+            )
+        if scope == PgBackupScope.DATA_ONLY:
+            return (
+                "Back up row data only; table definitions are excluded.",
+                "",
+                "",
+            )
+        if scope == PgBackupScope.SCHEMA_ONLY:
+            return (
+                "Back up schema definitions only; table data is excluded.",
+                "",
+                "",
+            )
+        if scope == PgBackupScope.SELECTED_OBJECTS:
+            return (
+                "Advanced pg_dump object filters. Use raw pg_dump selector arguments.",
+                "Advanced pg_dump args:",
+                "Example: --table=public.users --exclude-table-data=public.audit_log",
+            )
+        return (
+            "Full pg_dump of the selected PostgreSQL database.",
+            "",
+            "",
+        )
+
+    def _mysql_scope_hint_text(self, scope: MySQLBackupScope) -> tuple[str, str, str]:
+        if scope == MySQLBackupScope.SELECTED_TABLES:
+            return (
+                "Back up only the selected tables from the selected MySQL database.",
+                "Tables:",
+                "Choose tables from the dropdown. Pick again to add another; all chosen names stay shown.",
+            )
+        if scope == MySQLBackupScope.DATA_ONLY:
+            return (
+                "Back up row data only (--no-create-info); CREATE TABLE statements are excluded.",
+                "",
+                "",
+            )
+        if scope == MySQLBackupScope.SCHEMA_ONLY:
+            return (
+                "Back up schema definitions only (--no-data); table data is excluded.",
+                "",
+                "",
+            )
+        return (
+            "Full mysqldump of the selected MySQL database.",
+            "",
+            "",
+        )
+
+    def _parse_pg_scope_targets(self) -> list[str]:
+        scope = self._selected_pg_scope()
+        if scope == PgBackupScope.SELECTED_OBJECTS:
+            return []
+        if scope == PgBackupScope.SELECTED_TABLES:
+            if self._scope_selected_targets:
+                return [self._qualify_selected_table(t) for t in self._scope_selected_targets]
+            selected = self.scope_target_combo.get().strip()
+            if selected and selected not in (
+                "Loading...",
+                "No tables found",
+                "Select a database first",
+                "Select a schema first",
+                "Failed to load names",
+            ):
+                # Multi display or single unqualified name
+                parts = [item.strip() for item in selected.split(",") if item.strip()]
+                return [self._qualify_selected_table(p) for p in parts]
+            return []
+        if self._scope_selected_targets:
+            return list(self._scope_selected_targets)
+        selected = self.scope_target_combo.get().strip()
+        if selected and selected not in (
+            "Loading...",
+            "No schemas found",
+            "No tables found",
+            "Select a database first",
+            "Select a schema first",
+            "Failed to load names",
+        ):
+            return [item.strip() for item in selected.split(",") if item.strip()]
+        return []
+
+    def _parse_mysql_scope_targets(self) -> list[str]:
+        if self._scope_selected_targets:
+            return list(self._scope_selected_targets)
+        selected = self.scope_target_combo.get().strip()
+        if selected and selected not in (
+            "Loading...",
+            "No tables found",
+            "Select a database first",
+            "Failed to load names",
+        ):
+            return [item.strip() for item in selected.split(",") if item.strip()]
+        return []
+
+    def _on_scope_changed(self, _value: str | None = None) -> None:
+        self._scope_selected_targets = []
+        self._tables_schema = None
+        self._schema_available_names = []
+        self._sync_scope_visibility()
+        self._load_scope_targets()
+        self._update_command_preview()
+
+    def _on_pg_scope_changed(self, _value: str | None = None) -> None:
+        # Backward-compatible alias
+        self._on_scope_changed(_value)
+
+    def _selected_tables_schema(self) -> str | None:
+        if not hasattr(self, "schema_pick_combo"):
+            return self._tables_schema
+        value = self.schema_pick_combo.get().strip()
+        if value in (
+            "",
+            "Loading...",
+            "No schemas found",
+            "Select a database first",
+            "Select a schema first",
+            "Failed to load names",
+        ):
+            return None
+        return value
+
+    def _qualify_selected_table(self, table_name: str) -> str:
+        """Return schema.table for pg_dump --table=."""
+        name = table_name.strip()
+        if not name:
+            return name
+        if "." in name:
+            return name
+        schema = self._selected_tables_schema() or self._tables_schema or "public"
+        return f"{schema}.{name}"
+
+    def _on_tables_schema_selected(self, value: str | None = None) -> None:
+        selected = (value if value is not None else self.schema_pick_combo.get()).strip()
+        if selected in (
+            "",
+            "Loading...",
+            "No schemas found",
+            "Select a database first",
+            "Select a schema first",
+            "Failed to load names",
+        ):
+            return
+        if selected == self._tables_schema and self._scope_available_names:
+            return
+        self._tables_schema = selected
+        self._scope_selected_targets = []
+        self._load_tables_for_schema(selected)
+        self._update_command_preview()
+
+    def _on_scope_target_selected(self, value: str | None = None) -> None:
+        selected = (value if value is not None else self.scope_target_combo.get()).strip()
+        if not selected or selected in (
+            "Loading...",
+            "No schemas found",
+            "No tables found",
+            "Select a database first",
+            "Select a schema first",
+            "Failed to load names",
+            "",
+        ):
+            return
+
+        if "," in selected and selected not in self._scope_available_names:
+            return
+
+        if self._show_mysql_scope():
+            scope = self._selected_mysql_scope()
+            if scope == MySQLBackupScope.SELECTED_TABLES:
+                if selected not in self._scope_selected_targets:
+                    self._scope_selected_targets.append(selected)
+                self.scope_target_combo.set(", ".join(self._scope_selected_targets))
+            else:
+                self._scope_selected_targets = [selected]
+                self.scope_target_combo.set(selected)
+            self._update_command_preview()
+            return
+
+        scope = self._selected_pg_scope()
+        if scope == PgBackupScope.SINGLE_SCHEMA:
+            self._scope_selected_targets = [selected]
+            self.scope_target_combo.set(selected)
+        elif scope == PgBackupScope.SELECTED_TABLES:
+            qualified = self._qualify_selected_table(selected)
+            if qualified not in self._scope_selected_targets:
+                self._scope_selected_targets.append(qualified)
+            # Show short table names in the combo when they belong to the active schema.
+            schema = self._selected_tables_schema() or ""
+            display_parts: list[str] = []
+            for item in self._scope_selected_targets:
+                if schema and item.startswith(f"{schema}."):
+                    display_parts.append(item[len(schema) + 1 :])
+                else:
+                    display_parts.append(item)
+            self.scope_target_combo.set(", ".join(display_parts))
+        elif scope == PgBackupScope.MULTIPLE_SCHEMAS:
+            if selected not in self._scope_selected_targets:
+                self._scope_selected_targets.append(selected)
+            self.scope_target_combo.set(", ".join(self._scope_selected_targets))
+        else:
+            self._scope_selected_targets = [selected]
+            self.scope_target_combo.set(selected)
+        self._update_command_preview()
+
+    def _load_scope_targets(self) -> None:
+        if not self._show_logical_scope():
+            return
+
+        if self._show_mysql_scope():
+            scope = self._selected_mysql_scope()
+            if not self._mysql_scope_requires_targets(scope):
+                return
+            if not self.connection:
+                self._set_scope_target_values([], placeholder="Select a database first")
+                return
+            db_name = self._backup_database_name()
+            if not db_name:
+                self._set_scope_target_values([], placeholder="Select a database first")
+                return
+            self._set_scope_target_values([], placeholder="Loading...")
+
+            def mysql_task():
+                try:
+                    names = fetch_mysql_tables(self.connection, db_name)
+                    self.after(
+                        0,
+                        lambda: self._set_scope_target_values(
+                            names, placeholder="No tables found"
+                        ),
+                    )
+                except Exception:
+                    self.after(
+                        0,
+                        lambda: self._set_scope_target_values(
+                            [], placeholder="Failed to load names"
+                        ),
+                    )
+
+            threading.Thread(target=mysql_task, daemon=True).start()
+            return
+
+        scope = self._selected_pg_scope()
+        if not self._pg_scope_requires_targets(scope) or self._pg_scope_uses_advanced_args(scope):
+            return
+        if not self.connection:
+            if scope == PgBackupScope.SELECTED_TABLES:
+                self._set_schema_pick_values([], placeholder="Select a database first")
+                self._set_scope_target_values([], placeholder="Select a schema first")
+            else:
+                self._set_scope_target_values([], placeholder="Select a database first")
+            return
+
+        db_name = self._backup_database_name()
+        if not db_name:
+            if scope == PgBackupScope.SELECTED_TABLES:
+                self._set_schema_pick_values([], placeholder="Select a database first")
+                self._set_scope_target_values([], placeholder="Select a schema first")
+            else:
+                self._set_scope_target_values([], placeholder="Select a database first")
+            return
+
+        # Selected Tables: load schemas first; tables load after schema pick.
+        if scope == PgBackupScope.SELECTED_TABLES:
+            self._set_schema_pick_values([], placeholder="Loading...")
+            self._set_scope_target_values([], placeholder="Select a schema first")
+
+            def schema_task():
+                try:
+                    names = fetch_postgresql_schemas(self.connection, db_name)
+                    self.after(
+                        0,
+                        lambda: self._apply_schema_pick_values(
+                            names, placeholder="No schemas found"
+                        ),
+                    )
+                except Exception:
+                    self.after(
+                        0,
+                        lambda: self._set_schema_pick_values(
+                            [], placeholder="Failed to load names"
+                        ),
+                    )
+
+            threading.Thread(target=schema_task, daemon=True).start()
+            return
+
+        self._set_scope_target_values([], placeholder="Loading...")
+
+        def task():
+            try:
+                names = fetch_postgresql_schemas(self.connection, db_name)
+                empty = "No schemas found"
+                self.after(0, lambda: self._set_scope_target_values(names, placeholder=empty))
+            except Exception:
+                self.after(
+                    0,
+                    lambda: self._set_scope_target_values([], placeholder="Failed to load names"),
+                )
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _load_tables_for_schema(self, schema: str) -> None:
+        if not self.connection:
+            self._set_scope_target_values([], placeholder="Select a database first")
+            return
+        db_name = self._backup_database_name()
+        if not db_name:
+            self._set_scope_target_values([], placeholder="Select a database first")
+            return
+        self._set_scope_target_values([], placeholder="Loading...")
+
+        def task():
+            try:
+                names = fetch_postgresql_tables(self.connection, db_name, schema=schema)
+                self.after(
+                    0,
+                    lambda: self._set_scope_target_values(
+                        names, placeholder="No tables found", auto_select=False
+                    ),
+                )
+            except Exception:
+                self.after(
+                    0,
+                    lambda: self._set_scope_target_values(
+                        [], placeholder="Failed to load names", auto_select=False
+                    ),
+                )
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _set_schema_pick_values(self, names: list[str], *, placeholder: str) -> None:
+        if not hasattr(self, "schema_pick_combo"):
+            return
+        self._schema_available_names = names
+        if names:
+            self.schema_pick_combo.configure(values=names)
+            current = self._tables_schema if self._tables_schema in names else names[0]
+            self.schema_pick_combo.set(current)
+        else:
+            self.schema_pick_combo.configure(values=[placeholder])
+            self.schema_pick_combo.set(placeholder)
+            self._tables_schema = None
+
+    def _apply_schema_pick_values(self, names: list[str], *, placeholder: str) -> None:
+        if not hasattr(self, "schema_pick_combo"):
+            return
+        self._schema_available_names = names
+        self._scope_selected_targets = []
+        if not names:
+            self.schema_pick_combo.configure(values=[placeholder])
+            self.schema_pick_combo.set(placeholder)
+            self._tables_schema = None
+            self._set_scope_target_values([], placeholder="No tables found", auto_select=False)
+            return
+        preferred = self._tables_schema if self._tables_schema in names else names[0]
+        self._tables_schema = preferred
+        self.schema_pick_combo.configure(values=names)
+        self.schema_pick_combo.set(preferred)
+        self._load_tables_for_schema(preferred)
+
+    def _set_scope_target_values(
+        self, names: list[str], *, placeholder: str, auto_select: bool = True
+    ) -> None:
+        self._scope_available_names = names
+        if names:
+            self.scope_target_combo.configure(values=names)
+            if self._scope_selected_targets:
+                display = ", ".join(self._scope_selected_targets)
+                if self._selected_pg_scope() == PgBackupScope.SELECTED_TABLES:
+                    schema = self._selected_tables_schema() or ""
+                    display_parts = []
+                    for item in self._scope_selected_targets:
+                        if schema and item.startswith(f"{schema}."):
+                            display_parts.append(item[len(schema) + 1 :])
+                        else:
+                            display_parts.append(item)
+                    display = ", ".join(display_parts)
+                if (
+                    len(self._scope_selected_targets) == 1
+                    and self._scope_selected_targets[0] in names
+                ):
+                    self.scope_target_combo.set(self._scope_selected_targets[0])
+                else:
+                    self.scope_target_combo.set(display)
+            elif auto_select:
+                self.scope_target_combo.set(names[0])
+                # For Selected Tables, wait for explicit table picks (schema already chosen).
+                if self._show_pg_scope() and self._selected_pg_scope() == PgBackupScope.SELECTED_TABLES:
+                    self.scope_target_combo.set(names[0])
+                    self._scope_selected_targets = []
+                else:
+                    self._scope_selected_targets = [names[0]]
+                self._update_command_preview()
+            else:
+                self.scope_target_combo.set(names[0])
+                self._scope_selected_targets = []
+                self._update_command_preview()
+        else:
+            self.scope_target_combo.configure(values=[placeholder])
+            self.scope_target_combo.set(placeholder)
+
+    def _show_pg_file_extension(self) -> bool:
+        return (
+            self._active_db_type() == DatabaseType.POSTGRESQL
+            and self._category == BackupCategory.LOGICAL
+            and self._selected_method_value() == BackupMethod.PG_DUMP.value
+        )
+
+    def _show_mysql_file_extension(self) -> bool:
+        return (
+            self._active_db_type() == DatabaseType.MYSQL
+            and self._category == BackupCategory.LOGICAL
+            and self._selected_method_value() == BackupMethod.MYSQLDUMP.value
+        )
+
+    def _show_backup_format(self) -> bool:
+        return self._show_pg_file_extension() or self._show_mysql_file_extension()
+
+    def _configure_scope_format_options(self) -> None:
+        """Swap scope/format dropdown values for PostgreSQL vs MySQL."""
+        if not hasattr(self, "scope_combo") or not hasattr(self, "file_ext"):
+            return
+        if self._show_mysql_scope() or (
+            self._active_db_type() == DatabaseType.MYSQL
+            and self._category == BackupCategory.LOGICAL
+        ):
+            self.scope_combo.configure(values=[label for label, _ in MYSQL_SCOPE_LABELS])
+            current_scope = self.scope_combo.get()
+            if current_scope not in MYSQL_SCOPE_LABEL_TO_VALUE:
+                self.scope_combo.set("Entire Database")
+            self.file_ext.configure(values=[label for label, _ in MYSQL_FORMAT_LABELS])
+            current_fmt = self.file_ext.get()
+            if current_fmt not in MYSQL_FORMAT_LABEL_TO_VALUE:
+                self.file_ext.set("Plain SQL (.sql)")
+            self.format_hint.configure(
+                text=(
+                    "Plain SQL (.sql) is a text dump. "
+                    "Compressed SQL (.sql.gz) gzips the dump after mysqldump completes."
+                )
+            )
+        elif self._show_pg_scope() or (
+            self._active_db_type() == DatabaseType.POSTGRESQL
+            and self._category == BackupCategory.LOGICAL
+        ):
+            self.scope_combo.configure(values=[label for label, _ in PG_SCOPE_LABELS])
+            current_scope = self.scope_combo.get()
+            if current_scope not in PG_SCOPE_LABEL_TO_VALUE:
+                self.scope_combo.set("Entire Database")
+            self.file_ext.configure(values=[label for label, _ in PG_FORMAT_LABELS])
+            current_fmt = self.file_ext.get()
+            if current_fmt not in PG_FORMAT_LABEL_TO_VALUE:
+                self.file_ext.set("Custom Format")
+            self.format_hint.configure(
+                text=(
+                    "Custom Format is compressed and usually near DB size. "
+                    "Plain SQL is text and can be many times larger — gzip is applied after dump."
+                )
+            )
+
+    def _sync_scope_visibility(self) -> None:
+        if not hasattr(self, "scope_combo"):
+            return
+        self._configure_scope_format_options()
+        if not self._show_logical_scope():
+            self.scope_label.grid_remove()
+            self.scope_frame.grid_remove()
+            self._hide_schema_pick()
+            return
+
+        self.scope_label.grid()
+        self.scope_frame.grid()
+
+        if self._show_mysql_scope():
+            self._hide_schema_pick()
+            scope = self._selected_mysql_scope()
+            hint, target_label, target_hint = self._mysql_scope_hint_text(scope)
+            self.scope_hint.configure(text=hint)
+            if self._mysql_scope_requires_targets(scope):
+                self.scope_target_label.grid()
+                self.scope_target_hint.grid()
+                self.scope_target_label.configure(text=target_label)
+                self.scope_target_hint.configure(text=target_hint)
+                self.scope_target_entry.grid_remove()
+                self.scope_target_combo.grid()
+            else:
+                self.scope_target_label.grid_remove()
+                self.scope_target_entry.grid_remove()
+                self.scope_target_combo.grid_remove()
+                self.scope_target_hint.grid_remove()
+            return
+
+        scope = self._selected_pg_scope()
+        hint, target_label, target_hint = self._pg_scope_hint_text(scope)
+        self.scope_hint.configure(text=hint)
+
+        if scope == PgBackupScope.SELECTED_TABLES:
+            self._show_schema_pick()
+            self.scope_target_label.grid()
+            self.scope_target_hint.grid()
+            self.scope_target_label.configure(text=target_label)
+            self.scope_target_hint.configure(text=target_hint)
+            self.scope_target_entry.grid_remove()
+            self.scope_target_combo.grid()
+            return
+
+        self._hide_schema_pick()
+        if self._pg_scope_requires_targets(scope):
+            self.scope_target_label.grid()
+            self.scope_target_hint.grid()
+            self.scope_target_label.configure(text=target_label)
+            self.scope_target_hint.configure(text=target_hint)
+            if self._pg_scope_uses_advanced_args(scope):
+                self.scope_target_combo.grid_remove()
+                self.scope_target_entry.grid()
+            else:
+                self.scope_target_entry.grid_remove()
+                self.scope_target_combo.grid()
+        else:
+            self.scope_target_label.grid_remove()
+            self.scope_target_entry.grid_remove()
+            self.scope_target_combo.grid_remove()
+            self.scope_target_hint.grid_remove()
+
+    def _show_schema_pick(self) -> None:
+        if not hasattr(self, "schema_pick_combo"):
+            return
+        self.schema_pick_label.grid()
+        self.schema_pick_combo.grid()
+        self.schema_pick_hint.grid()
+
+    def _hide_schema_pick(self) -> None:
+        if not hasattr(self, "schema_pick_combo"):
+            return
+        self.schema_pick_label.grid_remove()
+        self.schema_pick_combo.grid_remove()
+        self.schema_pick_hint.grid_remove()
+
+    def _sync_pg_scope_visibility(self) -> None:
+        self._sync_scope_visibility()
+
+    def _sync_format_visibility(self) -> None:
+        if not hasattr(self, "file_ext"):
+            return
+        self._configure_scope_format_options()
+        if self._show_backup_format():
+            self.file_ext_label.grid()
+            self.format_col.grid()
+            self.file_ext.configure(state="normal")
+        else:
+            self.file_ext_label.grid_remove()
+            self.format_col.grid_remove()
+
+    def _sync_pg_file_extension_visibility(self) -> None:
+        self._sync_format_visibility()
+
+    def _selected_pg_dump_format(self) -> PgDumpFormat | None:
+        if not self._show_pg_file_extension():
+            return None
+        label = self.file_ext.get()
+        return PG_FORMAT_LABEL_TO_VALUE.get(label, PgDumpFormat.CUSTOM)
+
+    def _selected_mysql_dump_format(self) -> MySQLDumpFormat | None:
+        if not self._show_mysql_file_extension():
+            return None
+        label = self.file_ext.get()
+        return MYSQL_FORMAT_LABEL_TO_VALUE.get(label, MySQLDumpFormat.PLAIN)
+
+    def _selected_pg_file_extension(self) -> str | None:
+        """Legacy helper kept for callers; prefer _selected_pg_dump_format."""
+        fmt = self._selected_pg_dump_format()
+        if fmt is None:
+            return None
+        if fmt == PgDumpFormat.PLAIN:
+            return "sql"
+        if fmt == PgDumpFormat.TAR:
+            return "tar"
+        if fmt == PgDumpFormat.DIRECTORY:
+            return "directory"
+        return "dump"
+
     def _on_method_changed(self, _value: str | None = None) -> None:
         self._sync_form_state()
         self._update_command_preview()
@@ -428,6 +1225,9 @@ class BackupView(BaseView):
             self.method.set("(not available for this type)")
         self._sync_form_state()
         self._sync_mongo_fields()
+        self._sync_pg_scope_visibility()
+        self._sync_pg_file_extension_visibility()
+        self._load_scope_targets()
         self._update_command_preview()
 
     def _on_output_dir_changed(self) -> None:
@@ -450,8 +1250,36 @@ class BackupView(BaseView):
         return self.use_remote_var.get() and self._is_mongodb_session()
 
     def _on_database_changed(self, _event=None) -> None:
+        self._scope_selected_targets = []
         self._sync_mongo_fields()
+        self._load_scope_targets()
         self._update_command_preview()
+
+    def _populate_database_dropdown(self) -> None:
+        """Fetch databases from the server in a background thread and populate the dropdown."""
+        if not self.connection:
+            return
+
+        def task():
+            try:
+                dbs = fetch_server_databases(self.connection)
+                names = [d["name"] for d in dbs if d.get("name")]
+                self.after(0, lambda: self._set_database_values(names))
+            except Exception:
+                pass
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _set_database_values(self, names: list[str]) -> None:
+        current = self.database.get().strip()
+        self.database.configure(values=names)
+        if current and current in names:
+            self.database.set(current)
+        elif names and not current:
+            if self.connection and self.connection.database and self.connection.database in names:
+                self.database.set(self.connection.database)
+            else:
+                self.database.set(names[0])
 
     def _backup_database_name(self) -> str | None:
         return self.database.get().strip() or None
@@ -682,12 +1510,18 @@ class BackupView(BaseView):
     def _sync_form_state(self) -> None:
         method_value = self._selected_method_value()
         physical = self._category == BackupCategory.PHYSICAL
-        cluster_wide = method_value in (BackupMethod.PG_DUMPALL.value, BackupMethod.PG_BASEBACKUP.value)
+        cluster_wide = method_value in (
+            BackupMethod.PG_DUMPALL.value,
+            BackupMethod.PG_BASEBACKUP.value,
+            BackupMethod.MYSQL_PHYSICAL.value,
+        )
 
         if cluster_wide or physical:
             self.database.configure(state="disabled")
         else:
             self.database.configure(state="normal")
+        self._sync_scope_visibility()
+        self._sync_format_visibility()
 
     def _selected_method_value(self) -> str:
         label = self.method.get()
@@ -704,6 +1538,38 @@ class BackupView(BaseView):
         remote = self._is_remote_backup()
         local_dir = self.output_dir_entry.get().strip() or None
         db_name = self._backup_database_name()
+        # Physical MySQL snapshots the instance; keep selected DB for naming when available.
+        if method_value == BackupMethod.MYSQL_PHYSICAL.value and not db_name and self.connection:
+            db_name = self.connection.database or None
+
+        pg_scope = self._selected_pg_scope() if self._show_pg_scope() else None
+        pg_scope_targets = self._parse_pg_scope_targets() if pg_scope else []
+        pg_advanced_args = None
+        if pg_scope == PgBackupScope.SINGLE_SCHEMA and len(pg_scope_targets) != 1:
+            raise ValueError("Single Schema scope requires exactly one schema name.")
+        if pg_scope == PgBackupScope.SELECTED_TABLES:
+            if not self._selected_tables_schema():
+                raise ValueError("Selected Tables requires choosing a schema first.")
+            if not pg_scope_targets:
+                raise ValueError("Selected Tables requires at least one table from the chosen schema.")
+        if pg_scope == PgBackupScope.MULTIPLE_SCHEMAS and not pg_scope_targets:
+            raise ValueError("Enter one or more comma-separated targets for the selected backup scope.")
+        if pg_scope == PgBackupScope.SELECTED_OBJECTS:
+            pg_advanced_args = self.scope_target_entry.get().strip() or None
+            if not pg_advanced_args:
+                raise ValueError("Selected Objects (Advanced) requires pg_dump selector arguments.")
+
+        mysql_scope = self._selected_mysql_scope() if self._show_mysql_scope() else None
+        mysql_scope_targets = self._parse_mysql_scope_targets() if mysql_scope else []
+        if mysql_scope == MySQLBackupScope.SELECTED_TABLES and not mysql_scope_targets:
+            raise ValueError("Selected Tables scope requires at least one MySQL table.")
+        if (
+            self._active_db_type() == DatabaseType.MYSQL
+            and self._category == BackupCategory.LOGICAL
+            and not db_name
+        ):
+            raise ValueError("Select a MySQL database to back up.")
+
         return BackupRequest(
             profile=self.get_active_profile(),
             db_type=self._active_db_type(),
@@ -717,6 +1583,14 @@ class BackupView(BaseView):
             backup_folder_name=self.backup_folder_entry.get().strip() or None,
             collection=self._selected_collection() if db_name else None,
             gzip_archive=bool(self.gzip_var.get()) if self._is_mongodb_session() else False,
+            pg_dump_format=self._selected_pg_dump_format(),
+            pg_file_extension=self._selected_pg_file_extension(),
+            pg_backup_scope=pg_scope,
+            pg_scope_targets=pg_scope_targets,
+            pg_advanced_args=pg_advanced_args,
+            mysql_dump_format=self._selected_mysql_dump_format(),
+            mysql_backup_scope=mysql_scope,
+            mysql_scope_targets=mysql_scope_targets,
         )
 
     def _update_command_preview(self) -> None:
@@ -734,10 +1608,23 @@ class BackupView(BaseView):
         self.command_preview.configure(state="disabled")
 
     def _update_progress(self, value: float, message: str) -> None:
-        self.after(0, lambda: self.progress.set(value))
-        self.after(0, lambda: self.status_label.configure(text=message))
+        self.after(0, lambda v=value, m=message: self.progress.set(v))
+        self.after(0, lambda m=message: self.status_label.configure(text=m))
+
+        def _refresh_results(msg: str = message) -> None:
+            if not hasattr(self, "results"):
+                return
+            self.results.delete("1.0", "end")
+            self.results.insert("end", f"Backup in progress...\n{msg}\n")
+
+        self.after(0, _refresh_results)
 
     def _run_backup(self) -> None:
+        self.progress.set(0.02)
+        self.status_label.configure(text="Starting backup...")
+        self.results.delete("1.0", "end")
+        self.results.insert("end", "Backup in progress...\n")
+
         def task():
             try:
                 request = self._build_request()
@@ -747,15 +1634,28 @@ class BackupView(BaseView):
                     self.log(f"Single collection: {request.database}.{request.collection}")
                 result = self.service.create_backup(request, progress_callback=self._update_progress)
                 self.after(0, self._save_mongo_prefs)
-                self.after(
-                    0,
-                    lambda p=result.output_path: self.results.insert(
-                        "end", f"[{category}] Success:\n{p}\n\nOpen the backups folder or click List Backups.\n"
-                    ),
-                )
+
+                def show_success(path: str = result.output_path) -> None:
+                    self.results.delete("1.0", "end")
+                    self.results.insert(
+                        "end",
+                        f"[{category}] Success:\n{path}\n\n"
+                        "Open the backups folder or click List Backups.\n",
+                    )
+                    self.progress.set(1.0)
+                    self.status_label.configure(text="Backup completed")
+
+                self.after(0, show_success)
                 self.log(f"Backup completed: {result.output_path}")
             except Exception as exc:
-                self.after(0, lambda: self.results.insert("end", f"Error: {exc}\n"))
+                message = str(exc)
+
+                def show_error(msg: str = message) -> None:
+                    self.results.delete("1.0", "end")
+                    self.results.insert("end", f"Error: {msg}\n")
+                    self.status_label.configure(text="Backup failed")
+
+                self.after(0, show_error)
                 self.log(f"Backup failed: {exc}", "ERROR")
 
         threading.Thread(target=task, daemon=True).start()
