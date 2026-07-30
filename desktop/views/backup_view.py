@@ -81,7 +81,8 @@ class BackupView(BaseView):
         super().__init__(master, theme, log_callback, **kwargs)
         self.service = BackupService()
         self._category = BackupCategory.LOGICAL
-        self._local_output_dir = str(self.service.output_dir)
+        # Path starts empty — user must type or browse (File / Folder). No project default.
+        self._local_output_dir = ""
         self._remote_output_dir = "/mnt/backup"
         self._mongodb_collections: list[dict] = []
         self._collection_rows: list[ctk.CTkFrame] = []
@@ -107,10 +108,6 @@ class BackupView(BaseView):
 
         saved = self._find_saved_server()
         if saved:
-            if saved.local_output_dir:
-                self._local_output_dir = saved.local_output_dir
-                self.output_dir_entry.delete(0, "end")
-                self.output_dir_entry.insert(0, saved.local_output_dir)
             if saved.backup_folder_name:
                 self.backup_folder_entry.delete(0, "end")
                 self.backup_folder_entry.insert(0, saved.backup_folder_name)
@@ -335,7 +332,7 @@ class BackupView(BaseView):
             self.format_col,
             text=(
                 "Custom Format is compressed and usually near DB size. "
-                "Plain SQL is text and can be many times larger — gzip is applied after dump."
+                "Plain SQL is uncompressed text (.sql) and can be many times larger."
             ),
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
@@ -419,7 +416,9 @@ class BackupView(BaseView):
         self.output_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.output_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.output_frame, text="Output dir:").grid(row=0, column=0, sticky="w", pady=6)
+        ctk.CTkLabel(self.output_frame, text="Local backup path:").grid(
+            row=0, column=0, sticky="w", pady=6
+        )
 
         output_path_row = ctk.CTkFrame(self.output_frame, fg_color="transparent")
         output_path_row.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
@@ -427,32 +426,41 @@ class BackupView(BaseView):
 
         self.output_dir_entry = ctk.CTkEntry(
             output_path_row,
-            placeholder_text="Folder on this PC where backup files are saved",
+            placeholder_text="File or folder path — type or browse any backup location",
         )
-        self.output_dir_entry.insert(0, self._local_output_dir)
         self.output_dir_entry.grid(row=0, column=0, sticky="ew")
         self.output_dir_entry.bind("<KeyRelease>", lambda _e: self._on_output_dir_changed())
 
         ctk.CTkButton(
             output_path_row,
-            text="Browse",
-            width=90,
-            command=self._browse_output_dir,
+            text="File",
+            width=60,
+            command=self._browse_backup_file,
         ).grid(row=0, column=1, padx=(8, 0))
 
-        ctk.CTkLabel(
+        ctk.CTkButton(
+            output_path_row,
+            text="Folder",
+            width=70,
+            command=self._browse_backup_folder,
+        ).grid(row=0, column=2, padx=(6, 0))
+
+        self.backup_path_hint = ctk.CTkLabel(
             self.output_frame,
             text=(
-                "Folder on this PC. With remote unchecked, mongodump runs on the Linux server "
-                "and files are downloaded here. Click Browse to choose the folder."
+                "Pick a file or folder on this PC where the backup will be saved. "
+                "No default path — select it manually each time."
             ),
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             justify="left",
             anchor="w",
-        ).grid(row=1, column=1, padx=(12, 0), sticky="w")
+            wraplength=560,
+        )
+        self.backup_path_hint.grid(row=1, column=1, padx=(12, 0), sticky="w")
 
-        ctk.CTkLabel(self.output_frame, text="Backup folder:").grid(row=2, column=0, sticky="w", pady=6)
+        self.mongo_folder_label = ctk.CTkLabel(self.output_frame, text="Backup folder:")
+        self.mongo_folder_label.grid(row=2, column=0, sticky="w", pady=6)
         self.backup_folder_entry = ctk.CTkEntry(
             self.output_frame,
             placeholder_text="e.g. db_backup or prod_db1 (timestamp added automatically)",
@@ -460,14 +468,15 @@ class BackupView(BaseView):
         self.backup_folder_entry.grid(row=2, column=1, padx=(12, 0), pady=6, sticky="ew")
         self.backup_folder_entry.bind("<KeyRelease>", lambda _e: self._update_command_preview())
 
-        ctk.CTkLabel(
+        self.mongo_folder_hint = ctk.CTkLabel(
             self.output_frame,
             text="Optional. Use <timestamp> in the name to control where the date is added.",
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             justify="left",
             anchor="w",
-        ).grid(row=3, column=1, padx=(12, 0), sticky="w")
+        )
+        self.mongo_folder_hint.grid(row=3, column=1, padx=(12, 0), sticky="w")
 
         self.gzip_var = ctk.BooleanVar(value=False)
         self.gzip_cb = ctk.CTkCheckBox(
@@ -1084,7 +1093,7 @@ class BackupView(BaseView):
             self.format_hint.configure(
                 text=(
                     "Custom Format is compressed and usually near DB size. "
-                    "Plain SQL is text and can be many times larger — gzip is applied after dump."
+                    "Plain SQL is uncompressed text (.sql) and can be many times larger."
                 )
             )
 
@@ -1231,20 +1240,84 @@ class BackupView(BaseView):
         self._update_command_preview()
 
     def _on_output_dir_changed(self) -> None:
-        self._local_output_dir = self.output_dir_entry.get().strip() or self._local_output_dir
+        path = self.output_dir_entry.get().strip()
+        self._local_output_dir = path
         self._update_command_preview()
 
-    def _browse_output_dir(self) -> None:
-        initial = self.output_dir_entry.get().strip() or self._local_output_dir
-        path = filedialog.askdirectory(
-            title="Select folder on this PC to save backup files",
-            initialdir=initial if initial else None,
+    def _browse_initial_dir(self) -> str | None:
+        current = self.output_dir_entry.get().strip() or self._local_output_dir
+        if not current:
+            return None
+        from pathlib import Path
+
+        p = Path(current)
+        if p.is_dir():
+            return str(p)
+        if p.parent.exists():
+            return str(p.parent)
+        return None
+
+    def _browse_backup_file(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Choose backup file location",
+            initialdir=self._browse_initial_dir(),
+            defaultextension=".dump",
+            filetypes=[
+                ("Custom dump", "*.dump"),
+                ("SQL files", "*.sql"),
+                ("Gzip SQL", "*.sql.gz"),
+                ("Tar archive", "*.tar"),
+                ("All files", "*.*"),
+            ],
         )
         if path:
-            self._local_output_dir = path
-            self.output_dir_entry.delete(0, "end")
-            self.output_dir_entry.insert(0, path)
-            self._update_command_preview()
+            self._apply_backup_path(path)
+
+    def _browse_backup_folder(self) -> None:
+        path = filedialog.askdirectory(
+            title="Select folder on this PC to save backup files",
+            initialdir=self._browse_initial_dir(),
+        )
+        if path:
+            self._apply_backup_path(path)
+
+    def _browse_output_dir(self) -> None:
+        # Compatibility alias used by older callers.
+        self._browse_backup_folder()
+
+    def _apply_backup_path(self, path: str) -> None:
+        self._local_output_dir = path
+        self.output_dir_entry.delete(0, "end")
+        self.output_dir_entry.insert(0, path)
+        self._update_command_preview()
+
+    def _resolve_backup_destination(self) -> tuple[str | None, str | None]:
+        """Return (output_path, local_output_dir) from the Local backup path field."""
+        from pathlib import Path
+
+        raw = self.output_dir_entry.get().strip() or self._local_output_dir
+        if not raw:
+            return None, None
+
+        path = Path(raw)
+        lowered = raw.lower()
+        file_markers = (
+            ".sql.gz",
+            ".tar.gz",
+            ".sql",
+            ".dump",
+            ".tar",
+            ".bak",
+            ".tgz",
+            ".archive",
+        )
+        looks_like_file = any(lowered.endswith(ext) for ext in file_markers)
+        if looks_like_file or (path.suffix and not path.is_dir()):
+            parent = path.parent
+            if str(parent) in ("", "."):
+                raise ValueError("Choose a full file path (including the destination folder).")
+            return str(path), str(parent)
+        return None, str(path)
 
     def _is_remote_backup(self) -> bool:
         return self.use_remote_var.get() and self._is_mongodb_session()
@@ -1489,19 +1562,27 @@ class BackupView(BaseView):
     def _sync_mongo_fields(self) -> None:
         is_mongo = self._is_mongodb_session()
         has_db = bool(self._backup_database_name())
+        # Local backup path is always available for every engine.
+        self.output_frame.grid()
         if is_mongo:
-            self.output_frame.grid()
             self.remote_frame.grid()
             self.database_hint.pack(anchor="w", pady=(6, 0))
+            self.mongo_folder_label.grid()
+            self.backup_folder_entry.grid()
+            self.mongo_folder_hint.grid()
+            self.gzip_cb.grid()
             if has_db:
                 self.collections_frame.grid()
             else:
                 self.collections_frame.grid_remove()
         else:
-            self.output_frame.grid_remove()
             self.remote_frame.grid_remove()
             self.collections_frame.grid_remove()
             self.database_hint.pack_forget()
+            self.mongo_folder_label.grid_remove()
+            self.backup_folder_entry.grid_remove()
+            self.mongo_folder_hint.grid_remove()
+            self.gzip_cb.grid_remove()
 
         remote_on = self._is_remote_backup()
         self.remote_binary.configure(state="normal")
@@ -1536,7 +1617,7 @@ class BackupView(BaseView):
             raise ValueError(f"No backup command available for {self._category.value} backups")
 
         remote = self._is_remote_backup()
-        local_dir = self.output_dir_entry.get().strip() or None
+        output_path, local_dir = self._resolve_backup_destination()
         db_name = self._backup_database_name()
         # Physical MySQL snapshots the instance; keep selected DB for naming when available.
         if method_value == BackupMethod.MYSQL_PHYSICAL.value and not db_name and self.connection:
@@ -1570,13 +1651,19 @@ class BackupView(BaseView):
         ):
             raise ValueError("Select a MySQL database to back up.")
 
+        if not remote and not (output_path or local_dir):
+            raise ValueError("Choose a Local backup path (file or folder) for the backup.")
+
         return BackupRequest(
             profile=self.get_active_profile(),
             db_type=self._active_db_type(),
             method=BackupMethod(method_value),
             database=db_name,
             compress=False,
-            local_output_dir=local_dir if self._is_mongodb_session() and not remote else None,
+            output_path=output_path if not remote else None,
+            local_output_dir=local_dir if not remote else (
+                local_dir if self._is_mongodb_session() else None
+            ),
             use_remote_exec=remote,
             remote_binary_path=self.remote_binary.get().strip() or None,
             remote_output_dir=self.remote_dir_entry.get().strip() or None,
@@ -1597,8 +1684,9 @@ class BackupView(BaseView):
         try:
             request = self._build_request()
             preview = describe_backup_command(request)
-            # if request.compress and self._category == BackupCategory.LOGICAL:
-            #     preview += "  →  gzip compression after export"
+            dest = self.output_dir_entry.get().strip() or self._local_output_dir
+            if dest and not self._is_remote_backup():
+                preview = f"{preview}\n# Local backup path: {dest}"
         except ValueError as exc:
             preview = str(exc)
 
@@ -1608,8 +1696,22 @@ class BackupView(BaseView):
         self.command_preview.configure(state="disabled")
 
     def _update_progress(self, value: float, message: str) -> None:
-        self.after(0, lambda v=value, m=message: self.progress.set(v))
-        self.after(0, lambda m=message: self.status_label.configure(text=m))
+        import time
+
+        now = time.monotonic()
+        self._latest_progress = (value, message)
+
+        def _apply(v: float = value, m: str = message) -> None:
+            self.progress.set(v)
+            self.status_label.configure(text=m)
+
+        self.after(0, _apply)
+
+        # Throttle Results pane rewrites so UI stays responsive during streaming.
+        last = getattr(self, "_last_results_progress_at", 0.0)
+        if now - last < 1.5:
+            return
+        self._last_results_progress_at = now
 
         def _refresh_results(msg: str = message) -> None:
             if not hasattr(self, "results"):
@@ -1664,9 +1766,16 @@ class BackupView(BaseView):
         list_remote = self._is_remote_backup()
         local_dir = self.output_dir_entry.get().strip() or self._local_output_dir
         remote_dir = self.remote_dir_entry.get().strip() or self._remote_output_dir
+        if not list_remote and not local_dir:
+            self.results.delete("1.0", "end")
+            self.results.insert(
+                "end",
+                "Choose a Local backup path (File or Folder) first, then click List Backups.\n",
+            )
+            return
         backups = self.service.list_backups(
             self.get_active_profile(),
-            local_dir=local_dir,
+            local_dir=local_dir or None,
             remote_dir=remote_dir,
             list_remote=list_remote,
         )

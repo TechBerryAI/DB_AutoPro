@@ -27,6 +27,7 @@ from backend.services.restore_catalog import (
 )
 from backend.services.restore_service import RestoreService
 from desktop.connection_store import SavedServer, load_saved_servers
+from desktop.db_catalog import fetch_server_databases
 from desktop.remote_directory_browser import RemoteDirectoryBrowser
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
@@ -47,6 +48,7 @@ class RestoreView(BaseView):
         self._init_restore_defaults()
         self._sync_mongo_fields()
         self._refresh_methods()
+        self._populate_database_dropdown()
 
     def _init_restore_defaults(self) -> None:
         if not self._is_mongodb_session():
@@ -191,16 +193,23 @@ class RestoreView(BaseView):
         db_col.grid(row=5, column=1, padx=16, pady=10, sticky="ew")
         db_col.grid_columnconfigure(0, weight=1)
 
-        self.database = ctk.CTkEntry(
+        initial_db = ""
+        if self.connection and self.connection.database:
+            initial_db = self.connection.database
+        self.database = ctk.CTkComboBox(
             db_col,
-            placeholder_text="Target database name (e.g. db1)",
+            values=[initial_db] if initial_db else [""],
+            command=self._on_database_changed,
         )
+        if initial_db:
+            self.database.set(initial_db)
+        else:
+            self.database.set("")
         self.database.pack(fill="x")
-        self.database.bind("<KeyRelease>", self._on_database_changed)
 
         self.database_hint = ctk.CTkLabel(
             db_col,
-            text="Target database name (created automatically if it does not exist).",
+            text="Select the target database from the list on this server.",
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             justify="left",
@@ -492,12 +501,41 @@ class RestoreView(BaseView):
                 return scope
         return MongoRestoreScope.SPECIFIC_DATABASE
 
-    def _on_database_changed(self, _event=None) -> None:
+    def _on_database_changed(self, _value: str | None = None) -> None:
         self._sync_mongo_fields()
         self._update_command_preview()
 
     def _restore_database_name(self) -> str | None:
         return self.database.get().strip() or None
+
+    def _populate_database_dropdown(self) -> None:
+        """Fetch databases from the connected server and fill the Database dropdown."""
+        if not self.connection:
+            return
+
+        def task() -> None:
+            try:
+                dbs = fetch_server_databases(self.connection)
+                names = [d["name"] for d in dbs if d.get("name")]
+                self.after(0, lambda: self._set_database_values(names))
+            except Exception:
+                pass
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _set_database_values(self, names: list[str]) -> None:
+        if not hasattr(self, "database"):
+            return
+        current = self.database.get().strip()
+        values = names or ([current] if current else [""])
+        self.database.configure(values=values)
+        if current and current in values:
+            self.database.set(current)
+        elif self.connection and self.connection.database and self.connection.database in values:
+            self.database.set(self.connection.database)
+        elif names:
+            self.database.set(names[0])
+        self._update_command_preview()
 
     def _sync_mongo_fields(self) -> None:
         self._sync_category_controls()
@@ -532,7 +570,7 @@ class RestoreView(BaseView):
             else:
                 self.database.configure(state="normal")
                 self.database_hint.configure(
-                    text="Target database name (created automatically if it does not exist)."
+                    text="Select the target database from the list on this server."
                 )
                 if scope in (MongoRestoreScope.SPECIFIC_DATABASE, MongoRestoreScope.SINGLE_COLLECTION):
                     self.drop_cb.grid()
@@ -555,7 +593,11 @@ class RestoreView(BaseView):
             self.backup_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
             self.collection_frame.grid_remove()
             self.gzip_cb.grid_remove()
-            self.database_hint.pack_forget()
+            self.database.configure(state="normal")
+            self.database_hint.configure(
+                text="Select the target database from the list on this server."
+            )
+            self.database_hint.pack(anchor="w", pady=(6, 0))
 
         if is_mongo:
             self.remote_binary.configure(state="normal" if remote_on else "disabled")

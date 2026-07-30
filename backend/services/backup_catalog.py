@@ -95,10 +95,14 @@ def build_pg_dump_format_args(request: BackupRequest) -> list[str]:
 
 
 def build_pg_dump_common_args(request: BackupRequest) -> list[str]:
-    """Flags applied to every pg_dump run (preview and execution)."""
+    """Flags applied to every pg_dump run (preview and execution).
+
+    Do not add -v here: verbose stderr over SSH slows streaming and makes
+    small schema backups feel stuck while progress barely moves.
+    """
     if request.db_type != DatabaseType.POSTGRESQL or request.method != BackupMethod.PG_DUMP:
         return []
-    return ["-v"]
+    return []
 
 
 def build_pg_dump_extra_args(request: BackupRequest) -> list[str]:
@@ -411,12 +415,12 @@ def describe_backup_command(request: BackupRequest) -> str:
             note = (
                 "# Streams pg_dump over SSH to this PC (no /tmp copy + download); "
                 f"saved under {local_hint}"
-                if ssh_user in ("root", "postgres")
-                else (
-                    "# Streams pg_dump over SSH to this PC (no /tmp copy + download); "
-                    f"saved under {local_hint}"
-                )
             )
+            if (
+                request.method != BackupMethod.PG_DUMPALL
+                and resolve_pg_dump_format(request) == PgDumpFormat.PLAIN
+            ) or request.method == BackupMethod.PG_DUMPALL:
+                note += "\n# Plain SQL: gzip on the wire for speed; file on this PC is still .sql"
             return f"ssh {ssh_user}@{ssh_host} → {remote_cmd}\n{note}"
         if request.method == BackupMethod.PG_DUMPALL:
             return f"pg_dumpall -h {host} -p {port} -U {user} -f <output.sql>{tunnel}"

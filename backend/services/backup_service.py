@@ -62,8 +62,8 @@ class BackupService:
 
     def __init__(self) -> None:
         self.settings = get_settings()
+        # Do not auto-create PROJECT_ROOT/backups — destination is chosen in the UI.
         self.output_dir = Path(self.settings.backup.output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def create_backup(
         self,
@@ -105,44 +105,44 @@ class BackupService:
             physical = backup_method_category(request.method) == BackupCategory.PHYSICAL
             remote = bool(request.use_remote_exec)
 
-            # Plain SQL dumps expand far beyond on-disk DB size (text encoding).
-            # Always gzip them so the saved file stays closer to the database size.
-            if (
-                not physical
-                and final_path.is_file()
-                and request.db_type == DatabaseType.POSTGRESQL
-                and request.method in (BackupMethod.PG_DUMP, BackupMethod.PG_DUMPALL)
-            ):
-                from backend.services.backup_catalog import resolve_pg_dump_format
-                from backend.models.schemas import PgDumpFormat
+            from backend.services.backup_catalog import mysql_wants_gzip, resolve_pg_dump_format
+            from backend.models.schemas import PgDumpFormat
 
-                fmt = resolve_pg_dump_format(request)
-                if (
-                    request.method == BackupMethod.PG_DUMPALL
-                    or fmt == PgDumpFormat.PLAIN
-                ) and not final_path.name.endswith(".gz"):
-                    if progress_callback:
-                        progress_callback(0.88, "Compressing Plain SQL with gzip (reduces size)...")
-                    final_path = self._compress(final_path)
-
+            # MySQL: gzip only when user selected Compressed SQL (.sql.gz).
             if (
                 not physical
                 and final_path.is_file()
                 and request.db_type == DatabaseType.MYSQL
                 and request.method == BackupMethod.MYSQLDUMP
+                and mysql_wants_gzip(request)
+                and not final_path.name.endswith(".gz")
             ):
-                from backend.services.backup_catalog import mysql_wants_gzip
+                if progress_callback:
+                    progress_callback(0.88, "Compressing MySQL dump with gzip (.sql.gz)...")
+                final_path = self._compress(final_path)
 
-                if mysql_wants_gzip(request) and not final_path.name.endswith(".gz"):
-                    if progress_callback:
-                        progress_callback(0.88, "Compressing MySQL dump with gzip (.sql.gz)...")
-                    final_path = self._compress(final_path)
+            # Keep output matching the selected Backup Format (e.g. Plain SQL → .sql, not .sql.gz).
+            pg_plain = (
+                request.db_type == DatabaseType.POSTGRESQL
+                and request.method in (BackupMethod.PG_DUMP, BackupMethod.PG_DUMPALL)
+                and (
+                    request.method == BackupMethod.PG_DUMPALL
+                    or resolve_pg_dump_format(request) == PgDumpFormat.PLAIN
+                )
+            )
+            mysql_plain = (
+                request.db_type == DatabaseType.MYSQL
+                and request.method == BackupMethod.MYSQLDUMP
+                and not mysql_wants_gzip(request)
+            )
 
             if (
                 request.compress
                 and self.settings.backup.compression
                 and not physical
                 and not remote
+                and not pg_plain
+                and not mysql_plain
                 and final_path.is_file()
                 and not final_path.name.endswith(".gz")
             ):
@@ -212,7 +212,9 @@ class BackupService:
 
     def _resolve_output_path(self, request: BackupRequest) -> Path:
         if request.output_path:
-            return Path(request.output_path)
+            path = Path(request.output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
         base_dir = Path(request.local_output_dir) if request.local_output_dir else self.output_dir
         base_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
