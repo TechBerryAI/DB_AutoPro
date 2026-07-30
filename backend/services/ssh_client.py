@@ -599,15 +599,19 @@ def stream_ssh_stdout_to_file(
     *,
     timeout: int = 7200,
     on_progress: Callable[[int, int, str], None] | None = None,
+    gzip_decompress: bool = False,
 ) -> tuple[int, str]:
     """Run a remote command and stream its stdout to a local file.
 
     Faster than dump-to-/tmp then SFTP for large pg_dump archives: one transfer.
+    When gzip_decompress=True, stdout is treated as gzip and written decompressed
+    (used to speed Plain SQL over SSH while still saving a .sql file).
     on_progress(bytes_written, elapsed_seconds, latest_stderr_tail).
     Returns (exit_code, stderr_text).
     """
     import select
     import time
+    import zlib
 
     try:
         import paramiko
@@ -625,6 +629,19 @@ def stream_ssh_stdout_to_file(
     started = time.monotonic()
     deadline = started + max(1, timeout)
     last_progress_at = 0.0
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS) if gzip_decompress else None
+
+    def _write_payload(raw: bytes, local_file) -> None:
+        nonlocal written
+        if not raw:
+            return
+        if decompressor is not None:
+            data = decompressor.decompress(raw)
+        else:
+            data = raw
+        if data:
+            local_file.write(data)
+            written += len(data)
 
     try:
         client.connect(
@@ -655,7 +672,7 @@ def stream_ssh_stdout_to_file(
         except Exception:
             pass
 
-        with open(local_path, "wb") as local_file:
+        with open(local_path, "wb", buffering=1024 * 1024) as local_file:
             while True:
                 now = time.monotonic()
                 if now > deadline:
@@ -667,21 +684,26 @@ def stream_ssh_stdout_to_file(
                         f"SSH stream timed out after {timeout}s while receiving the backup."
                     )
 
-                if channel.recv_ready():
+                got_data = False
+                # Drain stdout first and as aggressively as possible (backup payload).
+                while channel.recv_ready():
                     chunk = channel.recv(1024 * 1024)
-                    if chunk:
-                        local_file.write(chunk)
-                        written += len(chunk)
+                    if not chunk:
+                        break
+                    _write_payload(chunk, local_file)
+                    got_data = True
 
-                if channel.recv_stderr_ready():
+                # Drain stderr lightly; keep a small rolling tail for error reporting only.
+                while channel.recv_stderr_ready():
                     err_chunk = channel.recv_stderr(65536)
-                    if err_chunk:
-                        stderr_chunks.append(err_chunk)
-                        # Cap retained stderr so -v dumps do not exhaust memory.
-                        if sum(len(c) for c in stderr_chunks) > 2 * 1024 * 1024:
-                            stderr_chunks[:] = stderr_chunks[-8:]
+                    if not err_chunk:
+                        break
+                    stderr_chunks.append(err_chunk)
+                    total_err = sum(len(c) for c in stderr_chunks)
+                    while total_err > 65536 and len(stderr_chunks) > 1:
+                        total_err -= len(stderr_chunks.pop(0))
 
-                if on_progress and (now - last_progress_at) >= 1.0:
+                if on_progress and (now - last_progress_at) >= 0.75:
                     tail = b"".join(stderr_chunks[-2:]).decode("utf-8", errors="replace")
                     on_progress(written, int(now - started), tail[-240:])
                     last_progress_at = now
@@ -691,25 +713,30 @@ def stream_ssh_stdout_to_file(
                         chunk = channel.recv(1024 * 1024)
                         if not chunk:
                             break
-                        local_file.write(chunk)
-                        written += len(chunk)
+                        _write_payload(chunk, local_file)
                     while channel.recv_stderr_ready():
                         err_chunk = channel.recv_stderr(65536)
                         if err_chunk:
                             stderr_chunks.append(err_chunk)
                     break
 
+                if got_data:
+                    # Keep the read loop hot while data is flowing.
+                    continue
+
                 if transport is not None:
                     try:
-                        select.select([channel], [], [], 0.25)
+                        select.select([channel], [], [], 0.2)
                     except (OSError, ValueError, TypeError):
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                 else:
-                    time.sleep(0.1)
-
-                # Avoid stalling forever with no data when remote is still working.
-                if not channel.recv_ready() and not channel.recv_stderr_ready():
                     time.sleep(0.05)
+
+            if decompressor is not None:
+                leftover = decompressor.flush()
+                if leftover:
+                    local_file.write(leftover)
+                    written += len(leftover)
 
         exit_code = channel.recv_exit_status()
         err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
@@ -847,6 +874,7 @@ def build_pg_dump_remote_command(
     extra_args: list[str] | None = None,
     peer_auth: bool = False,
     ssh_username: str | None = None,
+    pipe_gzip: bool = False,
 ) -> str:
     """Build a shell-safe pg_dump / pg_dumpall command for the Linux server.
 
@@ -854,6 +882,8 @@ def build_pg_dump_remote_command(
     which avoids permission-denied errors from limited DB roles.
 
     Use output_path='-' to write the archive to stdout (streamed over SSH).
+    When pipe_gzip=True with stdout streaming, compress on the wire with gzip so
+    Plain SQL transfers faster; the client decompresses to a .sql file locally.
     """
     if format_args is not None:
         resolved_format = " ".join(shlex.quote(arg) for arg in format_args)
@@ -864,6 +894,11 @@ def build_pg_dump_remote_command(
     extra = " ".join(shlex.quote(arg) for arg in (extra_args or []))
     extra = f"{extra} " if extra else ""
     to_stdout = (output_path or "").strip() == "-"
+
+    def _maybe_gzip(dump_cmd: str) -> str:
+        if to_stdout and pipe_gzip:
+            return f"set -o pipefail; {dump_cmd} | gzip -1"
+        return dump_cmd
 
     if peer_auth:
         # Local socket / peer authentication as OS user postgres (DB superuser).
@@ -876,7 +911,12 @@ def build_pg_dump_remote_command(
                 f"{shlex.quote(pg_dump_path)} -d {shlex.quote(database)} "
                 f"-f {shlex.quote(output_path)} {extra}{resolved_format}"
             )
-        wrapped = wrap_command_as_postgres_os_user(ssh_username or "", dump_cmd)
+        dump_cmd = _maybe_gzip(dump_cmd)
+        user = (ssh_username or "").strip()
+        # pipefail requires bash; postgres-user path returns the command bare.
+        if to_stdout and pipe_gzip and user == "postgres":
+            return f"bash -lc {shlex.quote(dump_cmd)}"
+        wrapped = wrap_command_as_postgres_os_user(user, dump_cmd)
         if to_stdout:
             return wrapped
         # Make the dump readable for SFTP download by the SSH login user.
@@ -897,13 +937,18 @@ def build_pg_dump_remote_command(
         f"--no-password "
     )
     if dumpall:
-        return f"{base}-f {shlex.quote(output_path)}"
-    if not database:
-        raise ValueError("database is required for pg_dump")
-    return (
-        f"{base}-d {shlex.quote(database)} -f {shlex.quote(output_path)} "
-        f"{extra}{resolved_format}"
-    )
+        dump_cmd = f"{base}-f {shlex.quote(output_path)}"
+    else:
+        if not database:
+            raise ValueError("database is required for pg_dump")
+        dump_cmd = (
+            f"{base}-d {shlex.quote(database)} -f {shlex.quote(output_path)} "
+            f"{extra}{resolved_format}"
+        )
+    dump_cmd = _maybe_gzip(dump_cmd)
+    if to_stdout and pipe_gzip:
+        return f"bash -lc {shlex.quote(dump_cmd)}"
+    return dump_cmd
 
 
 def remove_remote_path(ssh: dict[str, Any], remote_path: str) -> None:

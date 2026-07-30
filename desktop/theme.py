@@ -286,3 +286,16 @@ def clear_last_password() -> None:
     data.pop("last_password", None)
     data["remember_password"] = False
     _save_ui_prefs(data)
+
+
+def load_last_backup_path() -> str:
+    return str(_load_ui_prefs().get("last_backup_path", "")).strip()
+
+
+def save_last_backup_path(path: str) -> None:
+    value = path.strip()
+    if not value:
+        return
+    data = _load_ui_prefs()
+    data["last_backup_path"] = value
+    _save_ui_prefs(data)

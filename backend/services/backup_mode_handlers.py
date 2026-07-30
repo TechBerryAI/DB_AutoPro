@@ -301,6 +301,8 @@ def _postgresql_logical_full_via_ssh(
     is_directory = fmt == PgDumpFormat.DIRECTORY
     # Stream archive formats over SSH (one pass). Directory format still uses /tmp + SFTP.
     use_stream = not is_directory
+    # Plain SQL is bulky on the wire; gzip only for transfer, still save as .sql locally.
+    wire_gzip = use_stream and (dumpall or fmt == PgDumpFormat.PLAIN)
 
     if dumpall:
         remote_name = output_path.name if output_path.suffix else f"{output_path.name}.sql"
@@ -362,6 +364,7 @@ def _postgresql_logical_full_via_ssh(
             extra_args=scope_args,
             peer_auth=use_peer,
             ssh_username=ssh_user,
+            pipe_gzip=bool(stream and wire_gzip),
         )
 
     def _raise_dump_error(stderr: str) -> None:
@@ -398,21 +401,33 @@ def _postgresql_logical_full_via_ssh(
         if progress_callback:
             label = "pg_dumpall" if dumpall else "pg_dump"
             mode = "as postgres OS user" if peer_auth else f"as DB user '{conn.username}'"
+            wire_note = " (gzip on the wire → .sql locally)" if wire_gzip else ""
             progress_callback(
                 0.15,
-                f"Streaming {label} from Linux server {mode} (no /tmp copy)...",
+                f"Streaming {label} from Linux server {mode}{wire_note}...",
             )
 
         def _on_stream_progress(bytes_written: int, elapsed: int, _stderr_tail: str) -> None:
             if not progress_callback:
                 return
             mb = bytes_written / (1024 * 1024)
-            # Map received size into 0.15–0.90 while streaming continues.
-            progress = min(0.90, 0.15 + min(mb / 80.0, 0.70))
-            progress_callback(
-                progress,
-                f"Streaming backup to this PC... {mb:.1f} MB received ({elapsed}s)",
-            )
+            # Small schema dumps may sit at 0 MB while pg_dump plans/locks; advance
+            # with elapsed time so the UI does not look frozen. Byte growth fills
+            # the rest of the bar as data streams.
+            time_part = min(0.45, (elapsed / 45.0) * 0.45)
+            byte_part = min(0.55, (mb / 20.0) * 0.55)
+            progress = min(0.90, 0.15 + max(time_part, byte_part))
+            rate = (mb / elapsed) if elapsed > 0 else 0.0
+            if mb < 0.05 and elapsed >= 2:
+                msg = (
+                    f"pg_dump running on Linux server... {elapsed}s "
+                    "(planning / locking tables — data will start streaming shortly)"
+                )
+            elif rate >= 0.05:
+                msg = f"Streaming backup to this PC... {mb:.1f} MB ({rate:.1f} MB/s, {elapsed}s)"
+            else:
+                msg = f"Streaming backup to this PC... {mb:.1f} MB received ({elapsed}s)"
+            progress_callback(progress, msg)
 
         command = _build_command(use_peer=peer_auth, stream=True)
         try:
@@ -422,6 +437,7 @@ def _postgresql_logical_full_via_ssh(
                 output_path,
                 timeout=7200,
                 on_progress=_on_stream_progress,
+                gzip_decompress=wire_gzip,
             )
         except RuntimeError as exc:
             if output_path.exists():
@@ -456,6 +472,7 @@ def _postgresql_logical_full_via_ssh(
                         output_path,
                         timeout=7200,
                         on_progress=_on_stream_progress,
+                        gzip_decompress=wire_gzip,
                     )
                 except RuntimeError as exc:
                     if output_path.exists():
