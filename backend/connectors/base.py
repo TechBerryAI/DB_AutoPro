@@ -53,17 +53,20 @@ class BaseConnector(ABC):
         """Return database server version string."""
 
     def health_check(self) -> dict[str, Any]:
-        """Perform health check and return status dict."""
+        """Perform health check and return status dict.
+
+        Uses a single round-trip (get_version) so Test Connection is not
+        slowed by opening the database twice.
+        """
         import time
 
         start = time.perf_counter()
         try:
-            ok = self.test_connection()
-            version = self.get_version() if ok else "unknown"
+            version = self.get_version()
             latency = (time.perf_counter() - start) * 1000
             return {
-                "status": "healthy" if ok else "unhealthy",
-                "version": version,
+                "status": "healthy",
+                "version": version or "unknown",
                 "latency_ms": round(latency, 2),
             }
         except Exception as exc:

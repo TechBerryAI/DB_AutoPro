@@ -21,6 +21,35 @@ def _remote_bind_host(connection: ConnectionResult) -> str:
     return connection.host
 
 
+def probe_tcp(host: str, port: int, timeout: float = 2.5) -> str | None:
+    """Return None if TCP connect succeeds, otherwise a short error reason."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, int(port)))
+        return None
+    except socket.timeout:
+        return "timed out"
+    except ConnectionRefusedError:
+        return "connection refused"
+    except OSError as exc:
+        return str(exc) or exc.__class__.__name__
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _ssh_unreachable_message(ssh_host: str, ssh_port: int, reason: str) -> str:
+    return (
+        f"SSH connection failed: {reason} reaching {ssh_host}:{ssh_port}.\n\n"
+        "The Linux SSH service is not reachable from this PC. Check that the host "
+        "is online, SSH is running on that port, and the firewall allows it.\n"
+        "If the database is reachable directly, uncheck the SSH tunnel option."
+    )
+
+
 class ParamikoTunnel:
     """Local TCP forward to a remote host:port through an SSH session."""
 
@@ -41,6 +70,13 @@ class ParamikoTunnel:
             ) from exc
 
         self._stopped = False
+        # Fail fast when the host/port is down (avoid Paramiko's long wait).
+        probe_reason = probe_tcp(ssh_host, ssh_port, timeout=2.5)
+        if probe_reason is not None:
+            raise RuntimeError(
+                _ssh_unreachable_message(ssh_host, ssh_port, probe_reason)
+            )
+
         self._client = paramiko.SSHClient()
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
@@ -51,14 +87,27 @@ class ParamikoTunnel:
                 password=ssh_password or None,
                 allow_agent=False,
                 look_for_keys=False,
-                timeout=15,
+                timeout=8,
+                banner_timeout=12,
+                auth_timeout=12,
             )
         except paramiko.AuthenticationException as exc:
             raise RuntimeError(
-                f"SSH authentication failed for Linux user '{ssh_username}'."
+                f"SSH authentication failed for Linux user '{ssh_username}' on "
+                f"{ssh_host}:{ssh_port}."
+            ) from exc
+        except (socket.timeout, TimeoutError, OSError) as exc:
+            reason = "timed out" if "timed out" in str(exc).lower() else str(exc)
+            raise RuntimeError(
+                _ssh_unreachable_message(ssh_host, ssh_port, reason)
             ) from exc
         except Exception as exc:
-            raise RuntimeError(f"SSH connection failed: {exc}") from exc
+            detail = str(exc).strip() or exc.__class__.__name__
+            if "timed out" in detail.lower() or "timeout" in detail.lower():
+                raise RuntimeError(
+                    _ssh_unreachable_message(ssh_host, ssh_port, "timed out")
+                ) from exc
+            raise RuntimeError(f"SSH connection failed: {detail}") from exc
 
         self._transport = self._client.get_transport()
         if self._transport is None:
@@ -114,7 +163,7 @@ class ParamikoTunnel:
     def _pipe(src: Any, dst: Any) -> None:
         try:
             while True:
-                data = src.recv(4096)
+                data = src.recv(65536)
                 if not data:
                     break
                 dst.sendall(data)
@@ -165,12 +214,25 @@ def _tunneled_connection(connection: ConnectionResult, local_port: int) -> Conne
 
 
 def open_ssh_tunnel(connection: ConnectionResult) -> ConnectionResult:
-    """Start a persistent SSH tunnel for the desktop app session."""
+    """Start a persistent SSH tunnel for the desktop app session.
+
+    If SSH is down but the DB port is open, fall back to a direct connection.
+    """
     global _active_forwarder
     close_ssh_tunnel()
     if not connection.ssh_enabled or not connection.linux_username:
         return connection
-    _active_forwarder = _start_forwarder(connection)
+    try:
+        _active_forwarder = _start_forwarder(connection)
+    except RuntimeError as exc:
+        detail = str(exc)
+        if probe_tcp(connection.host, connection.port, timeout=2.5) is None and (
+            "SSH connection failed" in detail
+            or "timed out" in detail.lower()
+            or "connection refused" in detail.lower()
+        ):
+            return connection
+        raise
     return _tunneled_connection(connection, _active_forwarder.local_bind_port)
 
 

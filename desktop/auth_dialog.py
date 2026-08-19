@@ -261,14 +261,15 @@ class AuthDialog(ctk.CTk):
         self.login_pass.bind("<KeyRelease>", lambda _e: self._persist_login_draft())
         self.login_pass.bind("<FocusOut>", lambda _e: self._persist_login_draft())
 
-        primary_button(
+        self.login_btn = primary_button(
             self.form_frame,
             self.theme,
             text="Login",
             command=self._on_login,
             height=44,
             width=FORM_WIDTH,
-        ).pack(fill="x", pady=(16, 8))
+        )
+        self.login_btn.pack(fill="x", pady=(16, 8))
 
         ghost_button(
             self.form_frame,
@@ -380,6 +381,8 @@ class AuthDialog(ctk.CTk):
         self.after(20, self._fit_window)
 
     def _on_login(self) -> None:
+        if getattr(self, "_login_busy", False):
+            return
         username = self.login_user.get().strip()
         password = self.login_pass.get()
         if not username:
@@ -391,25 +394,52 @@ class AuthDialog(ctk.CTk):
             self.login_pass.focus_set()
             return
 
+        self._login_busy = True
+        self._set_status("Signing in…", "info")
         try:
-            session = authenticate_employee(username, password)
-        except Exception as exc:
-            self._set_status(f"Login failed: {exc}", "error")
-            return
+            self.login_btn.configure(state="disabled")
+        except Exception:
+            pass
 
-        if not session:
-            self._set_status("Invalid username or password.", "error")
-            self.login_pass.delete(0, "end")
-            self.login_pass.focus_set()
-            return
+        import threading
 
-        if self._remember_var.get():
-            save_last_credentials(session.username, password)
-        else:
-            clear_last_password()
-            save_last_username(session.username)
-        self.session = session
-        self.destroy()
+        def task() -> None:
+            error: str | None = None
+            session: EmployeeSession | None = None
+            try:
+                session = authenticate_employee(username, password)
+            except Exception as exc:
+                error = f"Login failed: {exc}"
+
+            def finish(
+                sess: EmployeeSession | None = session,
+                err: str | None = error,
+                pwd: str = password,
+            ) -> None:
+                self._login_busy = False
+                try:
+                    self.login_btn.configure(state="normal")
+                except Exception:
+                    pass
+                if err:
+                    self._set_status(err, "error")
+                    return
+                if not sess:
+                    self._set_status("Invalid username or password.", "error")
+                    self.login_pass.delete(0, "end")
+                    self.login_pass.focus_set()
+                    return
+                if self._remember_var.get():
+                    save_last_credentials(sess.username, pwd)
+                else:
+                    clear_last_password()
+                    save_last_username(sess.username)
+                self.session = sess
+                self.destroy()
+
+            self.after(0, finish)
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _on_register(self) -> None:
         full_name = self.reg_name.get().strip()
@@ -450,7 +480,7 @@ class AuthDialog(ctk.CTk):
                     f"'{username}' already exists. Going back to Login…",
                     "warning",
                 )
-                self.after(700, lambda: self._show_login(prefill_username=username))
+                self.after(200, lambda: self._show_login(prefill_username=username))
                 return
             self._set_status(msg, "error")
             return
