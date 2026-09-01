@@ -391,6 +391,34 @@ def describe_backup_command(request: BackupRequest) -> str:
             ext = resolve_pg_file_extension(request)
             out_token = f"<output.{ext}>" if ext else "<output_dir>"
             local_hint = _local_output_hint(request, out_token)
+            remote_root = request.remote_output_dir or opts.get("remote_backup_dir") or "/mnt/backup"
+            if request.use_remote_exec:
+                from backend.models.schemas import BackupSourceType
+
+                if request.backup_source == BackupSourceType.OTHER_SERVER:
+                    ext_host = (request.external_ssh_host or "remote_host").strip()
+                    ext_user = (request.external_ssh_username or "linux_user").strip()
+                    ext_port = request.external_ssh_port or 22
+                    ssh_user = ext_user
+                    ssh_host = ext_host
+                    ssh_note = f"ssh {ext_user}@{ext_host}:{ext_port}"
+                else:
+                    ssh_user = opts.get("linux_username", "linux_user")
+                    ssh_host = opts.get("ssh_host") or host
+                    ssh_note = f"ssh {ssh_user}@{ssh_host}"
+                if request.method == BackupMethod.PG_DUMPALL:
+                    remote_cmd = f"pg_dumpall -f {remote_root}/<output.sql>"
+                else:
+                    db = request.database or conn.database
+                    extra_args = build_pg_dump_extra_args(request)
+                    remote_cmd = (
+                        f"pg_dump -h {pg_host} -p {pg_port} -U {user} -d {db} "
+                        f"{' '.join(extra_args)} -f {remote_root}/{out_token}"
+                    )
+                return (
+                    f"ssh {ssh_user}@{ssh_host} → {remote_cmd}\n"
+                    f"# Backup stays on Linux server under {remote_root}"
+                )
             if request.method == BackupMethod.PG_DUMPALL:
                 if ssh_user in ("root", "postgres"):
                     remote_cmd = "sudo -u postgres pg_dumpall -f /tmp/<output.sql>"

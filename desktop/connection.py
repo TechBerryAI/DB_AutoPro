@@ -154,6 +154,41 @@ def _friendly_error(exc: Exception, connection: ConnectionResult | None = None) 
     return message
 
 
+def _reachable_saved_oracle_hint(failed_host: str) -> str:
+    """If a saved Oracle host answers on the wire, mention it (no passwords)."""
+    try:
+        from desktop.connection_store import load_saved_servers
+        from desktop.ssh_tunnel import probe_tcp
+    except Exception:
+        return ""
+
+    hints: list[str] = []
+    for server in load_saved_servers():
+        if getattr(server, "db_type", None) != DatabaseType.ORACLE.value:
+            continue
+        host = (server.host or "").strip()
+        if not host or host == failed_host:
+            continue
+        port = int(server.port or 1521)
+        ssh_port = int(getattr(server, "ssh_port", None) or 22)
+        db_ok = probe_tcp(host, port, timeout=2.0) is None
+        ssh_ok = probe_tcp(host, ssh_port, timeout=2.0) is None
+        if db_ok or ssh_ok:
+            parts = []
+            if ssh_ok:
+                parts.append(f"SSH :{ssh_port}")
+            if db_ok:
+                parts.append(f"Oracle :{port}")
+            hints.append(f"'{server.name}' -> {host} ({', '.join(parts)} open)")
+    if not hints:
+        return ""
+    return (
+        "\n\nA saved Oracle server is reachable from this PC - open it under "
+        "Saved Connection instead of the unreachable host:\n  - "
+        + "\n  - ".join(hints)
+    )
+
+
 def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
     """Test connectivity and return (success, message)."""
     from dataclasses import replace
@@ -185,7 +220,7 @@ def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
             or "connection refused" in ssh_err.lower()
         ):
             direct = replace(connection, ssh_enabled=False)
-            db_probe = probe_tcp(connection.host, connection.port, timeout=2.5)
+            db_probe = probe_tcp(connection.host, connection.port, timeout=5.0)
             try:
                 ok, message = _probe_db(direct)
             except Exception as direct_exc:
@@ -197,13 +232,18 @@ def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
                     "Note: SSH was unreachable, so the app connected directly. "
                     "Uncheck the SSH tunnel option to skip this next time.",
                 )
+            alt = _reachable_saved_oracle_hint(connection.host)
             if db_probe is not None:
                 return (
                     False,
-                    f"SSH failed and the database port {connection.host}:{connection.port} "
-                    f"is also unreachable ({db_probe}).\n\n{ssh_err}",
+                    f"Cannot reach this Linux/Oracle host - credentials were not "
+                    f"verified yet.\n"
+                    f"- SSH {connection.ssh_host or connection.host}:"
+                    f"{connection.ssh_port} - failed\n"
+                    f"- Database {connection.host}:{connection.port} - {db_probe}\n\n"
+                    f"{ssh_err}{alt}"
                 )
-            return False, f"{ssh_err}\n\nDirect database login also failed:\n{message}"
+            return False, f"{ssh_err}\n\nDirect database login also failed:\n{message}{alt}"
         return False, ssh_err
     except Exception as exc:
         return False, _friendly_error(exc, connection)

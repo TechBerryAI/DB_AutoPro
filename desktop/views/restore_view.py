@@ -13,6 +13,8 @@ from backend.models.schemas import (
     DatabaseType,
     MongoRestoreScope,
     RestoreRequest,
+    RestoreSourceType,
+    RestoreTargetType,
 )
 from backend.services.backup_catalog import category_description
 from backend.services.mongo_restore import (
@@ -44,6 +46,9 @@ class RestoreView(BaseView):
         self._category = BackupCategory.LOGICAL
         self._mongo_scope = MongoRestoreScope.SPECIFIC_DATABASE
         self._remote_backup_root = "/mnt/backup"
+        self._other_ssh_connected = False
+        self._other_connected_host = ""
+        self._cached_other_ssh: dict | None = None
         self._build_ui()
         self._init_restore_defaults()
         self._sync_mongo_fields()
@@ -51,17 +56,16 @@ class RestoreView(BaseView):
         self._populate_database_dropdown()
 
     def _init_restore_defaults(self) -> None:
-        if not self._is_mongodb_session():
-            return
         saved = self._find_saved_server()
         if saved and saved.remote_backup_dir:
             self._remote_backup_root = saved.remote_backup_dir
-        self.use_remote_var.set(bool(self.connection and self.connection.ssh_enabled))
-        if saved and saved.mongodump_path:
-            self.remote_binary.delete(0, "end")
-            self.remote_binary.insert(0, saved.mongodump_path.replace("mongodump", "mongorestore"))
-        elif not self.remote_binary.get().strip():
-            self.remote_binary.insert(0, "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongorestore")
+        if self._is_mongodb_session():
+            if saved and saved.mongodump_path:
+                self.remote_binary.delete(0, "end")
+                self.remote_binary.insert(0, saved.mongodump_path.replace("mongodump", "mongorestore"))
+            elif not self.remote_binary.get().strip():
+                self.remote_binary.insert(0, "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongorestore")
+        self._sync_source_fields()
 
     def _ssh_options(self) -> dict:
         from backend.connectors.base import resolve_connection
@@ -70,22 +74,183 @@ class RestoreView(BaseView):
         conn = resolve_connection(self.get_active_profile())
         return ssh_options_from_connection(conn)
 
-    def _on_remote_path_selected(self, path: str) -> None:
-        self.remote_source_entry.delete(0, "end")
-        self.remote_source_entry.insert(0, path)
+    def _other_ssh_ready(self) -> bool:
+        return bool(
+            self.other_ssh_host.get().strip()
+            and self.other_ssh_user.get().strip()
+            and self.other_ssh_password.get().strip()
+        )
+
+    def _read_other_ssh_fields(self) -> dict:
+        host = self.other_ssh_host.get().strip()
+        port_raw = self.other_ssh_port.get().strip() or "22"
+        try:
+            port = int(port_raw)
+        except ValueError as exc:
+            raise RuntimeError("SSH port must be a number (e.g. 22).") from exc
+        return {
+            "ssh_host": host,
+            "fallback_host": host,
+            "ssh_port": port,
+            "username": self.other_ssh_user.get().strip(),
+            "password": self.other_ssh_password.get().strip(),
+        }
+
+    def _other_ssh_options(self) -> dict:
+        if self._cached_other_ssh:
+            return dict(self._cached_other_ssh)
+        return self._read_other_ssh_fields()
+
+    @staticmethod
+    def _verify_ssh_dict(ssh: dict) -> None:
+        from backend.services.ssh_client import _ssh_kwargs, run_ssh_command
+
+        host = ssh.get("ssh_host")
+        user = ssh.get("username")
+        code, out, err = run_ssh_command(
+            command="echo db_autopro_ssh_ok",
+            timeout=30,
+            **_ssh_kwargs(ssh),
+        )
+        if code != 0 or "db_autopro_ssh_ok" not in (out or ""):
+            detail = (err or out or f"exit {code}").strip()
+            raise RuntimeError(
+                f"Could not connect to Linux server {user}@{host} via SSH.\n{detail}"
+            )
+
+    def _verify_other_ssh_connection(self, ssh: dict | None = None) -> None:
+        self._verify_ssh_dict(ssh or self._read_other_ssh_fields())
+
+    def _on_connected_path_selected(self, path: str) -> None:
+        self.connected_source_entry.delete(0, "end")
+        self.connected_source_entry.insert(0, path)
+        self._update_command_preview()
+
+    def _on_other_path_selected(self, path: str) -> None:
+        self.other_source_entry.delete(0, "end")
+        self.other_source_entry.insert(0, path)
+        self._sync_restore_target_visibility()
         self._update_command_preview()
 
     def _is_mongodb_session(self) -> bool:
         return self._active_db_type() == DatabaseType.MONGODB
 
+    def _ssh_available(self) -> bool:
+        return bool(
+            self.connection
+            and self.connection.ssh_enabled
+            and self.connection.linux_username
+        )
+
     def _find_saved_server(self) -> SavedServer | None:
         if not self.connection:
             return None
         lookup = self.connection.saved_name or self.connection.name
+        active_type = self._active_db_type().value
         for server in load_saved_servers(self.owner_username):
-            if server.name == lookup and server.db_type == DatabaseType.MONGODB.value:
+            if server.name == lookup and server.db_type == active_type:
                 return server
         return None
+
+    def _merged_ssh_settings(self) -> dict[str, str | int | bool]:
+        saved = self._find_saved_server()
+        c = self.connection
+        ssh_enabled = bool(c and c.ssh_enabled) or bool(saved and saved.ssh_enabled)
+        if not ssh_enabled:
+            return {"ssh_enabled": False}
+
+        def pick(conn_val, saved_val, default=""):
+            if conn_val not in (None, ""):
+                return conn_val
+            if saved_val not in (None, ""):
+                return saved_val
+            return default
+
+        host = str(pick(c.host if c else "", saved.host if saved else "", ""))
+        endpoint = c.endpoint_host if c else host
+        return {
+            "ssh_enabled": True,
+            "ssh_host": str(pick(c.ssh_host if c else None, saved.ssh_host if saved else None, endpoint)),
+            "ssh_port": int(pick(c.ssh_port if c else None, saved.ssh_port if saved else None, 22)),
+            "linux_username": str(
+                pick(c.linux_username if c else None, saved.linux_username if saved else None, "")
+            ),
+            "linux_password": str(
+                pick(c.linux_password if c else None, saved.linux_password if saved else None, "")
+            ),
+            "remote_backup_dir": str(
+                pick(
+                    getattr(c, "remote_backup_dir", "") if c else "",
+                    saved.remote_backup_dir if saved else "",
+                    "/mnt/backup",
+                )
+            ),
+        }
+
+    def _ssh_hint_hosts(self) -> list[str]:
+        hints: list[str] = []
+        settings = self._merged_ssh_settings()
+        if settings.get("ssh_enabled") and settings.get("ssh_host"):
+            hints.append(str(settings["ssh_host"]))
+        saved = self._find_saved_server()
+        if saved and saved.ssh_host:
+            hints.append(str(saved.ssh_host))
+        seen: set[str] = set()
+        unique: list[str] = []
+        for host in hints:
+            host = host.strip()
+            if host and host not in seen:
+                seen.add(host)
+                unique.append(host)
+        return unique
+
+    def _enhance_ssh_error_message(self, message: str, host: str) -> str:
+        hints = [h for h in self._ssh_hint_hosts() if h != host.strip()]
+        if hints and any(
+            token in message.lower() for token in ("timed out", "unreachable", "refused", "failed")
+        ):
+            saved = self._find_saved_server()
+            name = saved.name if saved else "your connection"
+            return (
+                f"{message}\n\n"
+                f"Tip: Saved connection '{name}' uses SSH host {hints[0]}. "
+                f"Click 'Use connection SSH' or enter that IP instead of {host}."
+            )
+        return message
+
+    def _apply_connection_ssh_to_other_form(self) -> None:
+        settings = self._merged_ssh_settings()
+        if not settings.get("ssh_enabled"):
+            self.status_label.configure(
+                text="No SSH on the active connection. Enable SSH Tunnel on Servers, save, and Connect.",
+                text_color=self.theme.c("error"),
+            )
+            return
+        self._reset_other_ssh_state()
+        self.other_ssh_host.delete(0, "end")
+        self.other_ssh_host.insert(0, str(settings.get("ssh_host") or ""))
+        self.other_ssh_port.delete(0, "end")
+        self.other_ssh_port.insert(0, str(settings.get("ssh_port") or 22))
+        self.other_ssh_user.delete(0, "end")
+        self.other_ssh_user.insert(0, str(settings.get("linux_username") or ""))
+        self.other_ssh_password.delete(0, "end")
+        self.other_ssh_password.insert(0, str(settings.get("linux_password") or ""))
+        if settings.get("remote_backup_dir"):
+            self._remote_backup_root = str(settings["remote_backup_dir"])
+        host = self.other_ssh_host.get().strip()
+        self.other_connect_hint.configure(
+            text=f"Filled from connection SSH ({host}) — click Connect & Browse."
+        )
+        self.status_label.configure(
+            text=f"SSH fields filled from connection — {host}",
+            text_color=self.theme.c("text_muted"),
+        )
+        self._update_command_preview()
+
+    def _prefill_other_ssh_if_empty(self) -> None:
+        if self.other_ssh_host.get().strip():
+            return
+        self._apply_connection_ssh_to_other_form()
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -239,102 +404,263 @@ class RestoreView(BaseView):
             anchor="w",
         ).grid(row=1, column=1, padx=(12, 0), sticky="w")
 
-        self.backup_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.backup_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
-        self.backup_frame.grid_columnconfigure(1, weight=1)
+        self.destination_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self.destination_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.destination_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.backup_frame, text="Local restore source:").grid(row=0, column=0, sticky="w", pady=6)
-
-        backup_path_row = ctk.CTkFrame(self.backup_frame, fg_color="transparent")
-        backup_path_row.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
-        backup_path_row.grid_columnconfigure(0, weight=1)
-
-        self.backup_path = ctk.CTkEntry(
-            backup_path_row,
-            placeholder_text="File or folder path — type or browse any backup location",
+        ctk.CTkLabel(self.destination_frame, text="Restore source:").grid(
+            row=0, column=0, sticky="nw", pady=6
         )
-        self.backup_path.grid(row=0, column=0, sticky="ew")
-        self.backup_path.bind("<KeyRelease>", lambda _e: self._update_command_preview())
+        dest_col = ctk.CTkFrame(self.destination_frame, fg_color="transparent")
+        dest_col.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
+        dest_col.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkButton(
-            backup_path_row,
-            text="File",
-            width=60,
-            command=self._browse_backup_file,
-        ).grid(row=0, column=1, padx=(8, 0))
+        self.destination_seg = ctk.CTkSegmentedButton(
+            dest_col,
+            values=["Local Server", "Linux Server", "Remote Linux Server"],
+            command=self._on_destination_changed,
+        )
+        self.destination_seg.set("Local Server")
+        self.destination_seg.grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(
-            backup_path_row,
-            text="Folder",
-            width=70,
-            command=self._browse_backup_folder,
-        ).grid(row=0, column=2, padx=(6, 0))
+        self.destination_hint = ctk.CTkLabel(
+            dest_col,
+            text="Pick a backup file or folder on this PC (Local Server).",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        )
+        self.destination_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
-        self.backup_hint = ctk.CTkLabel(
-            self.backup_frame,
-            text="Pick a file or folder on this PC (used when restoring locally).",
+        self.local_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self.local_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.local_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self.local_frame, text="Local backup path:").grid(row=0, column=0, sticky="w", pady=6)
+        local_row = ctk.CTkFrame(self.local_frame, fg_color="transparent")
+        local_row.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
+        local_row.grid_columnconfigure(0, weight=1)
+
+        self.local_source_entry = ctk.CTkEntry(
+            local_row,
+            placeholder_text="File or folder path on this PC",
+        )
+        self.local_source_entry.grid(row=0, column=0, sticky="ew")
+        self.local_source_entry.bind("<KeyRelease>", lambda _e: self._update_command_preview())
+
+        ctk.CTkButton(local_row, text="File", width=60, command=self._browse_local_file).grid(
+            row=0, column=1, padx=(8, 0)
+        )
+        ctk.CTkButton(local_row, text="Folder", width=70, command=self._browse_local_folder).grid(
+            row=0, column=2, padx=(6, 0)
+        )
+
+        self.local_hint = ctk.CTkLabel(
+            self.local_frame,
+            text="Browse or type a backup file/folder on this PC.",
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             justify="left",
             anchor="w",
         )
-        self.backup_hint.grid(row=1, column=1, padx=(12, 0), sticky="w")
+        self.local_hint.grid(row=1, column=1, padx=(12, 0), sticky="w")
 
-        self.local_source_label = ctk.CTkLabel(
-            form,
-            text="",
-            font=ctk.CTkFont(size=1),
+        self.connected_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self.connected_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.connected_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self.connected_frame, text="Server backup path:").grid(
+            row=0, column=0, sticky="nw", pady=6
         )
+        connected_col = ctk.CTkFrame(self.connected_frame, fg_color="transparent")
+        connected_col.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
+        connected_col.grid_columnconfigure(0, weight=1)
 
-        self.remote_frame = ctk.CTkFrame(form, fg_color="transparent")
-        self.remote_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
-        self.remote_frame.grid_columnconfigure(1, weight=1)
-
-        self.use_remote_var = ctk.BooleanVar(value=False)
-        self.remote_cb = ctk.CTkCheckBox(
-            self.remote_frame,
-            text="Run mongorestore on Linux server (remote)",
-            variable=self.use_remote_var,
-            command=self._on_remote_toggle,
+        self.connected_source_entry = ctk.CTkEntry(
+            connected_col,
+            placeholder_text="Path on connected Linux server, e.g. /mnt/backup/...",
         )
-        self.remote_cb.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-
-        ctk.CTkLabel(self.remote_frame, text="Mongorestore binary:").grid(row=1, column=0, sticky="w", pady=6)
-        self.remote_binary = ctk.CTkEntry(self.remote_frame)
-        self.remote_binary.grid(row=1, column=1, padx=(12, 0), pady=6, sticky="ew")
-        self.remote_binary.bind("<KeyRelease>", lambda _e: self._update_command_preview())
-
-        ctk.CTkLabel(self.remote_frame, text="Remote source:").grid(row=2, column=0, sticky="nw", pady=6)
-        remote_src_col = ctk.CTkFrame(self.remote_frame, fg_color="transparent")
-        remote_src_col.grid(row=2, column=1, padx=(12, 0), pady=6, sticky="ew")
-        remote_src_col.grid_columnconfigure(0, weight=1)
-
-        self.remote_source_entry = ctk.CTkEntry(
-            remote_src_col,
-            placeholder_text="Path on Linux server, e.g. /mnt/backup/All_backup_...",
-        )
-        self.remote_source_entry.grid(row=0, column=0, sticky="ew")
-        self.remote_source_entry.bind("<KeyRelease>", lambda _e: self._update_command_preview())
+        self.connected_source_entry.grid(row=0, column=0, sticky="ew")
+        self.connected_source_entry.bind("<KeyRelease>", lambda _e: self._update_command_preview())
 
         ctk.CTkLabel(
-            self.remote_frame,
-            text="Remote directories on Linux server",
+            self.connected_frame,
+            text="Browse the Linux server linked to this connection (SSH required).",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        ).grid(row=1, column=1, padx=(12, 0), sticky="w")
+
+        ctk.CTkLabel(
+            self.connected_frame,
+            text="Browse connected server",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=self.theme.c("text_primary"),
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 4))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 4))
 
-        self._remote_browser: RemoteDirectoryBrowser | None = None
-        browser_host = ctk.CTkFrame(self.remote_frame, fg_color="transparent")
-        browser_host.grid(row=4, column=0, columnspan=2, sticky="ew")
-        browser_host.grid_columnconfigure(0, weight=1)
-        self._remote_browser = RemoteDirectoryBrowser(
-            browser_host,
+        connected_browser_host = ctk.CTkFrame(self.connected_frame, fg_color="transparent")
+        connected_browser_host.grid(row=3, column=0, columnspan=2, sticky="ew")
+        connected_browser_host.grid_columnconfigure(0, weight=1)
+        self._connected_browser = RemoteDirectoryBrowser(
+            connected_browser_host,
             self.theme,
             get_ssh=self._ssh_options,
             initial_path=self._remote_backup_root,
-            on_selection_changed=self._on_remote_path_selected,
+            on_selection_changed=self._on_connected_path_selected,
         )
-        self._remote_browser.grid(row=0, column=0, sticky="ew")
+        self._connected_browser.grid(row=0, column=0, sticky="ew")
+
+        self.other_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self.other_frame.grid(row=10, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.other_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self.other_frame, text="SSH host:").grid(row=0, column=0, sticky="w", pady=6)
+        self.other_ssh_host = ctk.CTkEntry(self.other_frame, placeholder_text="e.g. 192.168.1.50")
+        self.other_ssh_host.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
+        self.other_ssh_host.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
+
+        ctk.CTkLabel(self.other_frame, text="SSH port:").grid(row=1, column=0, sticky="w", pady=6)
+        self.other_ssh_port = ctk.CTkEntry(self.other_frame, placeholder_text="22")
+        self.other_ssh_port.insert(0, "22")
+        self.other_ssh_port.grid(row=1, column=1, padx=(12, 0), pady=6, sticky="ew")
+
+        ctk.CTkLabel(self.other_frame, text="SSH username:").grid(row=2, column=0, sticky="w", pady=6)
+        self.other_ssh_user = ctk.CTkEntry(self.other_frame, placeholder_text="linux user")
+        self.other_ssh_user.grid(row=2, column=1, padx=(12, 0), pady=6, sticky="ew")
+        self.other_ssh_user.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
+
+        ctk.CTkLabel(self.other_frame, text="SSH password:").grid(row=3, column=0, sticky="w", pady=6)
+        self.other_ssh_password = ctk.CTkEntry(self.other_frame, placeholder_text="password", show="*")
+        self.other_ssh_password.grid(row=3, column=1, padx=(12, 0), pady=6, sticky="ew")
+        self.other_ssh_password.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
+
+        connect_row = ctk.CTkFrame(self.other_frame, fg_color="transparent")
+        connect_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        ctk.CTkButton(
+            connect_row,
+            text="Connect & Browse",
+            width=150,
+            command=self._connect_other_server,
+            fg_color=self.theme.c("primary"),
+            hover_color=self.theme.c("primary_hover"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            connect_row,
+            text="Use connection SSH",
+            width=150,
+            command=self._apply_connection_ssh_to_other_form,
+        ).pack(side="left", padx=(8, 0))
+        self.other_connect_hint = ctk.CTkLabel(
+            connect_row,
+            text="Fill host, username, and password, then click Connect & Browse.",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        )
+        self.other_connect_hint.pack(side="left", padx=(12, 0))
+
+        self.other_ssh_status = ctk.CTkFrame(
+            self.other_frame,
+            fg_color=self.theme.c("success_muted"),
+            corner_radius=8,
+        )
+        self.other_ssh_status.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.other_ssh_status.grid_columnconfigure(0, weight=1)
+        self.other_ssh_status_label = ctk.CTkLabel(
+            self.other_ssh_status,
+            text="",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.theme.c("success"),
+            anchor="w",
+            justify="left",
+        )
+        self.other_ssh_status_label.grid(row=0, column=0, padx=12, pady=10, sticky="ew")
+        self.other_ssh_status.grid_remove()
+
+        self.other_browse_section = ctk.CTkFrame(self.other_frame, fg_color="transparent")
+        self.other_browse_section.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.other_browse_section.grid_columnconfigure(1, weight=1)
+        self.other_browse_section.grid_remove()
+
+        ctk.CTkLabel(self.other_browse_section, text="Backup path:").grid(
+            row=0, column=0, sticky="nw", pady=6
+        )
+        other_path_col = ctk.CTkFrame(self.other_browse_section, fg_color="transparent")
+        other_path_col.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
+        other_path_col.grid_columnconfigure(0, weight=1)
+
+        self.other_source_entry = ctk.CTkEntry(
+            other_path_col,
+            placeholder_text="Path on the Remote Linux Server",
+        )
+        self.other_source_entry.grid(row=0, column=0, sticky="ew")
+        self.other_source_entry.bind("<KeyRelease>", lambda _e: self._on_other_path_typed())
+
+        ctk.CTkLabel(
+            self.other_browse_section,
+            text="Browse Remote Linux Server",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 4))
+
+        other_browser_host = ctk.CTkFrame(self.other_browse_section, fg_color="transparent")
+        other_browser_host.grid(row=2, column=0, columnspan=2, sticky="ew")
+        other_browser_host.grid_columnconfigure(0, weight=1)
+        self._other_browser = RemoteDirectoryBrowser(
+            other_browser_host,
+            self.theme,
+            get_ssh=self._other_ssh_options,
+            initial_path=self._remote_backup_root,
+            on_selection_changed=self._on_other_path_selected,
+        )
+        self._other_browser.grid(row=0, column=0, sticky="ew")
+        self._other_browser.set_enabled(False)
+
+        self.restore_target_frame = ctk.CTkFrame(self.other_frame, fg_color="transparent")
+        self.restore_target_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.restore_target_frame.grid_columnconfigure(1, weight=1)
+        self.restore_target_frame.grid_remove()
+
+        ctk.CTkLabel(self.restore_target_frame, text="Restore destination:").grid(
+            row=0, column=0, sticky="nw", pady=6
+        )
+        restore_target_col = ctk.CTkFrame(self.restore_target_frame, fg_color="transparent")
+        restore_target_col.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
+        restore_target_col.grid_columnconfigure(0, weight=1)
+
+        self.restore_target_seg = ctk.CTkSegmentedButton(
+            restore_target_col,
+            values=["Local Server", "Linux Server"],
+            command=self._on_restore_target_changed,
+        )
+        self.restore_target_seg.set("Local Server")
+        self.restore_target_seg.grid(row=0, column=0, sticky="w")
+
+        self.restore_target_hint = ctk.CTkLabel(
+            restore_target_col,
+            text="Restore on this PC using the downloaded backup.",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        )
+        self.restore_target_hint.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        self.remote_binary_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self.remote_binary_frame.grid(row=11, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+        self.remote_binary_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self.remote_binary_frame, text="Mongorestore binary:").grid(
+            row=0, column=0, sticky="w", pady=6
+        )
+        self.remote_binary = ctk.CTkEntry(self.remote_binary_frame)
+        self.remote_binary.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
+        self.remote_binary.bind("<KeyRelease>", lambda _e: self._update_command_preview())
 
         self.gzip_var = ctk.BooleanVar(value=False)
         self.gzip_cb = ctk.CTkCheckBox(
@@ -343,7 +669,7 @@ class RestoreView(BaseView):
             variable=self.gzip_var,
             command=self._update_command_preview,
         )
-        self.gzip_cb.grid(row=9, column=0, columnspan=2, padx=16, pady=6, sticky="w")
+        self.gzip_cb.grid(row=12, column=0, columnspan=2, padx=16, pady=6, sticky="w")
 
         self.drop_var = ctk.BooleanVar(value=False)
         self.drop_cb = ctk.CTkCheckBox(
@@ -352,22 +678,22 @@ class RestoreView(BaseView):
             variable=self.drop_var,
             command=self._update_command_preview,
         )
-        self.drop_cb.grid(row=10, column=0, columnspan=2, padx=16, pady=6, sticky="w")
+        self.drop_cb.grid(row=13, column=0, columnspan=2, padx=16, pady=6, sticky="w")
 
         self.validate_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             form,
             text="Validate before restore",
             variable=self.validate_var,
-        ).grid(row=11, column=0, columnspan=2, padx=16, pady=6, sticky="w")
+        ).grid(row=14, column=0, columnspan=2, padx=16, pady=6, sticky="w")
 
-        ctk.CTkLabel(form, text="Preview:").grid(row=12, column=0, padx=16, pady=10, sticky="nw")
+        ctk.CTkLabel(form, text="Preview:").grid(row=15, column=0, padx=16, pady=10, sticky="nw")
         self.command_preview = ctk.CTkTextbox(form, height=88, activate_scrollbars=True)
-        self.command_preview.grid(row=12, column=1, padx=16, pady=10, sticky="ew")
+        self.command_preview.grid(row=15, column=1, padx=16, pady=10, sticky="ew")
         self.command_preview.configure(state="disabled")
 
         btn_frame = ctk.CTkFrame(form, fg_color="transparent")
-        btn_frame.grid(row=13, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
+        btn_frame.grid(row=16, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
 
         ctk.CTkButton(
             btn_frame,
@@ -449,44 +775,216 @@ class RestoreView(BaseView):
         self._sync_mongo_fields()
         self._update_command_preview()
 
-    def _browse_backup_folder(self) -> None:
-        initial = self.backup_path.get().strip() or None
-        path = filedialog.askdirectory(
-            title="Select restore source folder",
-            initialdir=initial if initial else None,
-        )
-        if path:
-            self._set_restore_source(path)
+    def _selected_destination(self) -> str:
+        return self.destination_seg.get()
 
-    def _browse_backup_file(self) -> None:
-        initial = self.backup_path.get().strip() or None
+    def _restore_source_type(self) -> RestoreSourceType:
+        dest = self._selected_destination()
+        if dest == "Linux Server":
+            return RestoreSourceType.CONNECTED_SERVER
+        if dest == "Remote Linux Server":
+            return RestoreSourceType.OTHER_SERVER
+        return RestoreSourceType.LOCAL
+
+    def _restore_target_type(self) -> RestoreTargetType:
+        if self._restore_source_type() != RestoreSourceType.OTHER_SERVER:
+            return RestoreTargetType.LINUX_SERVER
+        if self.restore_target_seg.get() == "Linux Server":
+            return RestoreTargetType.LINUX_SERVER
+        return RestoreTargetType.LOCAL
+
+    def _is_server_restore(self) -> bool:
+        source = self._restore_source_type()
+        if source == RestoreSourceType.OTHER_SERVER:
+            return self._restore_target_type() == RestoreTargetType.LINUX_SERVER
+        return source != RestoreSourceType.LOCAL
+
+    def _reset_other_ssh_state(self) -> None:
+        self._other_ssh_connected = False
+        self._other_connected_host = ""
+        self._cached_other_ssh = None
+        if hasattr(self, "other_ssh_status"):
+            self.other_ssh_status.grid_remove()
+        if hasattr(self, "other_browse_section"):
+            self.other_browse_section.grid_remove()
+        if hasattr(self, "restore_target_frame"):
+            self.restore_target_frame.grid_remove()
+        if self._other_browser:
+            self._other_browser.set_enabled(False)
+
+    def _on_other_path_typed(self) -> None:
+        self._sync_restore_target_visibility()
+        self._update_command_preview()
+
+    def _sync_restore_target_visibility(self) -> None:
+        if not hasattr(self, "restore_target_frame"):
+            return
+        if self._selected_destination() != "Remote Linux Server":
+            self.restore_target_frame.grid_remove()
+            return
+        has_path = bool(self._resolve_server_path(self.other_source_entry, self._other_browser))
+        if self._other_ssh_connected and has_path:
+            self.restore_target_frame.grid()
+        else:
+            self.restore_target_frame.grid_remove()
+
+    def _on_restore_target_changed(self, _value: str | None = None) -> None:
+        target = self.restore_target_seg.get()
+        if target == "Linux Server":
+            self.restore_target_hint.configure(
+                text="Run the restore on the remote Linux server over SSH (backup stays on that server)."
+            )
+        else:
+            self.restore_target_hint.configure(
+                text="Download the backup to this PC, then restore into the connected database."
+            )
+        self._sync_mongo_fields()
+        self._update_command_preview()
+
+    def _on_destination_changed(self, _value: str | None = None) -> None:
+        self._sync_source_fields()
+        if self._selected_destination() == "Remote Linux Server":
+            self._prefill_other_ssh_if_empty()
+        self._sync_mongo_fields()
+        self._update_command_preview()
+
+    def _on_other_ssh_changed(self) -> None:
+        if self._selected_destination() != "Remote Linux Server":
+            return
+        self._reset_other_ssh_state()
+        ready = self._other_ssh_ready()
+        if hasattr(self, "other_connect_hint"):
+            if ready:
+                self.other_connect_hint.configure(
+                    text="Credentials ready — click Connect & Browse."
+                )
+            else:
+                self.other_connect_hint.configure(
+                    text="Fill host, username, and password, then click Connect & Browse."
+                )
+        self._update_command_preview()
+
+    def _connect_other_server(self) -> None:
+        if not self._other_ssh_ready():
+            if self._other_browser:
+                self._other_browser.status_label.configure(
+                    text="Error: Enter SSH host, username, and password first."
+                )
+            return
+
+        try:
+            ssh = self._read_other_ssh_fields()
+        except Exception as exc:
+            self._on_other_ssh_failed(str(exc))
+            return
+
+        host = ssh["ssh_host"]
+        self.other_ssh_status.configure(fg_color=self.theme.c("bg_elevated"))
+        self.other_ssh_status_label.configure(
+            text=f"Connecting to {host}...",
+            text_color=self.theme.c("text_muted"),
+        )
+        self.other_ssh_status.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.other_browse_section.grid_remove()
+        self.restore_target_frame.grid_remove()
+        self.status_label.configure(
+            text=f"Connecting to Remote Linux Server {host} via SSH...",
+            text_color=self.theme.c("text_muted"),
+        )
+
+        def task(ssh_opts: dict = ssh, connect_host: str = host) -> None:
+            try:
+                self._verify_other_ssh_connection(ssh_opts)
+                self.after(0, lambda: self._on_other_ssh_connected(connect_host, ssh_opts))
+            except Exception as exc:
+                self.after(0, lambda msg=str(exc): self._on_other_ssh_failed(msg))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_other_ssh_connected(self, host: str, ssh: dict) -> None:
+        self._other_ssh_connected = True
+        self._other_connected_host = host
+        self._cached_other_ssh = dict(ssh)
+        self.other_ssh_status.configure(fg_color=self.theme.c("success_muted"))
+        self.other_ssh_status_label.configure(
+            text=f"Connected to the server — {host}",
+            text_color=self.theme.c("success"),
+        )
+        self.other_ssh_status.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.other_connect_hint.configure(text="Connected — browse and select a backup below.")
+        self.other_browse_section.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.other_source_entry.configure(state="normal")
+        self.status_label.configure(
+            text=f"Connected to the server — {host}",
+            text_color=self.theme.c("success"),
+        )
+        if self._other_browser:
+            self._other_browser.set_enabled(True)
+            path = (
+                self.other_source_entry.get().strip()
+                or self._remote_backup_root
+                or "/"
+            )
+            self._other_browser.load_directory(path)
+        self._sync_restore_target_visibility()
+        self._update_command_preview()
+
+    def _on_other_ssh_failed(self, message: str) -> None:
+        host = self.other_ssh_host.get().strip()
+        message = self._enhance_ssh_error_message(message, host)
+        short = message.split("\n", 1)[0]
+        self._other_ssh_connected = False
+        self._other_connected_host = ""
+        self._cached_other_ssh = None
+        self.other_ssh_status.configure(fg_color=self.theme.c("error_muted"))
+        self.other_ssh_status_label.configure(
+            text=f"Connection failed: {short}",
+            text_color=self.theme.c("error"),
+            wraplength=520,
+            justify="left",
+        )
+        self.other_ssh_status.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.other_browse_section.grid_remove()
+        self.restore_target_frame.grid_remove()
+        if self._other_browser:
+            self._other_browser.set_enabled(False)
+        self.status_label.configure(text=short, text_color=self.theme.c("error"))
+        if hasattr(self, "results"):
+            self.results.delete("1.0", "end")
+            self.results.insert("end", f"SSH connection failed:\n{message}\n")
+        self._update_command_preview()
+
+    def _browse_local_file(self) -> None:
         path = filedialog.askopenfilename(
             title="Select restore source file",
-            initialdir=initial if initial else None,
             filetypes=[
-                ("Backup files", "*.bson *.archive *.gz *.sql *.dump"),
-                ("MongoDB archive", "*.archive"),
-                ("BSON", "*.bson"),
+                ("Backup files", "*.dump *.sql *.gz *.archive *.bson *.bak"),
                 ("All files", "*.*"),
             ],
         )
         if path:
-            self._set_restore_source(path)
+            self._set_local_source(path)
 
-    def _set_restore_source(self, path: str) -> None:
-        self.backup_path.delete(0, "end")
-        self.backup_path.insert(0, path)
+    def _browse_local_folder(self) -> None:
+        path = filedialog.askdirectory(title="Select restore source folder")
+        if path:
+            self._set_local_source(path)
+
+    def _set_local_source(self, path: str) -> None:
+        self.local_source_entry.delete(0, "end")
+        self.local_source_entry.insert(0, path)
         self._update_command_preview()
+
+    def _resolve_server_path(self, entry: ctk.CTkEntry, browser: RemoteDirectoryBrowser | None) -> str:
+        path = entry.get().strip()
+        if browser:
+            browser_path = browser.get_selected_path().strip()
+            if browser_path:
+                return browser_path
+        return path
 
     def _is_remote_restore(self) -> bool:
-        return self.use_remote_var.get() and self._is_mongodb_session()
-
-    def _on_remote_toggle(self) -> None:
-        self._sync_mongo_fields()
-        if self._is_remote_restore() and self._remote_browser:
-            root = self.remote_source_entry.get().strip() or self._remote_backup_root
-            self._remote_browser.set_initial_path(root)
-        self._update_command_preview()
+        return self._is_server_restore()
 
     def _on_scope_changed(self, _value: str | None = None) -> None:
         self._mongo_scope = self._selected_scope()
@@ -537,29 +1035,83 @@ class RestoreView(BaseView):
             self.database.set(names[0])
         self._update_command_preview()
 
+    def _sync_source_fields(self) -> None:
+        dest = self._selected_destination()
+        ssh_on = self._ssh_available()
+
+        if dest != "Remote Linux Server" and self._other_ssh_connected:
+            self._reset_other_ssh_state()
+
+        self.local_frame.grid_remove()
+        self.connected_frame.grid_remove()
+        self.other_frame.grid_remove()
+
+        if dest == "Local Server":
+            self.local_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+            self.destination_hint.configure(
+                text="Pick a backup file or folder on this PC (Local Server)."
+            )
+        elif dest == "Linux Server":
+            self.connected_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+            if ssh_on:
+                self.destination_hint.configure(
+                    text="Restore from a backup on the Linux server linked to this connection."
+                )
+            else:
+                self.destination_hint.configure(
+                    text="Enable SSH on the connection to browse the linked Linux server."
+                )
+        else:
+            self.other_frame.grid(row=10, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+            self.destination_hint.configure(
+                text="Restore from a backup on a remote Linux server (enter SSH details below)."
+            )
+
+        connected_on = dest == "Linux Server" and ssh_on
+        other_remote = dest == "Remote Linux Server"
+
+        self.connected_source_entry.configure(state="normal" if connected_on else "disabled")
+        if self._connected_browser:
+            self._connected_browser.set_enabled(connected_on)
+            if connected_on and not self._connected_browser._entries:
+                self.after(
+                    100,
+                    lambda: self._connected_browser.set_initial_path(
+                        self.connected_source_entry.get().strip() or self._remote_backup_root
+                    ),
+                )
+
+        for widget, enabled in (
+            (self.other_ssh_host, other_remote),
+            (self.other_ssh_port, other_remote),
+            (self.other_ssh_user, other_remote),
+            (self.other_ssh_password, other_remote),
+        ):
+            widget.configure(state="normal" if enabled else "disabled")
+
+        browse_enabled = other_remote and self._other_ssh_connected
+        self.other_source_entry.configure(state="normal" if browse_enabled else "disabled")
+        if self._other_browser:
+            self._other_browser.set_enabled(browse_enabled)
+            if other_remote and not self._other_ssh_connected:
+                self._other_browser.status_label.configure(
+                    text="Enter SSH credentials and click Connect & Browse."
+                )
+        self._sync_restore_target_visibility()
+
     def _sync_mongo_fields(self) -> None:
         self._sync_category_controls()
+        self._sync_source_fields()
         is_mongo = self._is_mongodb_session()
         scope = self._selected_scope() if is_mongo else None
-        remote_on = self._is_remote_restore()
+        server_on = self._is_server_restore()
 
         if is_mongo:
             self.scope_label.grid()
             self.scope_col.grid()
             self.restore_scope.configure(state="normal")
             self.database_hint.pack(anchor="w", pady=(6, 0))
-            if remote_on:
-                self.remote_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
-                self.backup_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
-                self.backup_hint.configure(
-                    text="Optional: pick a local folder/file to upload to the server before restore."
-                )
-            else:
-                self.remote_frame.grid_remove()
-                self.backup_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
-                self.backup_hint.configure(
-                    text="Pick a file or folder on this PC to restore locally."
-                )
+            self.remote_binary_frame.grid(row=11, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
             if scope == MongoRestoreScope.ALL_DATABASES:
                 self.database.configure(state="disabled")
                 self.database_hint.configure(
@@ -585,12 +1137,12 @@ class RestoreView(BaseView):
                 self.gzip_cb.grid()
             else:
                 self.gzip_cb.grid_remove()
+            self.remote_binary.configure(state="normal" if server_on else "disabled")
         else:
             self.scope_label.grid_remove()
             self.scope_col.grid_remove()
             self.restore_scope.configure(state="disabled")
-            self.remote_frame.grid_remove()
-            self.backup_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
+            self.remote_binary_frame.grid_remove()
             self.collection_frame.grid_remove()
             self.gzip_cb.grid_remove()
             self.database.configure(state="normal")
@@ -598,16 +1150,6 @@ class RestoreView(BaseView):
                 text="Select the target database from the list on this server."
             )
             self.database_hint.pack(anchor="w", pady=(6, 0))
-
-        if is_mongo:
-            self.remote_binary.configure(state="normal" if remote_on else "disabled")
-            self.remote_source_entry.configure(state="normal" if remote_on else "disabled")
-        if self._remote_browser:
-            self._remote_browser.set_enabled(remote_on)
-            if remote_on and not self._remote_browser._entries:
-                self.after(100, lambda: self._remote_browser.set_initial_path(
-                    self.remote_source_entry.get().strip() or self._remote_backup_root
-                ))
 
     def _selected_method_value(self) -> str:
         label = self.method.get()
@@ -617,27 +1159,53 @@ class RestoreView(BaseView):
         return label
 
     def _build_request(self) -> RestoreRequest:
-        remote = self._is_remote_restore()
-        remote_source = self.remote_source_entry.get().strip() or None
-        if remote and self._remote_browser:
-            browser_path = self._remote_browser.get_selected_path().strip()
-            if browser_path and not remote_source:
-                remote_source = browser_path
+        source_type = self._restore_source_type()
+        restore_target = self._restore_target_type()
+        server_restore = (
+            source_type == RestoreSourceType.CONNECTED_SERVER
+            or (
+                source_type == RestoreSourceType.OTHER_SERVER
+                and restore_target == RestoreTargetType.LINUX_SERVER
+            )
+        )
+        backup_path = ""
+        remote_source: str | None = None
+        external_host: str | None = None
+        external_port = 22
+        external_user: str | None = None
+        external_password: str | None = None
 
-        local_source = self.backup_path.get().strip()
-        if remote:
-            if remote_source:
-                backup_path = remote_source
-            elif local_source:
-                backup_path = local_source
-            else:
+        if source_type == RestoreSourceType.LOCAL:
+            backup_path = self.local_source_entry.get().strip()
+            if not backup_path:
+                raise ValueError("Select or type a local backup file or folder path.")
+        elif source_type == RestoreSourceType.CONNECTED_SERVER:
+            if not self._ssh_available():
                 raise ValueError(
-                    "Select a backup on the Linux server, or choose a local path to upload."
+                    "Linux Server restore requires SSH on the connection. Enable SSH in connection settings."
                 )
-        elif not local_source:
-            raise ValueError("Select or type a restore source file/folder path.")
+            backup_path = self._resolve_server_path(self.connected_source_entry, self._connected_browser)
+            remote_source = backup_path
+            if not backup_path:
+                raise ValueError("Select a backup file or folder on the Linux Server.")
         else:
-            backup_path = local_source
+            if not self._other_ssh_connected:
+                raise ValueError(
+                    "Connect to the Remote Linux Server first (click Connect & Browse)."
+                )
+            external_host = self.other_ssh_host.get().strip() or None
+            external_user = self.other_ssh_user.get().strip() or None
+            external_password = self.other_ssh_password.get().strip() or None
+            try:
+                external_port = int(self.other_ssh_port.get().strip() or "22")
+            except ValueError as exc:
+                raise ValueError("SSH port must be a number.") from exc
+            if not external_host or not external_user:
+                raise ValueError("Remote Linux Server restore requires SSH host and username.")
+            backup_path = self._resolve_server_path(self.other_source_entry, self._other_browser)
+            remote_source = backup_path
+            if not backup_path:
+                raise ValueError("Select a backup file or folder on the Remote Linux Server.")
 
         db_name = self._restore_database_name()
         scope = self._selected_scope() if self._is_mongodb_session() else None
@@ -653,22 +1221,41 @@ class RestoreView(BaseView):
             mongo_restore_scope=scope,
             gzip_archive=self.gzip_var.get(),
             validate_backup=self.validate_var.get(),
-            use_remote_exec=remote,
+            restore_source=source_type,
+            restore_target=restore_target,
+            use_remote_exec=server_restore,
             remote_binary_path=self.remote_binary.get().strip() or None,
-            remote_source_dir=remote_source if remote else None,
+            remote_source_dir=remote_source,
+            external_ssh_host=external_host,
+            external_ssh_port=external_port,
+            external_ssh_username=external_user,
+            external_ssh_password=external_password,
             drop_existing=self.drop_var.get(),
         )
 
     def _update_command_preview(self) -> None:
         try:
-            remote = self._is_remote_restore()
-            remote_source = self.remote_source_entry.get().strip()
-            local_source = self.backup_path.get().strip()
-            browser_path = self._remote_browser.get_selected_path().strip() if self._remote_browser else ""
-            if remote and not remote_source and not local_source and not browser_path:
-                preview = "Browse remote directories on the server or pick a local folder to upload."
-            elif not remote and not local_source:
-                preview = "Select or type a restore source file/folder path."
+            dest = self._selected_destination()
+            if dest == "Local Server" and not self.local_source_entry.get().strip():
+                preview = "Select or type a Local Server backup file or folder path."
+            elif dest == "Linux Server":
+                if not self._ssh_available():
+                    preview = "Enable SSH on the connection to restore from the Linux Server."
+                elif not self._resolve_server_path(self.connected_source_entry, self._connected_browser):
+                    preview = "Browse the Linux Server and select a backup file or folder."
+                else:
+                    request = self._build_request()
+                    preview = describe_restore_command(request)
+            elif dest == "Remote Linux Server":
+                if not self.other_ssh_host.get().strip() or not self.other_ssh_user.get().strip():
+                    preview = "Enter SSH host and username for the Remote Linux Server."
+                elif not self._other_ssh_connected:
+                    preview = "Click Connect & Browse to connect to the Remote Linux Server."
+                elif not self._resolve_server_path(self.other_source_entry, self._other_browser):
+                    preview = "Browse the Remote Linux Server and select a backup file or folder."
+                else:
+                    request = self._build_request()
+                    preview = describe_restore_command(request)
             else:
                 request = self._build_request()
                 preview = describe_restore_command(request)

@@ -130,13 +130,24 @@ def backup_postgresql(
     cli_not_found_error: Callable[[str], BackupError],
 ) -> Path:
     if request.method == BackupMethod.PG_BASEBACKUP:
+        if request.use_remote_exec:
+            raise BackupError(
+                "Physical pg_basebackup cannot be saved with Backup destination = Linux Server yet. "
+                "Use Logical backup for Linux Server, or switch destination to Local."
+            )
         return _postgresql_basebackup(request, output_path, cli_not_found_error)
     if request.backup_mode == BackupMode.FULL:
         from backend.connectors.base import resolve_connection
-        from backend.services.ssh_client import ssh_options_from_connection
+        from backend.services.ssh_client import ssh_options_for_backup
 
         conn = resolve_connection(request.profile)
-        ssh = ssh_options_from_connection(conn)
+        ssh = ssh_options_for_backup(request, conn)
+        if request.use_remote_exec and not ssh:
+            raise BackupError(
+                "Saving on the Linux server requires SSH. "
+                "Use Linux Server (enable SSH on the connection) or "
+                "Remote Linux Server (enter SSH host, username, and password)."
+            )
         if ssh and request.method in (BackupMethod.PG_DUMP, BackupMethod.PG_DUMPALL):
             return _postgresql_logical_full_via_ssh(
                 request,
@@ -270,7 +281,9 @@ def _postgresql_logical_full_via_ssh(
     cli_not_found_error: Callable[[str], BackupError],
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> Path:
-    """Run pg_dump on the Linux server, then download the archive to this PC."""
+    """Run pg_dump on the Linux server; optionally keep the file on the server."""
+    import shlex
+
     from backend.models.schemas import PgDumpFormat
     from backend.services.backup_catalog import (
         build_pg_dump_common_args,
@@ -293,14 +306,17 @@ def _postgresql_logical_full_via_ssh(
         stream_ssh_stdout_to_file,
     )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not request.use_remote_exec:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
     pg_host, pg_port = pg_endpoint_from_connection(conn)
     db = request.database or conn.database
     dumpall = request.method == BackupMethod.PG_DUMPALL
     fmt = None if dumpall else resolve_pg_dump_format(request)
     is_directory = fmt == PgDumpFormat.DIRECTORY
+    keep_on_server = bool(request.use_remote_exec)
     # Stream archive formats over SSH (one pass). Directory format still uses /tmp + SFTP.
-    use_stream = not is_directory
+    # When keeping on server, always write to a file path (no stream to this PC).
+    use_stream = (not is_directory) and (not keep_on_server)
     # Plain SQL is bulky on the wire; gzip only for transfer, still save as .sql locally.
     wire_gzip = use_stream and (dumpall or fmt == PgDumpFormat.PLAIN)
 
@@ -315,7 +331,19 @@ def _postgresql_logical_full_via_ssh(
             if output_path.suffix
             else f"{output_path.name}.{ext or 'dump'}"
         )
-    remote_path = f"/tmp/{remote_name}"
+    if keep_on_server:
+        from backend.services.ssh_client import ensure_remote_backup_dir
+
+        try:
+            backup_root = ensure_remote_backup_dir(
+                ssh,
+                request.remote_output_dir or ssh.get("remote_backup_dir"),
+            )
+        except RuntimeError as exc:
+            raise BackupError(str(exc)) from exc
+        remote_path = f"{backup_root}/{remote_name}"
+    else:
+        remote_path = f"/tmp/{remote_name}"
 
     if is_directory and output_path.exists():
         raise BackupError(
@@ -597,6 +625,12 @@ def _postgresql_logical_full_via_ssh(
         remove_remote_path(ssh, remote_path)
         raise BackupError("pg_dump finished but the backup file is missing or empty on the server.")
 
+    if keep_on_server:
+        if progress_callback:
+            remote_mb = dump_bytes / (1024 * 1024)
+            progress_callback(0.95, f"Backup saved on Linux server ({remote_mb:.1f} MB)")
+        return Path(remote_path)
+
     if progress_callback:
         elapsed = int(time.monotonic() - started)
         remote_mb = dump_bytes / (1024 * 1024)
@@ -777,9 +811,14 @@ def _mysql_full(
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> Path:
     conn = resolve_connection(request.profile)
-    from backend.services.ssh_client import ssh_options_from_connection
+    from backend.services.ssh_client import ssh_options_for_backup
 
-    ssh = ssh_options_from_connection(conn)
+    ssh = ssh_options_for_backup(request, conn)
+    if request.use_remote_exec and not ssh:
+        raise BackupError(
+            "Saving on the Linux server requires SSH on the connection. "
+            "Enable SSH Tunnel and reconnect."
+        )
     if ssh:
         return _mysql_full_via_ssh(request, output_path, conn, ssh, progress_callback)
     return _mysql_full_local(request, output_path, conn, progress_callback)
@@ -857,7 +896,7 @@ def _mysql_full_via_ssh(
     ssh: dict,
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> Path:
-    """Run mysqldump on the Linux host, then download the SQL file to this PC."""
+    """Run mysqldump on the Linux host; keep on server or download to this PC."""
     import shlex
 
     from backend.models.schemas import MySQLBackupScope
@@ -882,10 +921,24 @@ def _mysql_full_via_ssh(
     if scope == MySQLBackupScope.SELECTED_TABLES and not tables:
         raise BackupError("Selected Tables scope requires at least one table.")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    keep_on_server = bool(request.use_remote_exec)
+    if not keep_on_server:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
     sql_path = output_path if str(output_path).lower().endswith(".sql") else Path(str(output_path) + ".sql")
     remote_name = sql_path.name
-    remote_path = f"/tmp/{remote_name}"
+    if keep_on_server:
+        from backend.services.ssh_client import ensure_remote_backup_dir
+
+        try:
+            backup_root = ensure_remote_backup_dir(
+                ssh,
+                request.remote_output_dir or ssh.get("remote_backup_dir"),
+            )
+        except RuntimeError as exc:
+            raise BackupError(str(exc)) from exc
+        remote_path = f"{backup_root}/{remote_name}"
+    else:
+        remote_path = f"/tmp/{remote_name}"
 
     # From the Linux host, MySQL is usually on localhost.
     mysql_host, mysql_port = pg_endpoint_from_connection(conn)
@@ -952,6 +1005,11 @@ def _mysql_full_via_ssh(
     if not ok:
         raise BackupError(f"Remote mysqldump failed: {last_err}")
 
+    if keep_on_server:
+        if progress_callback:
+            progress_callback(0.95, f"Backup saved on Linux server: {remote_path}")
+        return Path(remote_path)
+
     if progress_callback:
         progress_callback(0.7, "Downloading MySQL dump to this PC...")
     try:
@@ -994,9 +1052,9 @@ def _mysql_physical(
 ) -> Path:
     """Physical backup via mysqlbackup (MEB) when present, else SSH datadir archive."""
     conn = resolve_connection(request.profile)
-    from backend.services.ssh_client import ssh_options_from_connection
+    from backend.services.ssh_client import ssh_options_for_backup
 
-    ssh = ssh_options_from_connection(conn)
+    ssh = ssh_options_for_backup(request, conn)
     if ssh:
         return _mysql_physical_via_ssh(request, output_path, conn, ssh, progress_callback)
 
@@ -1366,7 +1424,18 @@ def backup_oracle(
     output_path: Path,
     progress_callback: Callable[[float, str], None] | None,
 ) -> Path:
+    from backend.services.ssh_client import ssh_options_for_backup
+
     conn = resolve_connection(request.profile)
+    ssh = ssh_options_for_backup(request, conn)
+    if request.use_remote_exec:
+        if not ssh:
+            raise BackupError(
+                "Saving on the Linux server requires SSH on the connection. "
+                "Enable SSH Tunnel and reconnect."
+            )
+        return _oracle_full_via_ssh(request, output_path, conn, ssh, progress_callback)
+
     base_dir = output_path.parent
 
     if request.backup_mode == BackupMode.FULL:
@@ -1417,6 +1486,59 @@ def backup_oracle(
         BackupMode.INCREMENTAL,
     )
     return inc_path
+
+
+def _oracle_full_via_ssh(
+    request: BackupRequest,
+    output_path: Path,
+    conn,
+    ssh: dict,
+    progress_callback: Callable[[float, str], None] | None,
+) -> Path:
+    """Run classic exp on the Linux host into the selected server folder."""
+    import shlex
+
+    from backend.services.ssh_client import _ssh_kwargs, run_ssh_command
+
+    backup_root = (request.remote_output_dir or ssh.get("remote_backup_dir") or "/mnt/backup").rstrip("/")
+    remote_name = output_path.name if output_path.suffix else f"{output_path.name}.dmp"
+    remote_path = f"{backup_root}/{remote_name}"
+    host = (conn.extra_options or {}).get("db_host") or conn.host
+    port = (conn.extra_options or {}).get("db_port") or conn.port
+    service = conn.database
+    user = conn.username
+    password = conn.password
+
+    if progress_callback:
+        progress_callback(0.2, "Creating Oracle dump on Linux server...")
+
+    from backend.services.ssh_client import ensure_remote_backup_dir
+
+    try:
+        backup_root = ensure_remote_backup_dir(ssh, backup_root)
+    except RuntimeError as exc:
+        raise BackupError(str(exc)) from exc
+    remote_path = f"{backup_root}/{remote_name}"
+
+    # Classic exp writes directly to a filesystem path (no Oracle DIRECTORY object required).
+    connect = f"{user}/{password}@//{host}:{port}/{service}"
+    exp_cmd = (
+        "bash -lc "
+        + shlex.quote(
+            "export ORACLE_HOME=${ORACLE_HOME:-/opt/oracle/product/19c/dbhome_1}; "
+            "export PATH=$ORACLE_HOME/bin:$PATH; "
+            f"exp {shlex.quote(connect)} file={shlex.quote(remote_path)} full=y "
+            "consistent=y statistics=none"
+        )
+    )
+    code, out, err = run_ssh_command(command=exp_cmd, timeout=3600, **_ssh_kwargs(ssh))
+    if code != 0:
+        detail = (err or out or "").strip() or f"exit {code}"
+        raise BackupError(f"Oracle remote exp failed: {detail}")
+
+    if progress_callback:
+        progress_callback(0.95, f"Backup saved on Linux server: {remote_path}")
+    return Path(remote_path)
 
 
 def _oracle_current_scn(profile: str) -> str:

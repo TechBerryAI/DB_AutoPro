@@ -5,10 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.connectors.base import resolve_connection
-from backend.models.schemas import BackupCategory, BackupMethod, DatabaseType, RestoreRequest
+from backend.models.schemas import (
+    BackupCategory,
+    BackupMethod,
+    DatabaseType,
+    RestoreRequest,
+    RestoreSourceType,
+    RestoreTargetType,
+)
 from backend.services.mongo_restore import format_mongorestore_preview, plan_mongorestore
 from backend.services.mongo_tools import resolve_local_mongo_tool
 from backend.services.ssh_client import ssh_options_from_connection
+
 
 _METHOD_LABELS: dict[BackupMethod, str] = {
     BackupMethod.MONGORESTORE: "mongorestore (logical BSON import)",
@@ -51,23 +59,61 @@ def _local_mongorestore_bin(request: RestoreRequest) -> str:
         return "mongorestore"
 
 
-def _mongodb_uses_server_restore(request: RestoreRequest) -> bool:
-    if request.db_type != DatabaseType.MONGODB:
-        return False
-    if not request.use_remote_exec:
-        return False
+def _uses_server_restore(request: RestoreRequest) -> bool:
+    if request.restore_source == RestoreSourceType.OTHER_SERVER:
+        return request.restore_target == RestoreTargetType.LINUX_SERVER
+    return request.restore_source == RestoreSourceType.CONNECTED_SERVER
+
+
+def _ssh_preview_label(request: RestoreRequest) -> str:
+    if request.restore_source == RestoreSourceType.OTHER_SERVER:
+        host = (request.external_ssh_host or "other_host").strip()
+        user = (request.external_ssh_username or "linux_user").strip()
+        port = request.external_ssh_port or 22
+        return f"ssh {user}@{host}:{port}"
     conn = resolve_connection(request.profile)
-    return bool(ssh_options_from_connection(conn))
+    opts = conn.extra_options or {}
+    ssh_user = opts.get("linux_username", "linux_user")
+    ssh_host = opts.get("ssh_host") or opts.get("db_host") or conn.host
+    return f"ssh {ssh_user}@{ssh_host}"
 
 
 def describe_restore_command(request: RestoreRequest) -> str:
-    """Human-readable mongorestore / restore command preview."""
+    """Human-readable restore command preview."""
     conn = resolve_connection(request.profile)
     opts = conn.extra_options or {}
     auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
     mongo_host = opts.get("mongo_host") or conn.host
     mongo_port = int(opts.get("mongo_port", conn.port))
     backup_dir = request.backup_path or "<restore source>"
+    db_name = request.database or conn.database or "<database>"
+
+    if request.db_type == DatabaseType.POSTGRESQL:
+        tool = "pg_restore" if backup_dir.lower().endswith((".dump", ".backup")) else "psql"
+        if _uses_server_restore(request):
+            return (
+                f"{_ssh_preview_label(request)} → {tool} into {db_name} "
+                f"from {backup_dir}"
+            )
+        if request.restore_source == RestoreSourceType.OTHER_SERVER:
+            return (
+                f"Download from {_ssh_preview_label(request)} → local {tool} "
+                f"into {db_name}"
+            )
+        return f"Local {tool} into {db_name} from {backup_dir}"
+
+    if request.db_type == DatabaseType.MYSQL:
+        if _uses_server_restore(request):
+            return (
+                f"{_ssh_preview_label(request)} → mysql into {db_name} "
+                f"from {backup_dir}"
+            )
+        if request.restore_source == RestoreSourceType.OTHER_SERVER:
+            return (
+                f"Download from {_ssh_preview_label(request)} → local mysql "
+                f"into {db_name}"
+            )
+        return f"Local mysql into {db_name} from {backup_dir}"
 
     if request.db_type != DatabaseType.MONGODB:
         return f"Restore from {backup_dir} into {request.db_type.value}"
@@ -83,7 +129,7 @@ def describe_restore_command(request: RestoreRequest) -> str:
     except Exception as exc:
         return str(exc)
 
-    uses_server = _mongodb_uses_server_restore(request)
+    uses_server = _uses_server_restore(request)
     preview_host = mongo_host if uses_server else conn.host
     preview_port = mongo_port if uses_server else conn.port
     preview_bin = mongorestore if uses_server else _local_mongorestore_bin(request)
@@ -98,18 +144,12 @@ def describe_restore_command(request: RestoreRequest) -> str:
     )
 
     if not uses_server:
+        if request.restore_source == RestoreSourceType.OTHER_SERVER:
+            return f"Download from {_ssh_preview_label(request)} → {preview}"
         return preview
-
-    ssh_user = opts.get("linux_username", "linux_user")
-    ssh_host = opts.get("ssh_host") or mongo_host
 
     if request.remote_source_dir and _is_remote_restore_path(request.remote_source_dir):
         if plan.source_path and not plan.uses_archive_flags:
             preview = preview.replace(plan.source_path, request.remote_source_dir)
-        return f"ssh {ssh_user}@{ssh_host} → {preview}"
 
-    return (
-        f"ssh {ssh_user}@{ssh_host} → upload restore source, then run on Linux server:\n"
-        f"{preview}\n"
-        f"Local upload source: {backup_dir}"
-    )
+    return f"{_ssh_preview_label(request)} → {preview}"

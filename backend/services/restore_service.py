@@ -7,15 +7,23 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from backend.connectors.base import get_connector, resolve_connection
 from backend.core.exceptions import BackupError, RestoreError
 from backend.core.logging import get_audit_logger, get_logger
-from backend.models.schemas import DatabaseType, OperationResult, OperationStatus, RestoreRequest
+from backend.models.schemas import (
+    DatabaseType,
+    OperationResult,
+    OperationStatus,
+    RestoreRequest,
+    RestoreSourceType,
+    RestoreTargetType,
+)
 from backend.services.backup_service import BackupService
 from backend.services.mongo_restore import MongorestorePlan, plan_mongorestore
 from backend.services.mongo_tools import resolve_local_mongo_tool
@@ -30,8 +38,7 @@ _operations: dict[str, OperationResult] = {}
 def _cli_not_found_error(tool: str, detail: str | None = None) -> RestoreError:
     hint = detail or (
         f"'{tool}' was not found on this PC. "
-        "Install MongoDB Database Tools, add the bin folder to PATH, "
-        "or check 'Run mongorestore on Linux server (remote)'."
+        "Install MongoDB Database Tools on the Linux server or set the mongorestore binary path."
     )
     return RestoreError(hint)
 
@@ -39,6 +46,50 @@ def _cli_not_found_error(tool: str, detail: str | None = None) -> RestoreError:
 def _is_remote_path(path: str) -> bool:
     normalized = path.replace("\\", "/")
     return normalized.startswith("/") or normalized.startswith("mnt/")
+
+
+def _uses_server_restore(request: RestoreRequest) -> bool:
+    if request.restore_source == RestoreSourceType.OTHER_SERVER:
+        return request.restore_target == RestoreTargetType.LINUX_SERVER
+    return request.restore_source == RestoreSourceType.CONNECTED_SERVER
+
+
+def _remote_pg_uses_pg_restore(remote_path: str) -> bool:
+    lower = remote_path.lower()
+    if lower.endswith(".sql"):
+        return False
+    if lower.endswith((".dump", ".backup", ".tar")):
+        return True
+    return True
+
+
+def _resolve_restore_ssh(request: RestoreRequest) -> dict:
+    if request.restore_source == RestoreSourceType.OTHER_SERVER:
+        host = (request.external_ssh_host or "").strip()
+        user = (request.external_ssh_username or "").strip()
+        if not host or not user:
+            raise RestoreError(
+                "Remote Linux Server restore requires SSH host and username."
+            )
+        from backend.services.ssh_client import ssh_options_from_external
+
+        return ssh_options_from_external(
+            host=host,
+            port=request.external_ssh_port or 22,
+            username=user,
+            password=request.external_ssh_password or "",
+        )
+
+    conn = resolve_connection(request.profile)
+    from backend.services.ssh_client import ssh_options_from_connection
+
+    ssh = ssh_options_from_connection(conn)
+    if not ssh:
+        raise RestoreError(
+            "Linux Server restore requires SSH on the connection. "
+            "Enable SSH in connection settings."
+        )
+    return ssh
 
 
 def _apply_mongorestore_plan(cmd: list[str], plan: MongorestorePlan) -> None:
@@ -76,11 +127,12 @@ class RestoreService:
         _operations[operation_id] = result
 
         try:
+            request = self._prepare_restore_request(request, progress_callback)
             backup_path = Path(request.backup_path)
             if not backup_path.exists() and not _is_remote_path(request.backup_path):
                 raise RestoreError(f"Backup not found: {request.backup_path}")
 
-            if request.validate_backup and not _is_remote_path(request.backup_path):
+            if request.validate_backup and backup_path.exists():
                 if progress_callback:
                     progress_callback(0.1, "Validating backup...")
                 self._validate_backup_path(backup_path)
@@ -88,7 +140,10 @@ class RestoreService:
             if progress_callback:
                 progress_callback(0.3, "Starting restore...")
 
-            restore_path = self._decompress_if_needed(backup_path)
+            if backup_path.exists():
+                restore_path = self._decompress_if_needed(backup_path)
+            else:
+                restore_path = backup_path
 
             handlers = {
                 DatabaseType.POSTGRESQL: self._restore_postgresql,
@@ -130,6 +185,81 @@ class RestoreService:
             _operations[operation_id] = result
 
         return result
+
+    def _prepare_restore_request(
+        self,
+        request: RestoreRequest,
+        progress_callback: Callable[[float, str], None] | None,
+    ) -> RestoreRequest:
+        """Stage remote backups locally when restoring to this PC."""
+        if request.restore_source != RestoreSourceType.OTHER_SERVER:
+            return request
+
+        if request.restore_target == RestoreTargetType.LINUX_SERVER:
+            return request.model_copy(update={"use_remote_exec": True})
+
+        ssh = _resolve_restore_ssh(request)
+        remote_path = (request.remote_source_dir or request.backup_path or "").strip()
+        if not remote_path:
+            raise RestoreError("Select a backup file or folder on the Remote Linux Server.")
+
+        local_path = self._download_remote_backup(ssh, remote_path, progress_callback)
+        return request.model_copy(
+            update={
+                "backup_path": str(local_path),
+                "remote_source_dir": None,
+                "use_remote_exec": False,
+            }
+        )
+
+    def _download_remote_backup(
+        self,
+        ssh: dict,
+        remote_path: str,
+        progress_callback: Callable[[float, str], None] | None,
+    ) -> Path:
+        from backend.services.ssh_client import (
+            _ssh_kwargs,
+            download_remote_directory,
+            download_remote_file,
+            run_ssh_command,
+        )
+
+        quoted = shlex.quote(remote_path)
+        code_dir, _, _ = run_ssh_command(
+            command=f"test -d {quoted}",
+            timeout=30,
+            **_ssh_kwargs(ssh),
+        )
+        staging = Path(tempfile.mkdtemp(prefix="db_autopro_restore_"))
+        name = PurePosixPath(remote_path.rstrip("/")).name or "backup"
+
+        if code_dir == 0:
+            local_path = staging / name
+            if progress_callback:
+                progress_callback(0.12, f"Downloading folder {remote_path}...")
+            download_remote_directory(ssh, remote_path.rstrip("/"), local_path)
+            return local_path
+
+        code_file, _, _ = run_ssh_command(
+            command=f"test -f {quoted}",
+            timeout=30,
+            **_ssh_kwargs(ssh),
+        )
+        if code_file != 0:
+            raise RestoreError(f"Remote backup path not found: {remote_path}")
+
+        local_path = staging / name
+        if progress_callback:
+            progress_callback(0.12, f"Downloading file {remote_path}...")
+
+        def on_progress(transferred: int, total: int) -> None:
+            if progress_callback and total > 0:
+                ratio = min(transferred / total, 1.0)
+                progress_callback(0.12 + ratio * 0.16, "Downloading backup from remote server...")
+
+        download_remote_file(ssh, remote_path, local_path, on_progress=on_progress)
+        return local_path
 
     def _validate_backup_path(self, path: Path) -> None:
         if not path.exists():
@@ -178,8 +308,19 @@ class RestoreService:
         progress_callback: Callable[[float, str], None] | None,
     ) -> None:
         conn = resolve_connection(request.profile)
-        env = {**os.environ, "PGPASSWORD": conn.password}
         db = request.database or conn.database
+
+        if _uses_server_restore(request) or _is_remote_path(str(backup_path)):
+            remote_source = (request.remote_source_dir or request.backup_path or "").strip()
+            if not remote_source:
+                raise RestoreError("Select a backup file on the Linux server.")
+            ssh = _resolve_restore_ssh(request)
+            self._restore_postgresql_via_ssh(
+                request, conn, db, remote_source, ssh, progress_callback
+            )
+            return
+
+        env = {**os.environ, "PGPASSWORD": conn.password}
 
         if backup_path.is_dir():
             raise RestoreError("Use pg_restore for directory format backups via CLI")
@@ -216,6 +357,71 @@ class RestoreService:
         if result.returncode != 0:
             raise RestoreError(f"PostgreSQL restore failed: {result.stderr}")
 
+    def _restore_postgresql_via_ssh(
+        self,
+        request: RestoreRequest,
+        conn,
+        database: str,
+        remote_source: str,
+        ssh: dict,
+        progress_callback: Callable[[float, str], None] | None,
+    ) -> None:
+        from backend.services.ssh_client import (
+            build_pg_restore_remote_command,
+            build_psql_restore_remote_command,
+            can_use_postgres_peer_auth,
+            pg_endpoint_from_connection,
+            resolve_remote_pg_tool_path,
+            run_ssh_command,
+            _ssh_kwargs,
+        )
+
+        pg_host, pg_port = pg_endpoint_from_connection(conn)
+        peer_auth = can_use_postgres_peer_auth(ssh)
+        ssh_user = str(ssh.get("username") or "")
+
+        if progress_callback:
+            progress_callback(0.4, "Running restore on Linux server...")
+
+        try:
+            if _remote_pg_uses_pg_restore(remote_source):
+                tool_path = resolve_remote_pg_tool_path(ssh, "pg_restore")
+                remote_cmd = build_pg_restore_remote_command(
+                    pg_restore_path=tool_path,
+                    pg_host=pg_host,
+                    pg_port=pg_port,
+                    username=conn.username,
+                    password=conn.password,
+                    database=database,
+                    backup_path=remote_source,
+                    peer_auth=peer_auth,
+                    ssh_username=ssh_user,
+                )
+            else:
+                tool_path = resolve_remote_pg_tool_path(ssh, "psql")
+                remote_cmd = build_psql_restore_remote_command(
+                    psql_path=tool_path,
+                    pg_host=pg_host,
+                    pg_port=pg_port,
+                    username=conn.username,
+                    password=conn.password,
+                    database=database,
+                    backup_path=remote_source,
+                    peer_auth=peer_auth,
+                    ssh_username=ssh_user,
+                )
+        except RuntimeError as exc:
+            raise RestoreError(str(exc)) from exc
+
+        exit_code, stdout, stderr = run_ssh_command(
+            command=remote_cmd,
+            timeout=3600,
+            **_ssh_kwargs(ssh),
+        )
+        if exit_code != 0:
+            detail = stderr.strip() or stdout.strip() or "unknown error"
+            raise RestoreError(f"Remote PostgreSQL restore failed: {detail}")
+
     def _restore_mysql(
         self,
         request: RestoreRequest,
@@ -224,6 +430,17 @@ class RestoreService:
     ) -> None:
         conn = resolve_connection(request.profile)
         db = request.database or conn.database
+
+        if _uses_server_restore(request) or _is_remote_path(str(backup_path)):
+            remote_source = (request.remote_source_dir or request.backup_path or "").strip()
+            if not remote_source:
+                raise RestoreError("Select a backup file on the Linux server.")
+            ssh = _resolve_restore_ssh(request)
+            self._restore_mysql_via_ssh(
+                request, conn, db, remote_source, ssh, progress_callback
+            )
+            return
+
         cmd = [
             "mysql",
             "-h", conn.host,
@@ -237,6 +454,51 @@ class RestoreService:
         if result.returncode != 0:
             raise RestoreError(f"MySQL restore failed: {result.stderr}")
 
+    def _restore_mysql_via_ssh(
+        self,
+        request: RestoreRequest,
+        conn,
+        database: str,
+        remote_source: str,
+        ssh: dict,
+        progress_callback: Callable[[float, str], None] | None,
+    ) -> None:
+        from backend.services.ssh_client import (
+            build_mysql_restore_remote_command,
+            pg_endpoint_from_connection,
+            resolve_remote_mysql_path,
+            run_ssh_command,
+            _ssh_kwargs,
+        )
+
+        mysql_host, mysql_port = pg_endpoint_from_connection(conn)
+
+        if progress_callback:
+            progress_callback(0.4, "Running mysql restore on Linux server...")
+
+        try:
+            mysql_path = resolve_remote_mysql_path(ssh)
+            remote_cmd = build_mysql_restore_remote_command(
+                mysql_path=mysql_path,
+                mysql_host=mysql_host,
+                mysql_port=mysql_port,
+                username=conn.username,
+                password=conn.password,
+                database=database,
+                backup_path=remote_source,
+            )
+        except RuntimeError as exc:
+            raise RestoreError(str(exc)) from exc
+
+        exit_code, stdout, stderr = run_ssh_command(
+            command=remote_cmd,
+            timeout=3600,
+            **_ssh_kwargs(ssh),
+        )
+        if exit_code != 0:
+            detail = stderr.strip() or stdout.strip() or "unknown error"
+            raise RestoreError(f"Remote MySQL restore failed: {detail}")
+
     def _restore_mongodb(
         self,
         request: RestoreRequest,
@@ -244,17 +506,14 @@ class RestoreService:
         progress_callback: Callable[[float, str], None] | None,
     ) -> None:
         conn = resolve_connection(request.profile)
-        from backend.services.ssh_client import ssh_options_from_connection
+        remote_path = _is_remote_path(request.backup_path)
+        server_restore = _uses_server_restore(request) or request.use_remote_exec or remote_path
 
-        ssh = ssh_options_from_connection(conn)
-        if not request.use_remote_exec:
+        if not server_restore:
             self._restore_mongodb_local(request, conn, backup_path, progress_callback)
             return
-        if not ssh:
-            raise RestoreError(
-                "Remote restore requires SSH on this connection. "
-                "Enable SSH in connection settings or uncheck 'Run mongorestore on Linux server'."
-            )
+
+        ssh = _resolve_restore_ssh(request)
 
         remote_source = request.remote_source_dir if (
             request.remote_source_dir and _is_remote_path(request.remote_source_dir)

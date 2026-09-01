@@ -111,6 +111,7 @@ class BackupService:
             # MySQL: gzip only when user selected Compressed SQL (.sql.gz).
             if (
                 not physical
+                and not remote
                 and final_path.is_file()
                 and request.db_type == DatabaseType.MYSQL
                 and request.method == BackupMethod.MYSQLDUMP
@@ -211,6 +212,35 @@ class BackupService:
         return None
 
     def _resolve_output_path(self, request: BackupRequest) -> Path:
+        if request.use_remote_exec:
+            # Filename only — handler writes under remote_output_dir on the Linux host.
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            db_name = self._mongo_target_database(request) or request.database or "all"
+            if request.method == BackupMethod.MONGODUMP:
+                from backend.services.ssh_client import remote_backup_folder_name
+
+                return Path(remote_backup_folder_name(request.backup_folder_name, db_name))
+            if request.db_type == DatabaseType.POSTGRESQL:
+                from backend.services.backup_catalog import (
+                    resolve_pg_dump_format,
+                    resolve_pg_file_extension,
+                )
+                from backend.models.schemas import PgDumpFormat
+
+                if request.method == BackupMethod.PG_DUMPALL:
+                    return Path(f"{request.db_type.value}_cluster_full_{timestamp}.sql")
+                if resolve_pg_dump_format(request) == PgDumpFormat.DIRECTORY:
+                    return Path(f"{request.db_type.value}_{db_name}_full_{timestamp}")
+                ext = resolve_pg_file_extension(request) or "dump"
+                return Path(f"{request.db_type.value}_{db_name}_full_{timestamp}.{ext}")
+            if request.db_type == DatabaseType.MYSQL:
+                return Path(f"{request.db_type.value}_{db_name}_full_{timestamp}.sql")
+            if request.db_type == DatabaseType.ORACLE:
+                return Path(f"{request.db_type.value}_{db_name}_full_{timestamp}.dmp")
+            if request.db_type == DatabaseType.MSSQL:
+                return Path(f"{request.db_type.value}_{db_name}_full_{timestamp}.bak")
+            return Path(f"{request.db_type.value}_{db_name}_{timestamp}")
+
         if request.output_path:
             path = Path(request.output_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -477,14 +507,14 @@ class BackupService:
             remote_backup_folder_name,
             resolve_remote_mongodump_path,
             run_ssh_command,
-            ssh_options_from_connection,
+            ssh_options_for_backup,
         )
 
-        ssh = ssh_options_from_connection(conn)
+        ssh = ssh_options_for_backup(request, conn)
         if not ssh:
             raise BackupError(
-                "Remote MongoDB backup requires Linux SSH credentials on the connection. "
-                "Enable SSH on the connection page and save."
+                "Remote MongoDB backup requires Linux SSH credentials. "
+                "Use Linux Server (connection SSH) or Remote Linux Server (enter SSH below)."
             )
 
         preferred_dump = (
@@ -506,22 +536,18 @@ class BackupService:
         auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
         db = self._mongo_target_database(request)
         mongo_host, mongo_port = mongo_endpoint_from_connection(conn)
+
+        from backend.services.ssh_client import ensure_remote_backup_dir
+
+        try:
+            backup_root = ensure_remote_backup_dir(ssh, backup_root)
+        except RuntimeError as exc:
+            raise BackupError(str(exc)) from exc
+
         remote_out = f"{backup_root.rstrip('/')}/{remote_backup_folder_name(request.backup_folder_name, db or 'all')}"
 
         if progress_callback:
             progress_callback(0.3, "Running mongodump on Linux server...")
-
-        mkdir_cmd = f"mkdir -p {shlex.quote(backup_root.rstrip('/'))}"
-        exit_code, _out, err = run_ssh_command(
-            ssh_host=ssh["ssh_host"],
-            fallback_host=ssh["fallback_host"],
-            ssh_port=ssh["ssh_port"],
-            username=ssh["username"],
-            password=ssh["password"],
-            command=mkdir_cmd,
-        )
-        if exit_code != 0:
-            raise BackupError(f"Could not create remote backup directory: {err.strip()}")
 
         remote_cmd = build_mongodump_remote_command(
             mongodump_path=mongodump_path,
@@ -567,12 +593,50 @@ class BackupService:
         output_path: Path,
         progress_callback: Callable[[float, str], None] | None,
     ) -> Path:
+        import shlex
+
+        from backend.services.ssh_client import _ssh_kwargs, run_ssh_command, ssh_options_for_backup
+
         conn = resolve_connection(request.profile)
         db = request.database or conn.database
+        ssh = ssh_options_for_backup(request, conn)
+
+        if request.use_remote_exec:
+            if not ssh:
+                raise BackupError(
+                    "Saving on the Linux server requires SSH on the connection. "
+                    "Enable SSH Tunnel and reconnect."
+                )
+            backup_root = (
+                request.remote_output_dir or ssh.get("remote_backup_dir") or "/mnt/backup"
+            ).rstrip("/")
+            remote_name = output_path.name if output_path.suffix else f"{output_path.name}.bak"
+            if progress_callback:
+                progress_callback(0.2, "Running SQL Server backup on Linux host...")
+            from backend.services.ssh_client import ensure_remote_backup_dir
+
+            try:
+                backup_root = ensure_remote_backup_dir(ssh, backup_root)
+            except RuntimeError as exc:
+                raise BackupError(str(exc)) from exc
+            backup_file = f"{backup_root}/{remote_name}"
+            sql = f"BACKUP DATABASE [{db}] TO DISK = N'{backup_file}' WITH FORMAT, INIT"
+            # Prefer sqlcmd on the Linux SQL Server host.
+            cmd = (
+                f"bash -lc {shlex.quote(f'sqlcmd -S localhost -Q {shlex.quote(sql)}')}"
+            )
+            code, out, err = run_ssh_command(command=cmd, timeout=3600, **_ssh_kwargs(ssh))
+            if code != 0:
+                detail = (err or out or "").strip() or f"exit {code}"
+                raise BackupError(f"Remote SQL Server backup failed: {detail}")
+            if progress_callback:
+                progress_callback(0.95, f"Backup saved on Linux server: {backup_file}")
+            return Path(backup_file)
+
         if request.backup_mode == BackupMode.INCREMENTAL:
             backup_file = str(output_path.with_suffix(".trn"))
             sql = f"BACKUP LOG [{db}] TO DISK = N'{backup_file}'"
-        if request.backup_mode == BackupMode.DIFFERENTIAL:
+        elif request.backup_mode == BackupMode.DIFFERENTIAL:
             chain = load_chain(output_path.parent, request)
             if not chain.get("full"):
                 raise BackupError(
@@ -628,7 +692,10 @@ class BackupService:
         return deleted
 
     def list_remote_backups(
-        self, profile: str = "default", remote_dir: str | None = None
+        self,
+        profile: str = "default",
+        remote_dir: str | None = None,
+        ssh_override: dict | None = None,
     ) -> list[dict]:
         """List MongoDB backups stored on the remote Linux server."""
         import shlex as _shlex
@@ -636,7 +703,7 @@ class BackupService:
         from backend.services.ssh_client import run_ssh_command, ssh_options_from_connection
 
         conn = resolve_connection(profile)
-        ssh = ssh_options_from_connection(conn)
+        ssh = ssh_override or ssh_options_from_connection(conn)
         if not ssh:
             return []
 
@@ -724,10 +791,13 @@ class BackupService:
         remote_dir: str | None = None,
         *,
         list_remote: bool = False,
+        ssh_override: dict | None = None,
     ) -> list[dict]:
         """List backups from the remote Linux server or from this PC."""
         if list_remote:
-            return self.list_remote_backups(profile, remote_dir=remote_dir)
+            return self.list_remote_backups(
+                profile, remote_dir=remote_dir, ssh_override=ssh_override
+            )
         return self.list_local_backups(local_dir)
 
     def get_operation(self, operation_id: str) -> OperationResult | None:

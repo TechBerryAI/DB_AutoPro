@@ -93,6 +93,10 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
                 child.configure(state=state)
             except Exception:
                 pass
+        if not enabled:
+            self.status_label.configure(
+                text="Enter SSH host, username, and password, then click Connect / Refresh."
+            )
 
     def get_selected_path(self) -> str:
         return self._selected_path
@@ -103,20 +107,34 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
 
     def load_directory(self, path: str) -> None:
         self._current_path = path.rstrip("/") or "/"
+        self.path_entry.configure(state="normal")
         self.path_entry.delete(0, "end")
         self.path_entry.insert(0, self._current_path)
-        self.status_label.configure(text="Loading...")
+        self.status_label.configure(text=f"Connecting to list {self._current_path}...")
         self._clear_list()
 
-        def task():
+        def task() -> None:
+            error_msg: str | None = None
+            entries: list[dict] = []
             try:
                 ssh = self._get_ssh()
                 if not ssh:
-                    raise RuntimeError("SSH is not configured on this connection.")
+                    raise RuntimeError("SSH is not configured.")
+                host = str(ssh.get("ssh_host") or "").strip()
+                user = str(ssh.get("username") or "").strip()
+                if not host:
+                    raise RuntimeError("Enter the Linux SSH host / IP address first.")
+                if not user:
+                    raise RuntimeError("Enter the Linux SSH username first.")
+                if not str(ssh.get("password") or ""):
+                    raise RuntimeError("Enter the Linux SSH password first.")
                 entries = list_remote_directory(ssh, self._current_path)
-                self.after(0, lambda: self._show_entries(entries, None))
             except Exception as exc:
-                self.after(0, lambda: self._show_entries([], str(exc)))
+                # Capture message now — Python 3 clears `exc` after the except block,
+                # which would leave the UI stuck on "Loading..." forever.
+                error_msg = str(exc) or exc.__class__.__name__
+
+            self.after(0, lambda e=entries, err=error_msg: self._show_entries(e, err))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -143,8 +161,12 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
         self._entries = entries
         self._clear_list()
         if error:
-            self.status_label.configure(text=f"Error: {error}")
+            self.status_label.configure(
+                text=f"Error: {error}",
+                text_color=self.theme.c("error"),
+            )
             return
+        self.status_label.configure(text_color=self.theme.c("text_muted"))
         if not entries:
             self.status_label.configure(text=f"Empty folder: {self._current_path}")
             return

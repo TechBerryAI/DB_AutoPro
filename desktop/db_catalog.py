@@ -140,24 +140,140 @@ def fetch_server_databases(connection: ConnectionResult) -> list[dict[str, Any]]
         return _list_mongodb_databases(connector)
 
     if db_type == DatabaseType.ORACLE:
+        return _list_oracle_databases(connector, connection)
+
+    return []
+
+
+def _list_oracle_databases(connector, connection: ConnectionResult) -> list[dict[str, str]]:
+    """List Oracle PDBs/containers or schemas without relying on ALL_USERS.ACCOUNT_STATUS.
+
+    ACCOUNT_STATUS exists on DBA_USERS, not ALL_USERS — querying it on ALL_USERS
+    raises ORA-00904 for typical application users (e.g. BANKING).
+    """
+    results: list[dict[str, str]] = []
+
+    # Prefer pluggable databases / containers when the login can see them.
+    for sql in (
+        """
+        SELECT name AS name, open_mode AS status
+        FROM v$pdbs
+        ORDER BY name
+        """,
+        """
+        SELECT name AS name, open_mode AS status
+        FROM v$containers
+        WHERE con_id > 0
+        ORDER BY name
+        """,
+    ):
+        try:
+            rows = connector.execute_query(sql)
+        except Exception:
+            continue
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            results.append(
+                {
+                    "name": name,
+                    "owner": "container",
+                    "size": "—",
+                    "status": _oracle_status(row.get("status")),
+                }
+            )
+        if results:
+            return results
+
+    # Privileged inventory of schema users.
+    try:
         rows = connector.execute_query(
             """
-            SELECT username AS name, created, account_status AS status
+            SELECT username AS name, account_status AS status
+            FROM dba_users
+            ORDER BY username
+            """
+        )
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            results.append(
+                {
+                    "name": name,
+                    "owner": "schema",
+                    "size": "—",
+                    "status": _oracle_status(row.get("status")),
+                }
+            )
+        if results:
+            return results
+    except Exception:
+        pass
+
+    # Application users can always see ALL_USERS (no ACCOUNT_STATUS column).
+    try:
+        rows = connector.execute_query(
+            """
+            SELECT username AS name
             FROM all_users
             ORDER BY username
             """
         )
-        return [
-            {
-                "name": row["name"],
-                "owner": "—",
-                "size": "—",
-                "status": (row.get("status") or "online").lower(),
-            }
-            for row in rows
-        ]
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            results.append(
+                {
+                    "name": name,
+                    "owner": "schema",
+                    "size": "—",
+                    "status": "online",
+                }
+            )
+    except Exception:
+        pass
 
-    return []
+    # Always surface the three standard containers for CDB architecture.
+    standard = [
+        ("CDB$ROOT", "read_write", "container"),
+        ("PDB$SEED", "read_only", "container"),
+    ]
+    service = (connection.database or "ORCLPDB1").strip().upper() or "ORCLPDB1"
+    standard.append((service, "online", "service"))
+
+    existing = {r["name"].upper(): r for r in results}
+    merged: list[dict[str, str]] = []
+    for name, status, owner in standard:
+        if name in existing:
+            merged.append(existing.pop(name))
+        else:
+            merged.append(
+                {
+                    "name": name,
+                    "owner": owner,
+                    "size": "—",
+                    "status": status,
+                }
+            )
+    for row in results:
+        key = row["name"].upper()
+        if key not in {m["name"].upper() for m in merged}:
+            merged.append(row)
+    return merged
+
+
+def _oracle_status(raw: Any) -> str:
+    text = str(raw or "online").strip().lower().replace(" ", "_")
+    if text in {"read_write", "open", "unlocked", ""}:
+        return "online"
+    if text in {"read_only", "mounted", "locked", "expired", "expired_&_locked"}:
+        return text.replace("&", "and")
+    if "locked" in text or "expired" in text:
+        return "locked"
+    return text or "online"
 
 
 def _normalize_row(row: dict[str, Any]) -> dict[str, str]:

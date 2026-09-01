@@ -377,12 +377,8 @@ class DatabaseAutomationApp(ctk.CTk):
         close_ssh_tunnel()
         apply_connection(connection)
         effective = open_ssh_tunnel(connection)
-        if connection.ssh_enabled and effective.host != connection.host:
-            settings = get_settings()
-            profile = "default"
-            if profile in settings.connections:
-                settings.connections[profile].host = effective.host
-                settings.connections[profile].port = effective.port
+        # Re-apply so DB uses the tunnel bind address while SSH extras keep the real host.
+        apply_connection(effective)
         self.set_connection(effective, navigate_to=navigate_to)
 
     def set_connection(
