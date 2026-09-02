@@ -19,7 +19,7 @@ class PostgreSQLConnector(BaseConnector):
             import psycopg2
             from psycopg2.extras import RealDictCursor
 
-            timeout = (self.config.extra_options or {}).get("connect_timeout", 10)
+            timeout = (self.config.extra_options or {}).get("connect_timeout", 5)
             ssl_modes: list[str] = []
             if self.config.ssl_mode:
                 ssl_modes.append(self.config.ssl_mode)

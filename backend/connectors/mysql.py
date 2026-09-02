@@ -24,7 +24,7 @@ class MySQLConnector(BaseConnector):
                 "user": self.config.username,
                 "password": self.config.password,
                 "connection_timeout": (self.config.extra_options or {}).get(
-                    "connect_timeout", 10
+                    "connect_timeout", 5
                 ),
             }
             # Omit database for server-level ops (SHOW DATABASES / SCHEMATA).

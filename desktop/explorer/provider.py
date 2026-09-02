@@ -35,6 +35,7 @@ class SchemaNode:
     trigger_count: int = 0
     index_count: int = 0
     foreign_key_count: int = 0
+    status: str = ""
 
 
 @dataclass

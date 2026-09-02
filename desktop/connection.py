@@ -65,7 +65,7 @@ class ConnectionResult:
         remote_host = self.endpoint_host
         remote_port = self.endpoint_port
         opts: dict = {
-            "connect_timeout": 10,
+            "connect_timeout": 5,
             "mongo_host": remote_host,
             "mongo_port": remote_port,
             "db_host": remote_host,
@@ -154,12 +154,49 @@ def _friendly_error(exc: Exception, connection: ConnectionResult | None = None) 
     return message
 
 
+def _reachable_saved_oracle_hint(failed_host: str) -> str:
+    """If a saved Oracle host answers on the wire, mention it (no passwords)."""
+    try:
+        from desktop.connection_store import load_saved_servers
+        from desktop.ssh_tunnel import probe_tcp
+    except Exception:
+        return ""
+
+    hints: list[str] = []
+    for server in load_saved_servers():
+        if getattr(server, "db_type", None) != DatabaseType.ORACLE.value:
+            continue
+        host = (server.host or "").strip()
+        if not host or host == failed_host:
+            continue
+        port = int(server.port or 1521)
+        ssh_port = int(getattr(server, "ssh_port", None) or 22)
+        db_ok = probe_tcp(host, port, timeout=2.0) is None
+        ssh_ok = probe_tcp(host, ssh_port, timeout=2.0) is None
+        if db_ok or ssh_ok:
+            parts = []
+            if ssh_ok:
+                parts.append(f"SSH :{ssh_port}")
+            if db_ok:
+                parts.append(f"Oracle :{port}")
+            hints.append(f"'{server.name}' -> {host} ({', '.join(parts)} open)")
+    if not hints:
+        return ""
+    return (
+        "\n\nA saved Oracle server is reachable from this PC - open it under "
+        "Saved Connection instead of the unreachable host:\n  - "
+        + "\n  - ".join(hints)
+    )
+
+
 def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
     """Test connectivity and return (success, message)."""
-    from desktop.ssh_tunnel import ssh_tunnel_session
+    from dataclasses import replace
 
-    try:
-        with ssh_tunnel_session(connection) as effective:
+    from desktop.ssh_tunnel import probe_tcp, ssh_tunnel_session
+
+    def _probe_db(conn: ConnectionResult) -> tuple[bool, str]:
+        with ssh_tunnel_session(conn) as effective:
             apply_connection(effective)
             info = effective.to_connection_info()
             connector = get_connector_from_info(effective.db_type, info)
@@ -167,11 +204,46 @@ def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
             if health.get("status") == "healthy":
                 version = health.get("version", "unknown")
                 latency = health.get("latency_ms", 0)
-                via = " via SSH" if connection.ssh_enabled else ""
+                via = " via SSH" if conn.ssh_enabled else ""
                 return True, f"Connected successfully{via} ({version}, {latency:.0f} ms)"
             error = health.get("error", "Connection failed")
-            return False, _friendly_error(Exception(error), connection)
+            return False, _friendly_error(Exception(error), conn)
+
+    try:
+        return _probe_db(connection)
     except RuntimeError as exc:
-        return False, str(exc)
+        ssh_err = str(exc)
+        # SSH unreachable: try direct DB so Connect is not blocked by a dead SSH hop.
+        if connection.ssh_enabled and (
+            "SSH connection failed" in ssh_err
+            or "timed out" in ssh_err.lower()
+            or "connection refused" in ssh_err.lower()
+        ):
+            direct = replace(connection, ssh_enabled=False)
+            db_probe = probe_tcp(connection.host, connection.port, timeout=5.0)
+            try:
+                ok, message = _probe_db(direct)
+            except Exception as direct_exc:
+                ok, message = False, _friendly_error(direct_exc, direct)
+            if ok:
+                return (
+                    True,
+                    f"{message}\n\n"
+                    "Note: SSH was unreachable, so the app connected directly. "
+                    "Uncheck the SSH tunnel option to skip this next time.",
+                )
+            alt = _reachable_saved_oracle_hint(connection.host)
+            if db_probe is not None:
+                return (
+                    False,
+                    f"Cannot reach this Linux/Oracle host - credentials were not "
+                    f"verified yet.\n"
+                    f"- SSH {connection.ssh_host or connection.host}:"
+                    f"{connection.ssh_port} - failed\n"
+                    f"- Database {connection.host}:{connection.port} - {db_probe}\n\n"
+                    f"{ssh_err}{alt}"
+                )
+            return False, f"{ssh_err}\n\nDirect database login also failed:\n{message}{alt}"
+        return False, ssh_err
     except Exception as exc:
         return False, _friendly_error(exc, connection)

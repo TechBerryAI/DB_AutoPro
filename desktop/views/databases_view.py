@@ -7,6 +7,7 @@ from typing import Any
 
 import customtkinter as ctk
 
+from backend.models.schemas import DatabaseType
 from desktop.explorer.factory import get_explorer_provider
 from desktop.explorer.provider import (
     BackupInfo,
@@ -22,7 +23,6 @@ from desktop.explorer.provider import (
 )
 from desktop.explorer.widgets import kv_grid, section_card, simple_table, tree_row
 from desktop.theme import ThemeManager
-from desktop.ui_components import section_header
 from desktop.views.base_view import BaseView
 
 _SCHEMA_OBJECT_TYPES: list[tuple[str, str, str]] = [
@@ -72,32 +72,53 @@ class DatabasesView(BaseView):
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=1)
 
-        self._scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self._scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(16, 12))
-        self._scroll.grid_columnconfigure(0, weight=1)
-
-        header = ctk.CTkFrame(self._scroll, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 12))
+        # Fixed page chrome — stays put while inventory scrolls.
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(12, 8))
         header.grid_columnconfigure(0, weight=1)
 
         left = ctk.CTkFrame(header, fg_color="transparent")
         left.grid(row=0, column=0, sticky="ew")
-        section_header(
-            left,
-            self.theme,
-            "Databases",
-            "Database Explorer — metadata, schemas, and object structure",
-        )
+        title_row = ctk.CTkFrame(left, fg_color="transparent")
+        title_row.pack(fill="x")
+        ctk.CTkFrame(
+            title_row,
+            width=4,
+            height=22,
+            corner_radius=2,
+            fg_color=self.theme.c("primary"),
+        ).pack(side="left", padx=(0, 10))
+        text_col = ctk.CTkFrame(title_row, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            text_col,
+            text="Databases",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            text_col,
+            text="Database Explorer — metadata, schemas, and object structure",
+            font=ctk.CTkFont(size=12),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
 
         ctk.CTkButton(
             header,
             text="Refresh",
-            width=100,
-            height=32,
+            width=96,
+            height=30,
             command=self.refresh,
         ).grid(row=0, column=1, sticky="e", padx=(12, 0))
+
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self._scroll.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 8))
+        self._scroll.grid_columnconfigure(0, weight=1)
 
         self._list_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
         self._list_frame.pack(fill="both", expand=True)
@@ -187,18 +208,26 @@ class DatabasesView(BaseView):
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=self.theme.c("primary"),
             anchor="w",
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 2))
+        inventory_hint = (
+            "Expand a container (CDB$ROOT / PDB$SEED / ORCLPDB1) to list users with status."
+            if self.connection and self.connection.db_type == DatabaseType.ORACLE
+            else "Expand a database to open the explorer (schemas, storage, configuration, backups)."
+        )
         ctk.CTkLabel(
             self._list_frame,
-            text="Expand a database to open the explorer (schemas, storage, configuration, backups).",
+            text=inventory_hint,
             font=ctk.CTkFont(size=12),
             text_color=self.theme.c("text_muted"),
             anchor="w",
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w", pady=(0, 8))
 
         for db in databases:
             self._summaries[db.name] = db
             self._add_database_card(db)
+
+        # Keep last cards clear of the status footer while scrolling.
+        ctk.CTkFrame(self._list_frame, fg_color="transparent", height=28).pack(fill="x")
 
         if previous and previous in self._detail_hosts:
             self._toggle_database(previous)
@@ -206,7 +235,7 @@ class DatabasesView(BaseView):
     def _add_database_card(self, db: DatabaseSummary) -> None:
         assert self._list_frame is not None
         block = ctk.CTkFrame(self._list_frame, fg_color="transparent")
-        block.pack(fill="x", pady=5)
+        block.pack(fill="x", pady=3)
 
         card = ctk.CTkFrame(
             block,
@@ -219,7 +248,7 @@ class DatabasesView(BaseView):
         card.pack(fill="x")
 
         top = ctk.CTkFrame(card, fg_color="transparent")
-        top.pack(fill="x", padx=12, pady=(10, 10))
+        top.pack(fill="x", padx=12, pady=8)
 
         chevron = ctk.CTkLabel(
             top,
@@ -241,12 +270,13 @@ class DatabasesView(BaseView):
 
         status_color = (
             self.theme.c("success")
-            if db.status == "online"
+            if db.status in {"online", "read_write", "open"}
             else self.theme.c("warning")
         )
+        status_text = db.status.replace("_", " ").upper()
         ctk.CTkLabel(
             top,
-            text=db.status.upper(),
+            text=status_text,
             font=ctk.CTkFont(size=10, weight="bold"),
             text_color=status_color,
             fg_color=self.theme.c("bg_elevated"),
@@ -304,8 +334,181 @@ class DatabasesView(BaseView):
         chev = self._chevron_labels.get(name)
         if chev is not None:
             chev.configure(text="▼")
-        detail.pack(fill="both", expand=True, padx=(20, 0), pady=(6, 4))
-        self._build_explorer_shell(name, detail)
+        detail.pack(fill="x", expand=False, padx=(16, 0), pady=(4, 2))
+        if self.connection and self.connection.db_type == DatabaseType.ORACLE:
+            self._build_oracle_container_shell(name, detail)
+        else:
+            self._build_explorer_shell(name, detail)
+
+    def _oracle_status_colors(self, status: str) -> tuple[str, str]:
+        key = (status or "").strip().upper()
+        if key in {"OPEN", "ONLINE", "READ WRITE", "READWRITE", "READ_WRITE"}:
+            return self.theme.c("success"), self.theme.c("bg_elevated")
+        if "LOCKED" in key or "EXPIRED" in key:
+            return self.theme.c("warning"), self.theme.c("bg_elevated")
+        return self.theme.c("text_muted"), self.theme.c("bg_elevated")
+
+    def _build_oracle_container_shell(self, database: str, host: ctk.CTkFrame) -> None:
+        for child in host.winfo_children():
+            child.destroy()
+
+        header = ctk.CTkFrame(host, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(8, 2))
+        ctk.CTkLabel(
+            header,
+            text=f"Container · {database}",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            header,
+            text="Users / schemas in this container (status from DBA_USERS / inventory).",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        ).pack(anchor="w", pady=(1, 0))
+
+        loading = ctk.CTkLabel(
+            host,
+            text="Loading users…",
+            font=ctk.CTkFont(size=12),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        )
+        loading.pack(anchor="w", padx=12, pady=6)
+
+        def task() -> None:
+            try:
+                users = self._provider.list_schemas(database) if self._provider else []
+                info = self._provider.get_general_info(database) if self._provider else {}
+                self.after(0, lambda: self._render_oracle_users(host, database, users, info))
+            except Exception as exc:
+                self.after(
+                    0,
+                    lambda: self._render_oracle_users(host, database, [], {"Error": str(exc)}),
+                )
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _render_oracle_users(
+        self,
+        host: ctk.CTkFrame,
+        database: str,
+        users: list[SchemaNode],
+        info: dict[str, str],
+    ) -> None:
+        for child in host.winfo_children():
+            child.destroy()
+
+        meta = ctk.CTkFrame(
+            host,
+            fg_color=self.theme.c("bg_card"),
+            corner_radius=8,
+            border_width=1,
+            border_color=self.theme.c("border_subtle"),
+        )
+        meta.pack(fill="x", padx=10, pady=(6, 6))
+        ctk.CTkLabel(
+            meta,
+            text="General Information",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+        for key, value in info.items():
+            if key == "Note":
+                continue
+            row = ctk.CTkFrame(meta, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=1)
+            ctk.CTkLabel(
+                row,
+                text=f"{key}:",
+                width=130,
+                anchor="w",
+                font=ctk.CTkFont(size=11),
+                text_color=self.theme.c("text_muted"),
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row,
+                text=str(value),
+                anchor="w",
+                font=ctk.CTkFont(size=11),
+                text_color=self.theme.c("text_primary"),
+            ).pack(side="left", fill="x", expand=True)
+        note = info.get("Note")
+        if note:
+            ctk.CTkLabel(
+                meta,
+                text=note,
+                font=ctk.CTkFont(size=11),
+                text_color=self.theme.c("text_muted"),
+                anchor="w",
+                justify="left",
+                wraplength=620,
+            ).pack(anchor="w", padx=12, pady=(4, 8))
+        else:
+            ctk.CTkFrame(meta, fg_color="transparent", height=6).pack()
+
+        # Use the page scroll only — avoid nested scrollable frames.
+        list_host = ctk.CTkFrame(host, fg_color="transparent")
+        list_host.pack(fill="x", padx=6, pady=(0, 8))
+
+        if not users:
+            ctk.CTkLabel(
+                list_host,
+                text=(
+                    "No users visible for this container with the current login. "
+                    "Enable SSH (sqlplus / as sysdba) or connect as SYS/SYSTEM to the CDB "
+                    "to load CDB$ROOT users. ORCLPDB1 users load from the PDB connection."
+                    if database.upper() != "ORCLPDB1"
+                    else "No users found in this container."
+                ),
+                font=ctk.CTkFont(size=12),
+                text_color=self.theme.c("text_muted"),
+                justify="left",
+                anchor="w",
+                wraplength=640,
+            ).pack(anchor="w", padx=8, pady=6)
+            return
+
+        ctk.CTkLabel(
+            list_host,
+            text=f"USERS ({len(users)})",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=self.theme.c("primary"),
+            anchor="w",
+        ).pack(anchor="w", padx=8, pady=(2, 4))
+
+        for user in users:
+            card = ctk.CTkFrame(
+                list_host,
+                fg_color=self.theme.c("bg_card"),
+                corner_radius=8,
+                border_width=1,
+                border_color=self.theme.c("border_subtle"),
+            )
+            card.pack(fill="x", padx=4, pady=2)
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=6)
+            ctk.CTkLabel(
+                row,
+                text=user.name,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=self.theme.c("text_primary"),
+                anchor="w",
+            ).pack(side="left")
+            status = (user.status or "OPEN").strip()
+            color, bg = self._oracle_status_colors(status)
+            ctk.CTkLabel(
+                row,
+                text=status.upper(),
+                font=ctk.CTkFont(size=10, weight="bold"),
+                text_color=color,
+                fg_color=bg,
+                corner_radius=8,
+                height=20,
+            ).pack(side="right")
 
     def _build_explorer_shell(self, database: str, host: ctk.CTkFrame) -> None:
         for child in host.winfo_children():

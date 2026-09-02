@@ -10,6 +10,49 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+def format_ssh_connect_error(
+    host: str,
+    port: int,
+    username: str,
+    exc: Exception,
+    *,
+    hint_hosts: list[str] | None = None,
+) -> str:
+    """Turn a Paramiko/network error into an actionable message for the UI."""
+    detail = str(exc).strip() or exc.__class__.__name__
+    lower = detail.lower()
+    lines = [f"SSH connection failed to {username}@{host}:{port}.", detail]
+
+    if "timed out" in lower or isinstance(exc, TimeoutError):
+        lines = [
+            f"SSH connection timed out to {host}:{port}.",
+            "The server may be offline, on a different network, or blocking port 22.",
+            "Verify the IP address, ping the host, and confirm SSH (sshd) is running.",
+        ]
+    elif "authentication" in lower:
+        lines = [
+            f"SSH authentication failed for Linux user '{username}' on {host}:{port}.",
+            "Use the Linux SSH login (not the database password unless they match).",
+        ]
+    elif "connection refused" in lower:
+        lines = [
+            f"SSH connection refused on {host}:{port}.",
+            "SSH may not be running on that host, or a firewall is blocking port 22.",
+        ]
+    elif "no route" in lower or "unreachable" in lower:
+        lines = [
+            f"Network unreachable: cannot connect to {host}:{port}.",
+            "Check VPN, Wi-Fi, and that this PC can reach the server IP.",
+        ]
+
+    if hint_hosts:
+        unique = [h for h in hint_hosts if h and h != host]
+        if unique:
+            lines.append(f"Known working SSH host for this connection: {unique[0]}")
+
+    return "\n".join(lines)
+
+
 def resolve_ssh_host(ssh_host: str | None, fallback_host: str) -> str:
     """Resolve SSH hostname, falling back to the database host IP if needed."""
     candidates: list[str] = []
@@ -132,11 +175,15 @@ def run_ssh_command(
         err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
         return exit_code, out_text, err_text
     except paramiko.AuthenticationException as exc:
-        raise RuntimeError(f"SSH authentication failed for Linux user '{username}'.") from exc
+        raise RuntimeError(
+            format_ssh_connect_error(resolved_host, ssh_port, username, exc)
+        ) from exc
     except RuntimeError:
         raise
     except Exception as exc:
-        raise RuntimeError(f"SSH connection failed: {exc}") from exc
+        raise RuntimeError(
+            format_ssh_connect_error(resolved_host, ssh_port, username, exc)
+        ) from exc
     finally:
         client.close()
 
@@ -159,6 +206,96 @@ def ssh_options_from_connection(conn: Any) -> dict[str, Any]:
         ),
         "remote_backup_dir": opts.get("remote_backup_dir", "/mnt/backup"),
     }
+
+
+def ensure_remote_backup_dir(ssh: dict[str, Any], preferred: str | None = None) -> str:
+    """Create a writable folder on the Linux host for remote backups.
+
+    Tries the preferred path first (UI / saved remote_backup_dir /mnt/backup),
+    then falls back to ~/db_autopro_backups so backups still succeed when
+    /mnt/backup is missing or not writable.
+    """
+    import shlex
+
+    preferred_path = (
+        (preferred or ssh.get("remote_backup_dir") or "/mnt/backup").strip().rstrip("/")
+        or "/mnt/backup"
+    )
+    home = ""
+    try:
+        code, home_out, _err = run_ssh_command(
+            command='printf %s "$HOME"',
+            timeout=30,
+            **_ssh_kwargs(ssh),
+        )
+        if code == 0:
+            home = (home_out or "").strip()
+    except Exception:
+        home = ""
+    if not home:
+        user = str(ssh.get("username") or "user").strip() or "user"
+        home = f"/home/{user}"
+    fallback = f"{home.rstrip('/')}/db_autopro_backups"
+
+    candidates: list[str] = []
+    for path in (preferred_path, fallback):
+        if path and path not in candidates:
+            candidates.append(path)
+
+    errors: list[str] = []
+    for path in candidates:
+        cmd = (
+            f"mkdir -p {shlex.quote(path)} && "
+            f"test -w {shlex.quote(path)} && "
+            f"printf ok"
+        )
+        try:
+            code, out, err = run_ssh_command(
+                command=cmd,
+                timeout=60,
+                **_ssh_kwargs(ssh),
+            )
+        except Exception as exc:
+            errors.append(f"{path}: {exc}")
+            continue
+        if code == 0 and "ok" in (out or ""):
+            return path
+        detail = (err or out or f"exit {code}").strip()
+        errors.append(f"{path}: {detail}")
+
+    raise RuntimeError(
+        "Could not create a writable backup folder on the Linux server. Tried:\n  - "
+        + "\n  - ".join(errors)
+        + "\n\nChoose a folder you can write to in Server path "
+        "(for example your home directory)."
+    )
+
+
+def ssh_options_for_backup(request: Any, conn: Any) -> dict[str, Any]:
+    """Resolve SSH settings for a backup (connected profile or external Linux server)."""
+    from backend.models.schemas import BackupSourceType
+
+    if (
+        request.use_remote_exec
+        and getattr(request, "backup_source", None) == BackupSourceType.OTHER_SERVER
+    ):
+        host = (request.external_ssh_host or "").strip()
+        user = (request.external_ssh_username or "").strip()
+        if not host or not user:
+            return {}
+        return {
+            "ssh_host": host,
+            "fallback_host": host,
+            "ssh_port": int(request.external_ssh_port or 22),
+            "username": user,
+            "password": request.external_ssh_password or "",
+            "mongodump_path": (
+                request.remote_binary_path
+                or "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongodump"
+            ),
+            "remote_backup_dir": request.remote_output_dir or "/mnt/backup",
+        }
+    return ssh_options_from_connection(conn)
 
 
 def pg_endpoint_from_connection(conn: Any) -> tuple[str, int]:
@@ -422,23 +559,43 @@ def _open_ssh_client(ssh: dict[str, Any]):
     except ImportError as exc:
         raise RuntimeError("paramiko is not installed. Run: pip install paramiko") from exc
 
-    resolved_host = resolve_ssh_host(ssh["ssh_host"], ssh["fallback_host"])
+    host = str(ssh.get("ssh_host") or "").strip()
+    fallback = str(ssh.get("fallback_host") or host).strip()
+    username = str(ssh.get("username") or "").strip()
+    password = str(ssh.get("password") or "")
+    try:
+        port = int(ssh.get("ssh_port") or 22)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SSH port must be a number (default 22).") from exc
+
+    if not host:
+        raise RuntimeError("SSH host / IP is required.")
+    if not username:
+        raise RuntimeError("SSH username is required.")
+
+    resolved_host = resolve_ssh_host(host, fallback or host)
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         client.connect(
             hostname=resolved_host,
-            port=ssh["ssh_port"],
-            username=ssh["username"],
-            password=ssh["password"] or None,
+            port=port,
+            username=username,
+            password=password or None,
             allow_agent=False,
             look_for_keys=False,
             timeout=15,
+            banner_timeout=30,
+            auth_timeout=30,
         )
     except paramiko.AuthenticationException as exc:
-        raise RuntimeError(f"SSH authentication failed for Linux user '{ssh['username']}'.") from exc
+        raise RuntimeError(
+            format_ssh_connect_error(resolved_host, port, username, exc)
+        ) from exc
     except Exception as exc:
-        raise RuntimeError(f"SSH connection failed: {exc}") from exc
+        raise RuntimeError(
+            format_ssh_connect_error(resolved_host, port, username, exc)
+        ) from exc
     return client
 
 
@@ -957,3 +1114,135 @@ def remove_remote_path(ssh: dict[str, Any], remote_path: str) -> None:
     exit_code, _stdout, stderr = run_ssh_command(command=cmd, timeout=120, **_ssh_kwargs(ssh))
     if exit_code != 0:
         raise RuntimeError(f"Could not remove remote path {remote_path}: {stderr.strip()}")
+
+
+def ssh_options_from_external(
+    *,
+    host: str,
+    port: int = 22,
+    username: str,
+    password: str = "",
+) -> dict[str, Any]:
+    """Build an SSH options dict for a standalone Linux server (not the DB connection)."""
+    host = host.strip()
+    return {
+        "ssh_host": host,
+        "fallback_host": host,
+        "ssh_port": int(port or 22),
+        "username": username.strip(),
+        "password": password or "",
+    }
+
+
+def resolve_remote_pg_tool_path(ssh: dict[str, Any], tool: str) -> str:
+    """Locate pg_restore, psql, or another PostgreSQL CLI next to pg_dump on the server."""
+    pg_dump = resolve_remote_pg_dump_path(ssh, None)
+    from pathlib import PurePosixPath
+
+    candidate = str(PurePosixPath(pg_dump).parent / tool)
+    kwargs = _ssh_kwargs(ssh)
+    cmd = f"test -x {shlex.quote(candidate)} && echo {shlex.quote(candidate)}"
+    exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=30, **kwargs)
+    if exit_code == 0:
+        for line in stdout.splitlines():
+            if line.strip():
+                return line.strip()
+    discovery = f"command -v {shlex.quote(tool)} 2>/dev/null"
+    exit_code, stdout, _stderr = run_ssh_command(command=discovery, timeout=30, **kwargs)
+    if exit_code == 0:
+        for line in stdout.splitlines():
+            if line.strip():
+                return line.strip()
+    raise RuntimeError(
+        f"{tool} was not found on the Linux server. "
+        "Install PostgreSQL client tools (e.g. sudo apt install postgresql-client)."
+    )
+
+
+def resolve_remote_mysql_path(ssh: dict[str, Any]) -> str:
+    """Locate mysql client on the Linux server."""
+    kwargs = _ssh_kwargs(ssh)
+    for cmd in (
+        "command -v mysql 2>/dev/null",
+        "ls -1 /usr/bin/mysql /usr/local/bin/mysql 2>/dev/null | head -n 1",
+    ):
+        exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=30, **kwargs)
+        if exit_code != 0:
+            continue
+        for line in stdout.splitlines():
+            if line.strip():
+                return line.strip()
+    raise RuntimeError(
+        "mysql client was not found on the Linux server. "
+        "Install it (e.g. sudo apt install mysql-client)."
+    )
+
+
+def build_pg_restore_remote_command(
+    *,
+    pg_restore_path: str,
+    pg_host: str,
+    pg_port: int,
+    username: str,
+    password: str,
+    database: str,
+    backup_path: str,
+    peer_auth: bool = False,
+    ssh_username: str | None = None,
+) -> str:
+    """Build pg_restore for a custom-format dump already on the Linux server."""
+    restore_cmd = (
+        f"{shlex.quote(pg_restore_path)} "
+        f"-h {shlex.quote(pg_host)} -p {pg_port} "
+        f"-U {shlex.quote(username)} -d {shlex.quote(database)} "
+        f"--clean --if-exists --no-owner "
+        f"{shlex.quote(backup_path)}"
+    )
+    if peer_auth:
+        return wrap_command_as_postgres_os_user(ssh_username or "", restore_cmd)
+    env = f"PGPASSWORD={shlex.quote(password)} PGCONNECT_TIMEOUT=20"
+    return f"{env} {restore_cmd}"
+
+
+def build_psql_restore_remote_command(
+    *,
+    psql_path: str,
+    pg_host: str,
+    pg_port: int,
+    username: str,
+    password: str,
+    database: str,
+    backup_path: str,
+    peer_auth: bool = False,
+    ssh_username: str | None = None,
+) -> str:
+    """Build psql -f for a plain SQL dump already on the Linux server."""
+    restore_cmd = (
+        f"{shlex.quote(psql_path)} "
+        f"-h {shlex.quote(pg_host)} -p {pg_port} "
+        f"-U {shlex.quote(username)} -d {shlex.quote(database)} "
+        f"-f {shlex.quote(backup_path)}"
+    )
+    if peer_auth:
+        return wrap_command_as_postgres_os_user(ssh_username or "", restore_cmd)
+    env = f"PGPASSWORD={shlex.quote(password)} PGCONNECT_TIMEOUT=20"
+    return f"{env} {restore_cmd}"
+
+
+def build_mysql_restore_remote_command(
+    *,
+    mysql_path: str,
+    mysql_host: str,
+    mysql_port: int,
+    username: str,
+    password: str,
+    database: str,
+    backup_path: str,
+) -> str:
+    """Build mysql import for a .sql file already on the Linux server."""
+    return (
+        f"{shlex.quote(mysql_path)} "
+        f"-h {shlex.quote(mysql_host)} -P {mysql_port} "
+        f"-u {shlex.quote(username)} -p{shlex.quote(password)} "
+        f"{shlex.quote(database)} < {shlex.quote(backup_path)}"
+    )

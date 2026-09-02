@@ -18,4 +18,8 @@ def get_explorer_provider(connection: ConnectionResult) -> ExplorerProvider:
         from desktop.explorer.mysql_provider import MySQLExplorerProvider
 
         return MySQLExplorerProvider(connection)
+    if connection.db_type == DatabaseType.ORACLE:
+        from desktop.explorer.oracle_provider import OracleExplorerProvider
+
+        return OracleExplorerProvider(connection)
     return StubExplorerProvider(connection)

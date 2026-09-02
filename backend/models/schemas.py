@@ -70,6 +70,23 @@ class MongoRestoreScope(str, Enum):
     ARCHIVE = "archive"
 
 
+class RestoreSourceType(str, Enum):
+    LOCAL = "local"
+    CONNECTED_SERVER = "connected_server"
+    OTHER_SERVER = "other_server"
+
+
+class RestoreTargetType(str, Enum):
+    LOCAL = "local"
+    LINUX_SERVER = "linux_server"
+
+
+class BackupSourceType(str, Enum):
+    LOCAL = "local"
+    CONNECTED_SERVER = "connected_server"
+    OTHER_SERVER = "other_server"
+
+
 class BackupMethod(str, Enum):
     PG_DUMP = "pg_dump"
     PG_DUMPALL = "pg_dumpall"
@@ -159,9 +176,14 @@ class BackupRequest(BaseModel):
     compress: bool = True
     output_path: str | None = None
     local_output_dir: str | None = None
+    backup_source: BackupSourceType = BackupSourceType.LOCAL
     use_remote_exec: bool = False
     remote_binary_path: str | None = None
     remote_output_dir: str | None = None
+    external_ssh_host: str | None = None
+    external_ssh_port: int = 22
+    external_ssh_username: str | None = None
+    external_ssh_password: str | None = None
     backup_folder_name: str | None = None
     collection: str | None = None
     gzip_archive: bool = False
@@ -187,9 +209,15 @@ class RestoreRequest(BaseModel):
     mongo_restore_scope: MongoRestoreScope | None = None
     gzip_archive: bool = False
     validate_backup: bool = True
+    restore_source: RestoreSourceType = RestoreSourceType.LOCAL
+    restore_target: RestoreTargetType = RestoreTargetType.LINUX_SERVER
     use_remote_exec: bool = False
     remote_binary_path: str | None = None
     remote_source_dir: str | None = None
+    external_ssh_host: str | None = None
+    external_ssh_port: int = 22
+    external_ssh_username: str | None = None
+    external_ssh_password: str | None = None
     drop_existing: bool = False
 
 
