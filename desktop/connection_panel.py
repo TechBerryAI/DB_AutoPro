@@ -1033,8 +1033,11 @@ class ConnectionPanel(ctk.CTkFrame):
         if saved_mode:
             self.test_btn.pack_forget()
             self.save_btn.pack_forget()
-            if not self.delete_btn.winfo_manager():
-                self.delete_btn.pack(side="left", padx=(0, 12), before=self.connect_btn)
+            self.connect_btn.pack_forget()
+            self.delete_btn.pack_forget()
+            # Connect first (left), Delete second (right).
+            self.connect_btn.pack(side="left", padx=(0, 12))
+            self.delete_btn.pack(side="left")
         else:
             self.delete_btn.pack_forget()
             if not self.test_btn.winfo_manager():
