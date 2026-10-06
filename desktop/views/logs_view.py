@@ -8,7 +8,7 @@ import customtkinter as ctk
 
 from desktop.execution_log import ExecutionLogPanel, ExecutionLogStore
 from desktop.theme import ThemeManager
-from desktop.ui_components import section_header
+from desktop.ops_widgets import page_header
 from desktop.views.base_view import BaseView
 
 
@@ -34,12 +34,12 @@ class LogsView(BaseView):
         self.grid_rowconfigure(1, weight=1)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 12))
-        section_header(
+        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 8))
+        page_header(
             header,
             self.theme,
             "Execution Log",
-            "Application activity, navigation, and operation messages",
+            subtitle="Application activity, navigation, and operation messages",
         )
 
         self._panel = ExecutionLogPanel(self, self.theme, store=log_store)

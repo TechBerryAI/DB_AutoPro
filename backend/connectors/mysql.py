@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from backend.connectors.base import BaseConnector
 from backend.core.exceptions import ConnectorError
@@ -13,6 +14,20 @@ class MySQLConnector(BaseConnector):
     """MySQL connector using mysql-connector-python."""
 
     db_type = DatabaseType.MYSQL
+
+    @contextmanager
+    def reused_connection(self) -> Iterator[None]:
+        """Run many reads on one connection. Each query otherwise opens a new one."""
+        conn = self._connect()
+        self._held_conn = conn
+        try:
+            yield
+        finally:
+            self._held_conn = None
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _connect(self) -> Any:
         try:
@@ -37,7 +52,9 @@ class MySQLConnector(BaseConnector):
             raise ConnectorError(f"MySQL connection failed: {exc}") from exc
 
     def test_connection(self) -> bool:
-        conn = self._connect()
+        held = getattr(self, "_held_conn", None)
+        own = held is None
+        conn = held if held is not None else self._connect()
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT 1")
@@ -45,20 +62,26 @@ class MySQLConnector(BaseConnector):
             cursor.close()
             return result[0] == 1
         finally:
-            conn.close()
+            if own:
+                conn.close()
 
     def execute_query(
         self, query: str, params: tuple[Any, ...] | None = None
     ) -> list[dict[str, Any]]:
-        conn = self._connect()
+        held = getattr(self, "_held_conn", None)
+        own = held is None
+        conn = held if held is not None else self._connect()
         try:
             cursor = conn.cursor(dictionary=True)
-            cursor.execute(query, params or ())
-            rows = cursor.fetchall() if cursor.description else []
-            cursor.close()
-            return list(rows)
+            try:
+                cursor.execute(query, params or ())
+                rows = cursor.fetchall() if cursor.description else []
+                return list(rows)
+            finally:
+                cursor.close()
         finally:
-            conn.close()
+            if own:
+                conn.close()
 
     def execute_script(self, script: str) -> None:
         conn = self._connect()

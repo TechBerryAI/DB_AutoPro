@@ -46,8 +46,21 @@ class BaseView(ctk.CTkFrame):
     def get_active_profile(self) -> str:
         return "default"
 
+    def set_connection(self, connection: ConnectionResult | None) -> None:
+        """Push the active session connection without rebuilding the page."""
+        self.connection = connection
+        if hasattr(self, "on_connection_changed"):
+            try:
+                self.on_connection_changed()
+            except Exception:
+                pass
+
     def card_frame(self, parent: ctk.CTkFrame | None = None) -> ctk.CTkFrame:
-        """Styled card container matching the enterprise theme."""
+        """Styled card container matching the enterprise theme.
+
+        DEPRECATED (UI consolidation, docs/ui_plan.md §8): use
+        design_system.glass_surface / elevated_card instead.
+        """
         target = parent or self
         return ctk.CTkFrame(
             target,
@@ -61,14 +74,12 @@ class BaseView(ctk.CTkFrame):
         """Connection is shown in the sidebar; no redundant strip per page."""
         return None
 
-    def create_section_title(self, text: str, parent: ctk.CTkFrame | None = None) -> ctk.CTkLabel:
+    def create_section_title(self, text: str, parent: ctk.CTkFrame | None = None) -> ctk.CTkFrame:
+        """Shared page title — same style as ops_widgets.page_header."""
+        from desktop.ops_widgets import page_header
+
         target = parent or self
-        return ctk.CTkLabel(
-            target,
-            text=text,
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=self.theme.c("text_primary"),
-        )
+        return page_header(target, self.theme, text, pady=(0, 12))
 
     def create_progress_section(self) -> tuple[ctk.CTkProgressBar, ctk.CTkLabel]:
         progress = ctk.CTkProgressBar(self)

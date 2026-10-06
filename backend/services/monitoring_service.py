@@ -147,6 +147,8 @@ class MonitoringService:
         self._audit_cache_mtime: float = -1.0
         self._net_sample: tuple[float, int, int] | None = None
         self._cpu_ready = False
+        self._cpu_freq_checked = False
+        self._cpu_freq_mhz: float | None = None
 
     def health_check(self, *, check_databases: bool = True) -> list[HealthCheckResult]:
         """Run health checks on application and optionally configured databases."""
@@ -202,8 +204,15 @@ class MonitoringService:
         else:
             cpu_percent = psutil.cpu_percent(interval=None)
 
-        freq = psutil.cpu_freq()
-        cpu_freq_mhz = round(freq.current, 0) if freq and freq.current else None
+        if not self._cpu_freq_checked:
+            # cpu_freq() can stall for seconds on Windows; the value barely changes.
+            self._cpu_freq_checked = True
+            try:
+                freq = psutil.cpu_freq()
+                self._cpu_freq_mhz = round(freq.current, 0) if freq and freq.current else None
+            except Exception:
+                self._cpu_freq_mhz = None
+        cpu_freq_mhz = self._cpu_freq_mhz
 
         counters = psutil.net_io_counters()
         sent_bps = 0.0

@@ -11,40 +11,83 @@ from desktop.design_system import font, ghost_button, primary_button, secondary_
 from desktop.lucide_icons import lucide_ctk_image, lucide_icon_badge
 from desktop.theme import ThemeManager
 
-# KPI key → Lucide icon + theme accent tokens
+def _type_font(theme: ThemeManager, role: str) -> ctk.CTkFont:
+    size, weight = theme.type_scale(role)
+    return font(theme, size, weight=weight)
+
+
+# KPI key → Lucide icon (chips stay neutral; colour only when a value warrants it)
 KPI_ICONS = {
-    "linux_servers": ("server", "metric_blue", "metric_blue_bg"),
-    "databases": ("database", "metric_purple", "metric_purple_bg"),
-    "healthy_dbs": ("heart-pulse", "metric_green", "metric_green_bg"),
-    "active_jobs": ("activity", "metric_blue", "metric_blue_bg"),
-    "active_alerts": ("bell", "metric_amber", "metric_amber_bg"),
-    "failed_today": ("hard-drive", "metric_red", "metric_red_bg"),
+    "linux_servers": "server",
+    "databases": "database",
+    "healthy_dbs": "heart-pulse",
+    "active_jobs": "activity",
+    "active_alerts": "bell",
+    "failed_today": "hard-drive",
 }
 
 
 def surface_card(parent, theme: ThemeManager) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
-    """Neutral elevated surface — single subtle border, no colored accents."""
+    """Neutral elevated surface — 1px border, no coloured accents or hover chrome."""
     shell = ctk.CTkFrame(
         parent,
-        corner_radius=theme.radius("md"),
-        fg_color=theme.c("bg_card"),
+        corner_radius=theme.radius("sm"),
+        fg_color=theme.c("surface"),
         border_width=1,
         border_color=theme.c("border"),
     )
-    normal = theme.c("border")
-    hover = theme.c("border_focus")
-
-    def _enter(_e=None):
-        shell.configure(border_color=hover)
-
-    def _leave(_e=None):
-        shell.configure(border_color=normal)
-
-    shell.bind("<Enter>", _enter)
-    shell.bind("<Leave>", _leave)
     inner = ctk.CTkFrame(shell, fg_color="transparent")
-    inner.pack(fill="both", expand=True, padx=18, pady=16)
+    inner.pack(fill="both", expand=True, padx=14, pady=12)
     return shell, inner
+
+
+def page_header(
+    parent,
+    theme: ThemeManager,
+    title: str,
+    *,
+    subtitle: str = "",
+    action_text: str | None = None,
+    action_command: Callable[[], None] | None = None,
+    pady: tuple[int, int] = (0, 14),
+) -> ctk.CTkFrame:
+    """Canonical page heading used across all workspace views.
+
+    Title = type_scale page_title (22 bold). Subtitle = label (12).
+    No accent bars — one style for Servers, Databases, Backup, etc.
+    """
+    wrap = ctk.CTkFrame(parent, fg_color="transparent")
+    wrap.pack(fill="x", pady=pady)
+
+    header = ctk.CTkFrame(wrap, fg_color="transparent")
+    header.pack(fill="x")
+
+    left = ctk.CTkFrame(header, fg_color="transparent")
+    left.pack(side="left", fill="x", expand=True)
+
+    # Always Segoe UI — never leave page titles on the CTk default face.
+    title_size, title_weight = theme.type_scale("page_title")
+    ctk.CTkLabel(
+        left,
+        text=title,
+        font=ctk.CTkFont(family="Segoe UI", size=title_size, weight=title_weight),
+        text_color=theme.c("text_primary"),
+        anchor="w",
+    ).pack(anchor="w")
+    if subtitle:
+        sub_size, sub_weight = theme.type_scale("label")
+        ctk.CTkLabel(
+            left,
+            text=subtitle,
+            font=ctk.CTkFont(family="Segoe UI", size=sub_size, weight=sub_weight),
+            text_color=theme.c("text_secondary"),
+            anchor="w",
+        ).pack(anchor="w", pady=(6, 0))
+
+    # Do not place action buttons here — shell header already has Refresh.
+    del action_text, action_command
+
+    return wrap
 
 
 def section_header(
@@ -56,19 +99,19 @@ def section_header(
     action_text: str | None = None,
     action_command: Callable[[], None] | None = None,
 ) -> ctk.CTkFrame:
-    """Typography-only section header — no decorative bars."""
+    """In-page section heading (smaller than page_header)."""
     wrap = ctk.CTkFrame(parent, fg_color="transparent")
-    wrap.pack(fill="x", pady=(0, 12))
+    wrap.pack(fill="x", pady=(0, 10))
 
     header = ctk.CTkFrame(wrap, fg_color="transparent")
-    header.pack(fill="x", pady=(0, 10))
+    header.pack(fill="x", pady=(0, 8))
 
     left = ctk.CTkFrame(header, fg_color="transparent")
     left.pack(side="left", fill="x", expand=True)
     ctk.CTkLabel(
         left,
         text=title,
-        font=font(theme, 17, weight="bold"),
+        font=_type_font(theme, "section"),
         text_color=theme.c("text_primary"),
         anchor="w",
     ).pack(anchor="w")
@@ -76,19 +119,25 @@ def section_header(
         ctk.CTkLabel(
             left,
             text=subtitle,
-            font=font(theme, 12),
-            text_color=theme.c("text_muted"),
+            font=_type_font(theme, "metadata"),
+            text_color=theme.c("text_secondary"),
             anchor="w",
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(anchor="w", pady=(3, 0))
 
     if action_text and action_command:
-        ghost_button(
+        btn = ghost_button(
             header,
             theme,
             text=action_text,
             command=action_command,
-            height=32,
-        ).pack(side="right")
+            height=28,
+        )
+        btn.configure(
+            text_color=theme.c("text_secondary"),
+            hover_color=theme.c("bg_card_hover"),
+            font=font(theme, 12),
+        )
+        btn.pack(side="right")
 
     body = ctk.CTkFrame(wrap, fg_color="transparent")
     body.pack(fill="x")
@@ -99,104 +148,20 @@ def command_center_header(
     parent,
     theme: ThemeManager,
     *,
-    greeting: str,
-    role: str,
-    initials: str,
-    datetime_text: str,
+    greeting: str = "",
+    role: str = "",
+    initials: str = "",
+    datetime_text: str = "",
     on_refresh: Callable[[], None] | None = None,
-) -> ctk.CTkLabel:
-    """Compact toolbar + strong page title."""
-    wrap = ctk.CTkFrame(parent, fg_color="transparent")
-    wrap.pack(fill="x", pady=(0, 16))
-
-    toolbar = ctk.CTkFrame(
-        wrap,
-        fg_color=theme.c("bg_card"),
-        corner_radius=theme.radius("md"),
-        border_width=1,
-        border_color=theme.c("border"),
-    )
-    toolbar.pack(fill="x")
-    row = ctk.CTkFrame(toolbar, fg_color="transparent")
-    row.pack(fill="x", padx=16, pady=12)
-
-    left = ctk.CTkFrame(row, fg_color="transparent")
-    left.pack(side="left", fill="x", expand=True)
-
-    avatar = ctk.CTkFrame(left, width=34, height=34, corner_radius=17, fg_color=theme.c("primary"))
-    avatar.pack(side="left")
-    avatar.pack_propagate(False)
-    ctk.CTkLabel(
-        avatar,
-        text=initials,
-        font=font(theme, 12, weight="bold"),
-        text_color=theme.c("text_on_primary"),
-    ).place(relx=0.5, rely=0.5, anchor="center")
-
-    text = ctk.CTkFrame(left, fg_color="transparent")
-    text.pack(side="left", padx=(12, 0))
-    ctk.CTkLabel(
-        text,
-        text=greeting,
-        font=font(theme, 16, weight="bold"),
-        text_color=theme.c("text_primary"),
-        anchor="w",
-    ).pack(anchor="w")
-    ctk.CTkLabel(
-        text,
-        text=role,
-        font=font(theme, 12),
-        text_color=theme.c("text_muted"),
-        anchor="w",
-    ).pack(anchor="w")
-
-    right = ctk.CTkFrame(row, fg_color="transparent")
-    right.pack(side="right")
-    ctk.CTkLabel(
-        right,
-        text="●  Live",
-        font=font(theme, 12, weight="bold"),
-        text_color=theme.c("success"),
-    ).pack(side="left", padx=(0, 14))
-
-    datetime_label = ctk.CTkLabel(
-        right,
-        text=f"Last updated {datetime_text}",
-        font=font(theme, 12),
-        text_color=theme.c("text_secondary"),
-    )
-    datetime_label.pack(side="left", padx=(0, 12))
-
-    refresh_img = lucide_ctk_image("refresh-cw", theme.c("text_primary"), size=15)
-    refresh_btn = secondary_button(
-        right,
+) -> None:
+    """Dashboard page title — same typography as every other page_header."""
+    del greeting, role, initials, datetime_text, on_refresh
+    page_header(
+        parent,
         theme,
-        text="Refresh",
-        command=on_refresh,
-        width=108,
-        height=34,
+        "Dashboard",
+        subtitle="Active connection activity and workstation metrics.",
     )
-    refresh_btn.configure(image=refresh_img, compound="left")
-    refresh_btn._lucide_image = refresh_img  # type: ignore[attr-defined]
-    refresh_btn.pack(side="left")
-
-    ctk.CTkLabel(
-        wrap,
-        text="Database Operations Overview",
-        font=font(theme, 24, weight="bold"),
-        text_color=theme.c("text_primary"),
-        anchor="w",
-    ).pack(anchor="w", pady=(14, 0))
-    ctk.CTkLabel(
-        wrap,
-        text="Real-time health and automation status across your infrastructure.",
-        font=font(theme, 13),
-        text_color=theme.c("text_muted"),
-        anchor="w",
-    ).pack(anchor="w", pady=(4, 0))
-
-    return datetime_label
-
 
 def metric_card(
     parent,
@@ -206,41 +171,44 @@ def metric_card(
     label: str,
     secondary: str = "",
 ) -> tuple[ctk.CTkFrame, ctk.CTkLabel, ctk.CTkLabel]:
-    """Compact horizontal KPI card (target ~110–130px tall)."""
-    icon_name, accent_key, bg_key = KPI_ICONS.get(key, ("activity", "primary", "primary_muted"))
-    accent = theme.c(accent_key)
-    accent_bg = theme.c(bg_key)
+    """Dense KPI tile (~88–96px): neutral chip, clear label, tabular-feeling value."""
+    icon_name = KPI_ICONS.get(key, "activity")
+    chip_fg = theme.c("text_secondary")
+    chip_bg = theme.c("bg_elevated") if not theme.is_light else theme.c("neutral_muted")
 
     shell, body = surface_card(parent, theme)
 
     top = ctk.CTkFrame(body, fg_color="transparent")
     top.pack(fill="x")
 
-    icon = lucide_icon_badge(top, icon_name, accent, accent_bg, box=34, icon_size=18, radius=10)
+    icon = lucide_icon_badge(
+        top, icon_name, chip_fg, chip_bg, box=28, icon_size=14, radius=8
+    )
     icon.pack(side="left")
 
-    ctk.CTkLabel(
+    title = ctk.CTkLabel(
         top,
         text=label,
-        font=font(theme, 13, weight="bold"),
+        font=_type_font(theme, "card_title"),
         text_color=theme.c("text_secondary"),
         anchor="w",
-    ).pack(side="left", padx=(10, 0), fill="x", expand=True)
+    )
+    title.pack(side="left", padx=(10, 0), fill="x", expand=True)
 
     value = ctk.CTkLabel(
         body,
         text="0",
-        font=font(theme, 30, weight="bold"),
+        font=_type_font(theme, "kpi_value"),
         text_color=theme.c("text_primary"),
         anchor="w",
     )
-    value.pack(anchor="w", pady=(10, 0))
+    value.pack(anchor="w", pady=(8, 0))
 
     secondary_lbl = ctk.CTkLabel(
         body,
         text=secondary or "—",
-        font=font(theme, 12),
-        text_color=theme.c("text_muted"),
+        font=_type_font(theme, "metadata"),
+        text_color=theme.c("text_secondary"),
         anchor="w",
     )
     secondary_lbl.pack(anchor="w", pady=(2, 0))
@@ -268,39 +236,50 @@ def empty_state(
     }
     icon_name = legacy.get(badge or "", icon) if badge else icon
 
-    tones = {
-        "info": (theme.c("primary"), theme.c("primary_muted")),
-        "success": (theme.c("success"), theme.c("success_muted")),
-        "warning": (theme.c("warning"), theme.c("warning_muted")),
-    }
-    fg, bg = tones.get(tone, tones["info"])
-    wrap = ctk.CTkFrame(parent, fg_color=bg, corner_radius=theme.radius("md"))
+    # Success empty states stay tinted lightly; others use neutral surface.
+    if tone == "success":
+        wrap_bg = theme.c("success_muted")
+        icon_fg = theme.c("success")
+    elif tone == "warning":
+        wrap_bg = theme.c("warning_muted")
+        icon_fg = theme.c("warning")
+    else:
+        wrap_bg = theme.c("bg_elevated")
+        icon_fg = theme.c("text_secondary")
+
+    wrap = ctk.CTkFrame(
+        parent,
+        fg_color=wrap_bg,
+        corner_radius=theme.radius("sm"),
+        border_width=1,
+        border_color=theme.c("border"),
+    )
     wrap.pack(fill="x", pady=4)
     inner = ctk.CTkFrame(wrap, fg_color="transparent")
-    inner.pack(fill="x", padx=16, pady=16)
+    inner.pack(fill="x", padx=16, pady=14)
 
     badge_box = lucide_icon_badge(
         inner,
         icon_name,
-        fg,
-        theme.c("bg_card"),
-        box=40,
-        icon_size=20,
-        radius=12,
+        icon_fg,
+        theme.c("surface"),
+        box=36,
+        icon_size=18,
+        radius=10,
     )
     badge_box.pack()
 
     ctk.CTkLabel(
         inner,
         text=title,
-        font=font(theme, 14, weight="bold"),
+        font=_type_font(theme, "card_title"),
         text_color=theme.c("text_primary"),
     ).pack(pady=(10, 0))
     ctk.CTkLabel(
         inner,
         text=message,
-        font=font(theme, 12),
-        text_color=theme.c("text_muted"),
+        font=_type_font(theme, "metadata"),
+        text_color=theme.c("text_secondary"),
         wraplength=320,
         justify="center",
     ).pack(pady=(4, 0))
@@ -311,7 +290,7 @@ def empty_state(
             text=action_text,
             command=action_command,
             width=160,
-            height=34,
+            height=32,
         ).pack(pady=(12, 0))
 
 
@@ -345,7 +324,7 @@ def health_overview_visual(
         size // 2,
         text="0\nConnected",
         fill=theme.c("text_primary"),
-        font=("Segoe UI", 11, "bold"),
+        font=("Segoe UI", 12, "bold"),
         justify="center",
     )
 
@@ -366,14 +345,14 @@ def health_overview_visual(
         ctk.CTkLabel(
             row,
             text=label,
-            font=font(theme, 13),
+            font=font(theme, 12),
             text_color=theme.c("text_secondary"),
             anchor="w",
         ).pack(side="left", fill="x", expand=True)
         val = ctk.CTkLabel(
             row,
             text="0",
-            font=font(theme, 14, weight="bold"),
+            font=font(theme, 13, weight="bold"),
             text_color=theme.c("text_primary"),
         )
         val.pack(side="right")

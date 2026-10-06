@@ -264,12 +264,15 @@ class RestoreView(BaseView):
         if context:
             context.pack(fill="x", pady=(0, 8))
 
-        ctk.CTkLabel(
+        from desktop.ops_widgets import page_header
+
+        page_header(
             scroll,
-            text="Restore Management",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=self.theme.c("text_primary"),
-        ).pack(anchor="w", pady=(0, 12))
+            self.theme,
+            "Restore",
+            subtitle="Restore databases from logical or physical backups.",
+            pady=(0, 12),
+        )
 
         form = self.card_frame(scroll)
         form.pack(fill="x", pady=(0, 12))

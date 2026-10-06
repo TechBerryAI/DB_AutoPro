@@ -10,6 +10,7 @@ from desktop.connection import ConnectionResult
 from desktop.connection_panel import ConnectionPanel
 from desktop.constants import APP_NAME
 from desktop.theme import ThemeManager
+from desktop.window_icon import schedule_window_icon
 
 
 class ConnectionDialog(ctk.CTkToplevel):
@@ -22,6 +23,7 @@ class ConnectionDialog(ctk.CTkToplevel):
 
         self.title(f"{APP_NAME} — Connect")
         self.configure(fg_color=self._theme.c("bg_content"))
+        schedule_window_icon(self)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if parent is not None:

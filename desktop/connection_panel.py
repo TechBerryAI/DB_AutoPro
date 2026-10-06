@@ -11,6 +11,7 @@ from backend.models.schemas import DatabaseType
 from desktop.connection import ConnectionResult, DB_DEFAULTS, test_connection
 from desktop.connection_store import SavedServer, load_saved_servers, remove_server, upsert_server
 from desktop.db_icons import DB_ICON_META
+from desktop.ui_helpers import confirm
 from desktop.theme import ThemeManager
 
 SIDEBAR_WIDTH = 280
@@ -475,16 +476,33 @@ class ConnectionPanel(ctk.CTkFrame):
         )
         card.pack(fill="x", pady=(0, 16))
 
+        from desktop.design_system import font as ds_font
+
+        size, weight = self.theme.type_scale("section")
         ctk.CTkLabel(
             card,
-            text=title.upper(),
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=self.theme.c("text_muted"),
+            text=title,
+            font=ds_font(self.theme, size, weight=weight),
+            text_color=self.theme.c("text_primary"),
         ).pack(anchor="w", padx=20, pady=(16, 12))
-
         body = ctk.CTkFrame(card, fg_color="transparent")
         body.pack(fill="x", padx=20, pady=(0, 20))
         return body
+
+    def _bind_click_recursive(self, widget, command) -> None:
+        """Bind <Button-1> on ``widget`` and every descendant.
+
+        A composite CTk widget draws its children ON TOP of its own
+        background canvas, so a click anywhere inside it lands on whichever
+        child is actually drawn there — binding only the outer frame leaves
+        every child that covers it dead to clicks.
+        """
+        try:
+            widget.bind("<Button-1>", lambda _e: command())
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_click_recursive(child, command)
 
     def _create_icon_badge(self, parent: ctk.CTkFrame, db_type: DatabaseType, size: int = 40) -> ctk.CTkFrame:
         meta = DB_ICON_META[db_type]
@@ -517,19 +535,22 @@ class ConnectionPanel(ctk.CTkFrame):
             )
             tile.grid(row=0, column=index, padx=(0, 10) if index < len(DatabaseType) - 1 else 0, sticky="n")
             tile.pack_propagate(False)
-            tile.bind("<Button-1>", lambda _e, dt=db_type: self._select_db_type(dt))
 
             inner = ctk.CTkFrame(tile, fg_color="transparent")
             inner.place(relx=0.5, rely=0.5, anchor="center")
-            inner.bind("<Button-1>", lambda _e, dt=db_type: self._select_db_type(dt))
 
             badge = self._create_icon_badge(inner, db_type, 40)
             badge.pack(pady=(0, 6))
-            badge.bind("<Button-1>", lambda _e, dt=db_type: self._select_db_type(dt))
 
             label = ctk.CTkLabel(inner, text=meta["label"], font=ctk.CTkFont(size=11), text_color=self.theme.c("text_primary"))
             label.pack()
-            label.bind("<Button-1>", lambda _e, dt=db_type: self._select_db_type(dt))
+
+            # Binding just the outer `tile` misses clicks on the badge: its
+            # child CTkLabel (the "MY"/"OR" text) is drawn on top and
+            # intercepts the click before the frame's own binding ever sees
+            # it, so the icon square itself was previously dead space. Bind
+            # every descendant instead of the four widgets guessed above.
+            self._bind_click_recursive(tile, lambda dt=db_type: self._select_db_type(dt))
 
             self._db_type_tiles[db_type.value] = tile
 
@@ -775,17 +796,24 @@ class ConnectionPanel(ctk.CTkFrame):
         return None
 
     def _apply_db_type_tiles(self, db_type: DatabaseType) -> None:
+        """Highlight the active engine tile — every tile stays visible in its
+        original position (PostgreSQL, MySQL, MongoDB, MSSQL, Oracle, all in
+        one row) so you can switch engines directly from any saved
+        connection or "New <Engine>" view. This used to hide every
+        non-active tile (grid_remove()) and re-grid only the selected one to
+        column 0, which meant the moment you picked or loaded any engine,
+        every other tile vanished and you had no way back to them except the
+        sidebar's separate "+ Engine" links.
+        """
         accent = DB_ICON_META[db_type]["color"]
         for value, tile in self._db_type_tiles.items():
             if value == db_type.value:
                 tile.configure(border_color=accent, fg_color=self.theme.c("primary_muted"))
-                tile.grid(row=0, column=0, padx=0, sticky="w")
             else:
                 tile.configure(
                     border_color=self.theme.c("border"),
                     fg_color=self.theme.c("bg_card_hover"),
                 )
-                tile.grid_remove()
 
     def _select_db_type(
         self,
@@ -1154,6 +1182,20 @@ class ConnectionPanel(ctk.CTkFrame):
             self._set_status("Select a saved connection to delete.", "warning")
             return
         name = self._selected_saved
+        confirm(
+            self,
+            self.theme,
+            title="Delete connection?",
+            message=(
+                f"'{name}' will be removed from your saved connections. "
+                "This cannot be undone."
+            ),
+            confirm_text="Delete",
+            destructive=True,
+            on_confirm=lambda: self._do_remove_saved(name),
+        )
+
+    def _do_remove_saved(self, name: str) -> None:
         if remove_server(name):
             self._selected_saved = None
             self._refresh_saved_list()

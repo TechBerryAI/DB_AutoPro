@@ -18,6 +18,8 @@ def _hover_card(card: ctk.CTkFrame, theme: ThemeManager, accent: str) -> None:
     card.bind("<Leave>", lambda _: card.configure(border_color=normal_border))
 
 
+# DEPRECATED (UI consolidation, docs/ui_plan.md §8): use ops_widgets.metric_card
+# instead. Retained until every caller of kpi_card()/key_metric_tile() migrates.
 def kpi_card(
     parent: ctk.CTkFrame,
     theme: ThemeManager,
@@ -88,6 +90,7 @@ def kpi_card(
     return card, value_label, trend_label
 
 
+# DEPRECATED (UI consolidation, docs/ui_plan.md §8): use ops_widgets.metric_card instead.
 def key_metric_tile(
     parent: ctk.CTkFrame,
     theme: ThemeManager,
@@ -610,27 +613,10 @@ def health_row(
 
 
 def section_header(parent: ctk.CTkFrame, theme: ThemeManager, title: str, subtitle: str = "") -> None:
-    """Page section header with optional subtitle."""
-    row = ctk.CTkFrame(parent, fg_color="transparent")
-    row.pack(fill="x")
-    ctk.CTkFrame(row, width=4, height=28, corner_radius=2, fg_color=theme.c("primary")).pack(side="left", padx=(0, 12))
-    text_col = ctk.CTkFrame(row, fg_color="transparent")
-    text_col.pack(side="left", fill="x", expand=True)
-    ctk.CTkLabel(
-        text_col,
-        text=title,
-        font=font(theme, 26, weight="bold"),
-        text_color=theme.c("text_primary"),
-        anchor="w",
-    ).pack(anchor="w")
-    if subtitle:
-        ctk.CTkLabel(
-            text_col,
-            text=subtitle,
-            font=font(theme, 13),
-            text_color=theme.c("text_muted"),
-            anchor="w",
-        ).pack(anchor="w", pady=(4, 0))
+    """Compatibility wrapper — delegates to the shared page_header style."""
+    from desktop.ops_widgets import page_header
+
+    page_header(parent, theme, title, subtitle=subtitle)
 
 
 def database_catalog_table(
@@ -765,6 +751,9 @@ def populate_database_catalog(
             ).grid(row=0, column=4, padx=12, pady=8, sticky="e")
 
 
+# DEPRECATED (UI consolidation, docs/ui_plan.md §8): use design_system.glass_surface /
+# elevated_card instead. Note ops_widgets.py also defines a *different* panel_card
+# (alias for surface_card) — the two are unrelated functions that happen to share a name.
 def panel_card(parent: ctk.CTkFrame, theme: ThemeManager, title: str) -> ctk.CTkFrame:
     """Standard titled panel card with premium elevation."""
     card = ctk.CTkFrame(

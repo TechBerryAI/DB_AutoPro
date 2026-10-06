@@ -14,7 +14,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 OUT_PATH = Path(__file__).resolve().parent / "DataAutomationPro.ico"
 SIZES = [16, 24, 32, 48, 64, 128, 256]
-BG = (37, 99, 235, 255)
+# Matches light-theme primary / sidebar navy (#111827).
+BG = (17, 24, 39, 255)
 FG = (255, 255, 255, 255)
 
 

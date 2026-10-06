@@ -1,4 +1,4 @@
-"""Monitoring and health check view."""
+"""Audit Log view — application activity trail (not live server monitoring)."""
 
 from __future__ import annotations
 
@@ -10,100 +10,80 @@ from desktop.views.base_view import BaseView
 
 
 class MonitoringView(BaseView):
-    """Health checks, audit logs, and backup reports."""
+    """Audit trail from logs/audit.log.
 
-    def __init__(self, master, theme: ThemeManager, log_callback=None, auto_action: str | None = None, **kwargs) -> None:
+    Kept as MonitoringView for import compatibility; the UI is Audit Log only.
+    Health checks and backup reports are not shown here (Monitoring was removed
+    from navigation).
+    """
+
+    def __init__(
+        self,
+        master,
+        theme: ThemeManager,
+        log_callback=None,
+        auto_action: str | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(master, theme, log_callback, **kwargs)
         self.service = MonitoringService()
         self._auto_action = auto_action
         self._build_ui()
-        if auto_action:
-            actions = {
-                "audit": self._audit_logs,
-                "report": self._backup_report,
-                "health": self._health_check,
-            }
-            callback = actions.get(auto_action)
-            if callback:
-                self.after(150, callback)
+        self.after(80, self.refresh)
 
     def _build_ui(self) -> None:
-        row = 0
-        context = self.create_connection_context()
-        if context:
-            context.grid(row=row, column=0, padx=20, pady=(12, 8), sticky="ew")
-            row += 1
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        title = self.create_section_title("Monitoring")
-        title.grid(row=row, column=0, padx=20, pady=20, sticky="w")
-        row += 1
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, padx=24, pady=(16, 0), sticky="ew")
+        from desktop.ops_widgets import page_header
 
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=row, column=0, padx=20, pady=5, sticky="w")
-        row += 1
-
-        ctk.CTkButton(
-            btn_frame,
-            text="Health Check",
-            command=self._health_check,
-            width=130,
-            height=36,
-            corner_radius=8,
-            fg_color=self.theme.c("primary"),
-            hover_color=self.theme.c("primary_hover"),
-        ).pack(side="left", padx=5)
-        ctk.CTkButton(
-            btn_frame,
-            text="Backup Report",
-            command=self._backup_report,
-            width=130,
-            height=36,
-            corner_radius=8,
-            fg_color=self.theme.c("bg_elevated"),
-            hover_color=self.theme.c("bg_card_hover"),
-        ).pack(side="left", padx=5)
-        ctk.CTkButton(
-            btn_frame,
-            text="Audit Logs",
-            command=self._audit_logs,
-            width=130,
-            height=36,
-            corner_radius=8,
-            fg_color=self.theme.c("bg_elevated"),
-            hover_color=self.theme.c("bg_card_hover"),
-        ).pack(side="left", padx=5)
+        page_header(
+            header,
+            self.theme,
+            "Audit Log",
+            subtitle=(
+                "Application activity trail from this workstation "
+                "(connect, backup, restore, and other recorded actions)."
+            ),
+        )
 
         self.results = ctk.CTkTextbox(
             self,
-            height=400,
             font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=self.theme.c("bg_card"),
+            fg_color=self.theme.c("surface"),
             border_width=1,
             border_color=self.theme.c("border"),
-            text_color=self.theme.c("text_secondary"),
+            text_color=self.theme.c("text_primary"),
+            corner_radius=self.theme.radius("sm"),
         )
-        self.results.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
-        self.grid_rowconfigure(row, weight=1)
+        self.results.grid(row=1, column=0, padx=24, pady=(0, 16), sticky="nsew")
 
-    def _health_check(self) -> None:
-        results = self.service.health_check()
-        self.results.delete("1.0", "end")
-        for r in results:
-            self.results.insert("end", f"[{r.status.upper()}] {r.service}\n")
-            if r.latency_ms:
-                self.results.insert("end", f"  Latency: {r.latency_ms}ms\n")
-        self.log("Health check completed")
+    def refresh(self) -> None:
+        """Reload audit lines from disk."""
+        try:
+            logs = self.service.get_audit_logs(200)
+        except Exception as exc:
+            self.results.delete("1.0", "end")
+            self.results.insert(
+                "end",
+                f"Could not read the audit log.\n\nReason: {exc}\n\n"
+                "Suggested action: confirm logs/audit.log is readable, then Refresh.",
+            )
+            self.log(f"Audit log read failed: {exc}", "ERROR")
+            return
 
-    def _backup_report(self) -> None:
-        report = self.service.get_backup_report()
         self.results.delete("1.0", "end")
-        self.results.insert("end", f"Total backups: {report['total']}\n")
-        self.results.insert("end", f"Retention: {report['retention_days']} days\n\n")
-        for b in report.get("backups", []):
-            self.results.insert("end", f"  {b['name']} - {b['size_bytes']} bytes\n")
+        if not logs:
+            self.results.insert(
+                "end",
+                "No audit events yet.\n\n"
+                "Events appear here after you sign in, connect, run backups, "
+                "restores, or other recorded operations.",
+            )
+            return
 
-    def _audit_logs(self) -> None:
-        logs = self.service.get_audit_logs(50)
-        self.results.delete("1.0", "end")
         for line in logs:
             self.results.insert("end", f"{line}\n")
+        self.log(f"Loaded {len(logs)} audit log entr{'y' if len(logs) == 1 else 'ies'}")

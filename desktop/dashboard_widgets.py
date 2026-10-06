@@ -8,6 +8,8 @@ from desktop.design_system import font, glass_surface, status_chip
 from desktop.theme import ThemeManager
 
 
+# DEPRECATED (UI consolidation, docs/ui_plan.md §8): use ops_widgets.section_header instead
+# (same typography-only shape, plus an optional action button).
 def section_block(
     parent: ctk.CTkFrame,
     theme: ThemeManager,
@@ -51,6 +53,8 @@ def panel_grid(parent: ctk.CTkFrame, theme: ThemeManager, columns: int = 2) -> c
     return grid
 
 
+# DEPRECATED (UI consolidation, docs/ui_plan.md §8): use design_system.glass_surface /
+# elevated_card instead.
 def analytics_card(
     parent: ctk.CTkFrame,
     theme: ThemeManager,

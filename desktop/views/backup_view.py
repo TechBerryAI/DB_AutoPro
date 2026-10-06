@@ -632,12 +632,15 @@ class BackupView(BaseView):
         if context:
             context.pack(fill="x", pady=(0, 8))
 
-        ctk.CTkLabel(
+        from desktop.ops_widgets import page_header
+
+        page_header(
             scroll,
-            text="Backup Management",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=self.theme.c("text_primary"),
-        ).pack(anchor="w", pady=(0, 12))
+            self.theme,
+            "Backup",
+            subtitle="Create and manage database backups for the active connection.",
+            pady=(0, 12),
+        )
 
         form = self.card_frame(scroll)
         form.pack(fill="x", pady=(0, 12))

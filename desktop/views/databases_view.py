@@ -77,45 +77,15 @@ class DatabasesView(BaseView):
 
         # Fixed page chrome — stays put while inventory scrolls.
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(12, 8))
-        header.grid_columnconfigure(0, weight=1)
+        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 0))
+        from desktop.ops_widgets import page_header
 
-        left = ctk.CTkFrame(header, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="ew")
-        title_row = ctk.CTkFrame(left, fg_color="transparent")
-        title_row.pack(fill="x")
-        ctk.CTkFrame(
-            title_row,
-            width=4,
-            height=22,
-            corner_radius=2,
-            fg_color=self.theme.c("primary"),
-        ).pack(side="left", padx=(0, 10))
-        text_col = ctk.CTkFrame(title_row, fg_color="transparent")
-        text_col.pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(
-            text_col,
-            text="Databases",
-            font=ctk.CTkFont(size=20, weight="bold"),
-            text_color=self.theme.c("text_primary"),
-            anchor="w",
-        ).pack(anchor="w")
-        ctk.CTkLabel(
-            text_col,
-            text="Database Explorer — metadata, schemas, and object structure",
-            font=ctk.CTkFont(size=12),
-            text_color=self.theme.c("text_muted"),
-            anchor="w",
-        ).pack(anchor="w", pady=(2, 0))
-
-        ctk.CTkButton(
+        page_header(
             header,
-            text="Refresh",
-            width=96,
-            height=30,
-            command=self.refresh,
-        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
-
+            self.theme,
+            "Databases",
+            subtitle="Database Explorer — metadata, schemas, and object structure",
+        )
         self._scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self._scroll.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 8))
         self._scroll.grid_columnconfigure(0, weight=1)
@@ -126,6 +96,30 @@ class DatabasesView(BaseView):
     def refresh(self) -> None:
         if not self._list_frame:
             return
+        # Re-opening the page was rebuilding the whole tree and querying again.
+        if self.connection and self._list_frame.winfo_children():
+            import time
+
+            key = (
+                self.connection.host,
+                self.connection.port,
+                self.connection.database,
+                self.connection.db_type.value,
+            )
+            loaded = getattr(self, "_loaded_key", None)
+            loaded_at = getattr(self, "_loaded_at", 0.0)
+            if loaded == key and (time.monotonic() - loaded_at) < 30:
+                return
+        if self.connection:
+            import time
+
+            self._loaded_key = (
+                self.connection.host,
+                self.connection.port,
+                self.connection.database,
+                self.connection.db_type.value,
+            )
+            self._loaded_at = time.monotonic()
         for child in self._list_frame.winfo_children():
             child.destroy()
         self._detail_hosts.clear()
@@ -202,13 +196,6 @@ class DatabasesView(BaseView):
             ).pack(anchor="w", pady=8)
             return
 
-        ctk.CTkLabel(
-            self._list_frame,
-            text="DATABASE INVENTORY",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=self.theme.c("primary"),
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 2))
         inventory_hint = (
             "Expand a container (CDB$ROOT / PDB$SEED / ORCLPDB1) to list users with status."
             if self.connection and self.connection.db_type == DatabaseType.ORACLE
@@ -217,10 +204,10 @@ class DatabasesView(BaseView):
         ctk.CTkLabel(
             self._list_frame,
             text=inventory_hint,
-            font=ctk.CTkFont(size=12),
-            text_color=self.theme.c("text_muted"),
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=self.theme.c("text_secondary"),
             anchor="w",
-        ).pack(anchor="w", pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 10))
 
         for db in databases:
             self._summaries[db.name] = db
@@ -235,7 +222,7 @@ class DatabasesView(BaseView):
     def _add_database_card(self, db: DatabaseSummary) -> None:
         assert self._list_frame is not None
         block = ctk.CTkFrame(self._list_frame, fg_color="transparent")
-        block.pack(fill="x", pady=3)
+        block.pack(fill="x", pady=4)
 
         card = ctk.CTkFrame(
             block,
@@ -244,29 +231,35 @@ class DatabasesView(BaseView):
             border_width=1,
             border_color=self.theme.c("border_subtle"),
             cursor="hand2",
+            height=48,
         )
         card.pack(fill="x")
+        card.pack_propagate(False)
 
         top = ctk.CTkFrame(card, fg_color="transparent")
-        top.pack(fill="x", padx=12, pady=8)
+        top.pack(fill="both", expand=True, padx=14, pady=0)
 
         chevron = ctk.CTkLabel(
             top,
             text="▶",
-            width=22,
-            font=ctk.CTkFont(size=11),
-            text_color=self.theme.c("text_muted"),
+            width=18,
+            height=48,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=self.theme.c("text_secondary"),
+            anchor="center",
         )
         chevron.pack(side="left")
         self._chevron_labels[db.name] = chevron
 
-        ctk.CTkLabel(
+        name_lbl = ctk.CTkLabel(
             top,
             text=db.name,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            height=48,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             text_color=self.theme.c("text_primary"),
             anchor="w",
-        ).pack(side="left", padx=(6, 12))
+        )
+        name_lbl.pack(side="left", padx=(8, 10))
 
         status_color = (
             self.theme.c("success")
@@ -274,23 +267,29 @@ class DatabasesView(BaseView):
             else self.theme.c("warning")
         )
         status_text = db.status.replace("_", " ").upper()
-        ctk.CTkLabel(
+        status = ctk.CTkLabel(
             top,
             text=status_text,
-            font=ctk.CTkFont(size=10, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
             text_color=status_color,
-            fg_color=self.theme.c("bg_elevated"),
-            corner_radius=8,
-            width=70,
-            height=20,
-        ).pack(side="left", padx=(0, 8))
+            fg_color=self.theme.c("success_muted")
+            if db.status in {"online", "read_write", "open"}
+            else self.theme.c("warning_muted"),
+            corner_radius=6,
+            height=22,
+            padx=8,
+        )
+        status.pack(side="left", pady=13)
 
-        ctk.CTkLabel(
+        size_lbl = ctk.CTkLabel(
             top,
-            text=db.size,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=self.theme.c("text_primary"),
-        ).pack(side="right")
+            text=db.size or "—",
+            height=48,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=self.theme.c("text_secondary"),
+            anchor="e",
+        )
+        size_lbl.pack(side="right")
 
         detail = ctk.CTkFrame(
             block,
@@ -304,10 +303,8 @@ class DatabasesView(BaseView):
         def on_click(_event=None, name=db.name) -> None:
             self._toggle_database(name)
 
-        for widget in (card, top, chevron):
+        for widget in (card, top, chevron, name_lbl, status, size_lbl):
             widget.bind("<Button-1>", on_click)
-            for child in widget.winfo_children():
-                child.bind("<Button-1>", on_click)
 
     def _toggle_database(self, name: str) -> None:
         detail = self._detail_hosts.get(name)

@@ -15,7 +15,6 @@ from desktop.db_catalog import fetch_server_databases
 from desktop.date_picker import DatePicker
 from desktop.report_export import default_export_stem
 from desktop.report_widgets import (
-    REPORT_BG,
     _font,
     activity_table,
     analytics_row,
@@ -59,7 +58,7 @@ class ReportsView(BaseView):
         self._pending_report = False
         self._updating_filters = False
         self._last_report_at: datetime | None = None
-        self.configure(fg_color=REPORT_BG if theme.is_light else theme.c("bg_content"))
+        self.configure(fg_color=theme.c("bg_content"))
         self._build_ui()
         self.after(200, self.generate_report)
 
@@ -71,14 +70,31 @@ class ReportsView(BaseView):
         scroll.grid(row=0, column=0, sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
 
-        # Header
+        from desktop.ops_widgets import page_header
+
+        title_wrap = ctk.CTkFrame(scroll, fg_color="transparent")
+        title_wrap.pack(fill="x", padx=24, pady=(16, 0))
+        page_header(
+            title_wrap,
+            self.theme,
+            "Reports",
+            subtitle="Operational summaries across backups, restores, and jobs.",
+        )
+
+        # Connection status strip (filled when a report is generated)
         self._header_wrap = ctk.CTkFrame(scroll, fg_color="transparent")
-        self._header_wrap.pack(fill="x", padx=24, pady=(20, 12))
+        self._header_wrap.pack(fill="x", padx=24, pady=(0, 12))
         self._header_inner = ctk.CTkFrame(self._header_wrap, fg_color="transparent")
         self._header_inner.pack(fill="x")
 
         # Filters
-        filter_card = ctk.CTkFrame(scroll, corner_radius=12, fg_color="#FFFFFF", border_width=1, border_color="#E2E8F0")
+        filter_card = ctk.CTkFrame(
+            scroll,
+            corner_radius=self.theme.radius("md"),
+            fg_color=self.theme.c("bg_card"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+        )
         filter_card.pack(fill="x", padx=24, pady=(0, 12))
         filter_inner = ctk.CTkFrame(filter_card, fg_color="transparent")
         filter_inner.pack(fill="x", padx=16, pady=14)
@@ -92,7 +108,9 @@ class ReportsView(BaseView):
             ("status", "Status", ["All", "Success", "Failed"], 8),
         ]
         for key, label, values, col in specs:
-            ctk.CTkLabel(filter_inner, text=label, font=_font(weight="bold"), text_color="#64748B").grid(
+            ctk.CTkLabel(
+                filter_inner, text=label, font=_font(weight="bold"), text_color=self.theme.c("text_muted")
+            ).grid(
                 row=0, column=col, sticky="w", padx=(0, 6)
             )
             var = ctk.StringVar(value=values[0])
@@ -104,10 +122,13 @@ class ReportsView(BaseView):
                 variable=var,
                 height=32,
                 font=_font(),
-                fg_color="#F8FAFC",
-                border_color="#E2E8F0",
-                button_color="#E2E8F0",
-                dropdown_fg_color="#FFFFFF",
+                fg_color=self.theme.c("bg_input"),
+                border_color=self.theme.c("border"),
+                button_color=self.theme.c("bg_elevated"),
+                button_hover_color=self.theme.c("bg_card_hover"),
+                dropdown_fg_color=self.theme.c("bg_card"),
+                dropdown_text_color=self.theme.c("text_primary"),
+                text_color=self.theme.c("text_primary"),
                 command=cmd,
             )
             cb.grid(row=0, column=col + 1, sticky="ew", padx=(0, 12))
@@ -124,11 +145,12 @@ class ReportsView(BaseView):
             self._custom_date_row,
             text="From",
             font=_font(weight="bold"),
-            text_color="#64748B",
+            text_color=self.theme.c("text_muted"),
         ).pack(side="left", padx=(0, 6))
         self._date_from_picker = DatePicker(
             self._custom_date_row,
             self._date_from_var,
+            theme=self.theme,
             on_change=self._schedule_report,
         )
         self._date_from_picker.pack(side="left", padx=(0, 16))
@@ -137,11 +159,12 @@ class ReportsView(BaseView):
             self._custom_date_row,
             text="To",
             font=_font(weight="bold"),
-            text_color="#64748B",
+            text_color=self.theme.c("text_muted"),
         ).pack(side="left", padx=(0, 6))
         self._date_to_picker = DatePicker(
             self._custom_date_row,
             self._date_to_var,
+            theme=self.theme,
             on_change=self._schedule_report,
         )
         self._date_to_picker.pack(side="left")
@@ -157,12 +180,12 @@ class ReportsView(BaseView):
             command=self._on_view_toggle,
             font=_font(weight="bold"),
             height=36,
-            fg_color="#E2E8F0",
-            selected_color="#2563EB",
-            selected_hover_color="#1D4ED8",
-            unselected_color="#F8FAFC",
-            unselected_hover_color="#E2E8F0",
-            text_color="#0F172A",
+            fg_color=self.theme.c("bg_elevated"),
+            selected_color=self.theme.c("primary"),
+            selected_hover_color=self.theme.c("primary_hover"),
+            unselected_color=self.theme.c("bg_card"),
+            unselected_hover_color=self.theme.c("bg_card_hover"),
+            text_color=self.theme.c("text_primary"),
         )
         toggle.pack(side="left")
         self._view_toggle = toggle
@@ -174,6 +197,7 @@ class ReportsView(BaseView):
 
         refresh_btn = toolbar_button(
             actions,
+            self.theme,
             "Refresh",
             primary=True,
             command=self.generate_report,
@@ -188,11 +212,12 @@ class ReportsView(BaseView):
             height=36,
             width=140,
             font=_font(weight="bold"),
-            fg_color="#FFFFFF",
-            button_color="#E2E8F0",
-            button_hover_color="#F8FAFC",
-            dropdown_fg_color="#FFFFFF",
-            text_color="#0F172A",
+            fg_color=self.theme.c("bg_card"),
+            button_color=self.theme.c("bg_elevated"),
+            button_hover_color=self.theme.c("bg_card_hover"),
+            dropdown_fg_color=self.theme.c("bg_card"),
+            dropdown_text_color=self.theme.c("text_primary"),
+            text_color=self.theme.c("text_primary"),
         )
         export_menu.set("Export")
         export_menu.pack(side="left")
@@ -201,7 +226,7 @@ class ReportsView(BaseView):
             toolbar,
             text="",
             font=_font(),
-            text_color="#64748B",
+            text_color=self.theme.c("text_muted"),
         )
         self._status_label.pack(side="left", padx=(16, 0))
 
@@ -211,15 +236,16 @@ class ReportsView(BaseView):
         self._dashboard_frame.grid_columnconfigure((0, 1, 2, 3), weight=1, uniform="kpi")
 
         kpi_specs = [
-            ("success", "Successful Operations", "✓", "#22C55E"),
-            ("failed", "Failed Operations", "!", "#EF4444"),
-            ("backups", "Total Backups", "⬡", "#2563EB"),
-            ("storage", "Storage Used", "▣", "#7C3AED"),
+            ("success", "Successful Operations", "✓", self.theme.c("success")),
+            ("failed", "Failed Operations", "!", self.theme.c("error")),
+            ("backups", "Total Backups", "⬡", self.theme.c("primary")),
+            ("storage", "Storage Used", "▣", self.theme.c("metric_purple")),
         ]
         self._kpi_cards = {}
         for i, (key, title, icon, accent) in enumerate(kpi_specs):
             card, val, cmp_lbl = enterprise_kpi_card(
                 self._dashboard_frame,
+                self.theme,
                 title=title,
                 value="—",
                 icon=icon,
@@ -235,7 +261,7 @@ class ReportsView(BaseView):
         # Summary
         summary_wrap = ctk.CTkFrame(self._dashboard_frame, fg_color="transparent")
         summary_wrap.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 12))
-        self._summary_body = section_card(summary_wrap, "Report Summary")
+        self._summary_body = section_card(summary_wrap, self.theme, "Report Summary")
         chips = ctk.CTkFrame(self._summary_body, fg_color="transparent")
         chips.pack(fill="x")
         self._summary_chips: dict[str, ctk.CTkLabel] = {}
@@ -246,7 +272,7 @@ class ReportsView(BaseView):
             ("pending_jobs", "Pending Jobs"),
             ("failed_jobs", "Failed Jobs"),
         ]:
-            self._summary_chips[key] = metric_chip(chips, label, "0")
+            self._summary_chips[key] = metric_chip(chips, self.theme, label, "0")
 
         # Two-column row: Operations + Backup Analytics
         mid = ctk.CTkFrame(self._dashboard_frame, fg_color="transparent")
@@ -255,11 +281,11 @@ class ReportsView(BaseView):
 
         ops_wrap = ctk.CTkFrame(mid, fg_color="transparent")
         ops_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self._ops_body = section_card(ops_wrap, "Operations Overview")
+        self._ops_body = section_card(ops_wrap, self.theme, "Operations Overview")
 
         analytics_wrap = ctk.CTkFrame(mid, fg_color="transparent")
         analytics_wrap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        self._analytics_body = section_card(analytics_wrap, "Backup Analytics")
+        self._analytics_body = section_card(analytics_wrap, self.theme, "Backup Analytics")
         self._analytics_labels: dict[str, ctk.CTkLabel] = {}
         for label in (
             "Total Backups",
@@ -269,7 +295,7 @@ class ReportsView(BaseView):
             "Largest Backup",
         ):
             key = label.lower().replace(" ", "_")
-            self._analytics_labels[key] = analytics_row(self._analytics_body, label, "—")
+            self._analytics_labels[key] = analytics_row(self._analytics_body, self.theme, label, "—")
 
         # Health + Activity
         bottom = ctk.CTkFrame(self._dashboard_frame, fg_color="transparent")
@@ -278,22 +304,22 @@ class ReportsView(BaseView):
 
         health_wrap = ctk.CTkFrame(bottom, fg_color="transparent")
         health_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self._health_body = section_card(health_wrap, "Database Health")
+        self._health_body = section_card(health_wrap, self.theme, "Database Health")
         self._health_row = ctk.CTkFrame(self._health_body, fg_color="transparent")
         self._health_row.pack(fill="x")
 
         activity_wrap = ctk.CTkFrame(bottom, fg_color="transparent")
         activity_wrap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        self._activity_body = section_card(activity_wrap, "Recent Activity")
+        self._activity_body = section_card(activity_wrap, self.theme, "Recent Activity")
 
         # Raw report (hidden by default)
         self._raw_box = ctk.CTkTextbox(
             scroll,
             font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color="#FFFFFF",
+            fg_color=self.theme.c("bg_card"),
             border_width=1,
-            border_color="#E2E8F0",
-            text_color="#334155",
+            border_color=self.theme.c("border"),
+            text_color=self.theme.c("text_primary"),
             height=480,
         )
 
@@ -305,7 +331,9 @@ class ReportsView(BaseView):
         for value in ("Dashboard View", "Raw Report"):
             btn = toggle._buttons_dict.get(value)
             if btn:
-                btn.configure(text_color="#FFFFFF" if value == selected else "#0F172A")
+                btn.configure(
+                    text_color=self.theme.c("text_on_primary") if value == selected else self.theme.c("text_primary")
+                )
 
     def _on_view_toggle(self, value: str) -> None:
         self._style_view_toggle(value)
@@ -518,6 +546,7 @@ class ReportsView(BaseView):
         connected = report.get("connection_status") == "Connected"
         report_header_card(
             self._header_inner,
+            self.theme,
             connection_status=report.get("connection_status", "Disconnected"),
             connected=connected,
         ).pack(fill="x")
@@ -546,7 +575,7 @@ class ReportsView(BaseView):
         for child in self._ops_body.winfo_children():
             child.destroy()
         for op in report["operations_overview"]:
-            operation_row(self._ops_body, op)
+            operation_row(self._ops_body, self.theme, op)
 
         analytics = report["backup_analytics"]
         analytics_values = {
@@ -562,13 +591,13 @@ class ReportsView(BaseView):
         for child in self._health_row.winfo_children():
             child.destroy()
         h = report["health"]
-        health_tile(self._health_row, "Healthy", h["healthy"], "#22C55E", "✔")
-        health_tile(self._health_row, "Warning", h["warning"], "#F59E0B", "⚠")
-        health_tile(self._health_row, "Critical", h["critical"], "#EF4444", "✖")
+        health_tile(self._health_row, self.theme, "Healthy", h["healthy"], self.theme.c("success"), "✔")
+        health_tile(self._health_row, self.theme, "Warning", h["warning"], self.theme.c("warning"), "⚠")
+        health_tile(self._health_row, self.theme, "Critical", h["critical"], self.theme.c("error"), "✖")
 
         for child in self._activity_body.winfo_children():
             child.destroy()
-        activity_table(self._activity_body, report["recent_activity"])
+        activity_table(self._activity_body, self.theme, report["recent_activity"])
 
     def _on_export_action(self, choice: str) -> None:
         if choice == "Export CSV":
@@ -580,7 +609,7 @@ class ReportsView(BaseView):
         """Refresh when navigating back, but skip if a report just finished."""
         if self._report_busy:
             return
-        if self._last_report_at and (datetime.now() - self._last_report_at).total_seconds() < 5:
+        if self._last_report_at and (datetime.now() - self._last_report_at).total_seconds() < 30:
             return
         self.generate_report()
 
