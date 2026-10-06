@@ -1,4 +1,4 @@
-"""Settings view for environment and theme configuration."""
+"""Settings view for environment profile display."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ import customtkinter as ctk
 from backend.core.config import get_settings
 from desktop.constants import APP_NAME
 from desktop.theme import ThemeManager
-from desktop.design_system import primary_button
-from desktop.ui_components import section_header
+from desktop.ops_widgets import page_header
 from desktop.views.base_view import BaseView
 
 
@@ -23,16 +22,22 @@ class SettingsView(BaseView):
         theme_toggle_callback=None,
         **kwargs,
     ) -> None:
+        # theme_toggle_callback kept for older callers; theme switch lives in the shell header.
+        del theme_toggle_callback
         super().__init__(master, theme, log_callback, **kwargs)
-        self.theme_toggle_callback = theme_toggle_callback
         self._build_ui()
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, padx=24, pady=(20, 16), sticky="ew")
-        section_header(header, self.theme, "Settings", "Application configuration and environment profile")
+        header.grid(row=0, column=0, padx=24, pady=(16, 8), sticky="ew")
+        page_header(
+            header,
+            self.theme,
+            "Settings",
+            subtitle="Application configuration and environment profile",
+        )
 
         settings = get_settings()
         info = self.card_frame(self)
@@ -70,25 +75,3 @@ class SettingsView(BaseView):
                 font=ctk.CTkFont(size=13),
                 text_color=self.theme.c("text_primary"),
             ).grid(row=i, column=1, padx=20, pady=10, sticky="w")
-
-        theme_frame = ctk.CTkFrame(self, fg_color="transparent")
-        theme_frame.grid(row=2, column=0, padx=24, pady=20, sticky="w")
-
-        ctk.CTkLabel(
-            theme_frame,
-            text=f"Current theme: {self.theme.current}",
-            font=ctk.CTkFont(size=13),
-            text_color=self.theme.c("text_secondary"),
-        ).pack(side="left", padx=(0, 12))
-        primary_button(
-            theme_frame,
-            self.theme,
-            text="Toggle Dark / Light",
-            command=self._toggle_theme,
-            width=180,
-            height=40,
-        ).pack(side="left")
-
-    def _toggle_theme(self) -> None:
-        if self.theme_toggle_callback:
-            self.theme_toggle_callback()

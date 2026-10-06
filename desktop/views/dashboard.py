@@ -18,8 +18,10 @@ from desktop.dashboard_widgets import host_stat_row, section_block
 from desktop.db_performance_widgets import build_database_performance_section
 from desktop.design_system import font, status_chip
 from desktop.employee_store import EmployeeSession
+from desktop.ui_helpers import detail_panel, make_clickable
 from desktop.infrastructure_health import InfrastructureHealthPanel
 from desktop.ops_widgets import (
+    KPI_ICONS,
     activity_item,
     alert_item_compact,
     command_center_header,
@@ -57,10 +59,6 @@ def _initials(name: str) -> str:
     return (name[:2] if name else "U").upper()
 
 
-def _datetime_text() -> str:
-    return datetime.now().strftime("%I:%M:%S %p").lstrip("0")
-
-
 def _format_gb(value_gb: float) -> str:
     if value_gb >= 100:
         return f"{value_gb:.0f} GB"
@@ -92,13 +90,12 @@ class DashboardView(BaseView):
         self.sidebar_refresh = sidebar_refresh
         self._metric_values: dict[str, ctk.CTkLabel] = {}
         self._metric_secondary: dict[str, ctk.CTkLabel] = {}
-        self._datetime_label: ctk.CTkLabel | None = None
         self._gauges: dict[str, tuple[ctk.CTkProgressBar, ctk.CTkLabel, ctk.CTkLabel]] = {}
         self._host_labels: dict[str, ctk.CTkLabel] = {}
         self._host_status_chip: ctk.CTkLabel | None = None
         self._poll_job: str | None = None
-        self._clock_job: str | None = None
         self._db_poll_busy = False
+        self._sys_poll_busy = False
         self._db_perf_refs: dict = {}
         self._db_samples: deque = deque(maxlen=24)
         self._last_sys_metrics: dict = {}
@@ -121,35 +118,26 @@ class DashboardView(BaseView):
         self._build_ui()
         if initial_refresh:
             self.refresh()
-        self._schedule_clock_tick()
         self._schedule_system_poll()
 
     def destroy(self) -> None:
         self._timers_active = False
         self._db_poll_busy = False
+        self._sys_poll_busy = False
         if self._health_panel is not None:
             try:
                 self._health_panel.destroy()
             except Exception:
                 pass
             self._health_panel = None
-        for job_attr in ("_poll_job", "_clock_job"):
-            job = getattr(self, job_attr, None)
-            if job is not None:
-                try:
-                    self.after_cancel(job)
-                except Exception:
-                    pass
-                setattr(self, job_attr, None)
+        job = getattr(self, "_poll_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._poll_job = None
         super().destroy()
-
-    def _schedule_clock_tick(self) -> None:
-        if not self._timers_active or not self.winfo_exists():
-            return
-        if self._datetime_label:
-            self._datetime_label.configure(text=f"Last updated {_datetime_text()}")
-        # Avoid 1Hz UI churn — clock is informational only.
-        self._clock_job = self.after(5000, self._schedule_clock_tick)
 
     def _content_changed(self, key: str, fingerprint: str, *, force: bool = False) -> bool:
         """Return True when panel widgets must be rebuilt (content actually changed)."""
@@ -159,20 +147,10 @@ class DashboardView(BaseView):
         return True
 
     def _cached_server_databases(self) -> list:
-        """Cache database inventory briefly to avoid hammering the server every poll."""
-        import time
-
-        now = time.monotonic()
-        if self._db_list_cache and (now - self._db_list_cache[0]) < 15:
+        """Last inventory fetched off the UI thread. Never opens a connection here."""
+        if self._db_list_cache:
             return self._db_list_cache[1]
-        rows: list = []
-        if self.connection:
-            try:
-                rows = fetch_server_databases(self.connection)
-            except Exception:
-                rows = []
-        self._db_list_cache = (now, rows)
-        return rows
+        return []
 
     def _nav(self, key: str) -> None:
         if self.navigate_callback:
@@ -196,13 +174,12 @@ class DashboardView(BaseView):
         name = self.employee.full_name if self.employee else "User"
         role = _role_label(self.employee.role) if self.employee else "Operator"
 
-        self._datetime_label = command_center_header(
+        command_center_header(
             scroll,
             self.theme,
             greeting=f"{_greeting()}, {name}",
             role=role,
             initials=_initials(name),
-            datetime_text=_datetime_text(),
             on_refresh=self.refresh,
         )
 
@@ -215,7 +192,7 @@ class DashboardView(BaseView):
 
     def _build_kpi_row(self, scroll: ctk.CTkScrollableFrame) -> None:
         grid = ctk.CTkFrame(scroll, fg_color="transparent")
-        grid.pack(fill="x", pady=(0, 20))
+        grid.pack(fill="x", pady=(0, 16))
         for col in range(3):
             grid.grid_columnconfigure(col, weight=1, uniform="kpi3")
 
@@ -240,11 +217,148 @@ class DashboardView(BaseView):
                 row=r,
                 column=c,
                 sticky="nsew",
-                padx=(0 if c == 0 else 8, 0),
-                pady=(0 if r == 0 else 8, 0),
+                padx=(0 if c == 0 else 6, 0),
+                pady=(0 if r == 0 else 6, 0),
             )
             self._metric_values[key] = val
             self._metric_secondary[key] = sec
+            accent = self.theme.c(KPI_ICONS.get(key, ("", "primary", ""))[1])
+            make_clickable(
+                card,
+                self.theme,
+                lambda k=key, lb=label: self._open_metric_detail(k, lb),
+                hover_border=accent,
+            )
+
+    # ------------------------------------------------------------------
+    # KPI card -> detail dialog
+    # ------------------------------------------------------------------
+
+    def _metric_detail_rows(self, key: str) -> list[tuple[str, str]]:
+        """Real data backing a KPI card, as (label, value) rows."""
+        try:
+            if key == "linux_servers":
+                saved = load_saved_servers(self.owner_username) or load_saved_servers()
+                return [
+                    (s.name, f"{s.db_type} · {s.host}:{s.port}")
+                    for s in sorted(saved, key=lambda x: x.name.lower())
+                ]
+
+            if key in ("databases", "healthy_dbs"):
+                rows = self._cached_server_databases()
+                out: list[tuple[str, str]] = []
+                for row in rows:
+                    name = str(row.get("name", row) if isinstance(row, dict) else row)
+                    size = ""
+                    if isinstance(row, dict):
+                        size = str(row.get("size") or row.get("size_pretty") or "")
+                    out.append((name, size or "—"))
+                return out
+
+            if key == "active_jobs":
+                active, pending = self.monitoring.count_live_jobs()
+                return [("Running now", str(active)), ("Pending", str(pending))]
+
+            if key == "active_alerts":
+                sec = self.monitoring.get_security_dashboard_data(
+                    user=self.owner_username, days=1
+                )
+                posture = sec.get("posture") or {}
+                return [
+                    (str(k).replace("_", " ").title(), str(v))
+                    for k, v in posture.items()
+                ]
+
+            if key == "failed_today":
+                ctx = self._backup_stats_context()
+                db_type = ctx.get("db_type")
+                ok, failed = self.monitoring.count_audit_today(
+                    actions=("backup", "restore"),
+                    db_type=db_type,
+                    user=self.owner_username,
+                )
+                c_ok, c_failed = self.monitoring.count_audit_today(
+                    actions=("connect",), user=self.owner_username
+                )
+                return [
+                    ("Backup / restore failed", str(failed)),
+                    ("Backup / restore succeeded", str(ok)),
+                    ("Connection failures", str(c_failed)),
+                    ("Connections succeeded", str(c_ok)),
+                ]
+        except Exception as exc:  # detail view must never break the dashboard
+            return [("Could not load details", str(exc))]
+        return []
+
+    def _open_metric_detail(self, key: str, label: str) -> None:
+        value_lbl = self._metric_values.get(key)
+        sec_lbl = self._metric_secondary.get(key)
+        value_text = value_lbl.cget("text") if value_lbl is not None else "—"
+        secondary_text = sec_lbl.cget("text") if sec_lbl is not None else ""
+        accent = self.theme.c(KPI_ICONS.get(key, ("", "primary", ""))[1])
+        rows = self._metric_detail_rows(key)
+
+        def body(container: ctk.CTkFrame) -> None:
+            head = ctk.CTkFrame(container, fg_color="transparent")
+            head.pack(fill="x", padx=8, pady=(4, 12))
+            ctk.CTkLabel(
+                head,
+                text=value_text,
+                font=font(self.theme, 34, weight="bold"),
+                text_color=accent,
+                anchor="w",
+            ).pack(anchor="w")
+            if secondary_text:
+                ctk.CTkLabel(
+                    head,
+                    text=secondary_text,
+                    font=font(self.theme, 12),
+                    text_color=self.theme.c("text_muted"),
+                    anchor="w",
+                ).pack(anchor="w", pady=(2, 0))
+
+            if not rows:
+                ctk.CTkLabel(
+                    container,
+                    text="Nothing to show yet.",
+                    font=font(self.theme, 13),
+                    text_color=self.theme.c("text_muted"),
+                ).pack(anchor="w", padx=8, pady=(4, 8))
+                return
+
+            for name, detail in rows:
+                row = ctk.CTkFrame(
+                    container,
+                    fg_color=self.theme.c("bg_elevated"),
+                    corner_radius=self.theme.radius("sm"),
+                )
+                row.pack(fill="x", padx=8, pady=3)
+                inner = ctk.CTkFrame(row, fg_color="transparent")
+                inner.pack(fill="x", padx=12, pady=9)
+                ctk.CTkLabel(
+                    inner,
+                    text=str(detail),
+                    font=font(self.theme, 12),
+                    text_color=self.theme.c("text_secondary"),
+                    anchor="e",
+                ).pack(side="right", padx=(12, 0))
+                ctk.CTkLabel(
+                    inner,
+                    text=str(name),
+                    font=font(self.theme, 13, weight="bold"),
+                    text_color=self.theme.c("text_primary"),
+                    anchor="w",
+                ).pack(side="left", fill="x", expand=True)
+
+        detail_panel(
+            self,
+            self.theme,
+            title=label,
+            subtitle="Live detail from your current environment",
+            body=body,
+            width=560,
+            accent=accent,
+        )
 
     def _build_health_alerts_row(self, scroll: ctk.CTkScrollableFrame) -> None:
         row = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -450,17 +564,14 @@ class DashboardView(BaseView):
         self._activity_list.pack(fill="x")
 
     def _build_legacy_detail_sections(self, scroll: ctk.CTkScrollableFrame) -> None:
-        """Preserve existing detailed panels and data wiring."""
-        health_body = section_block(
-            scroll,
-            self.theme,
-            "Service Status",
-            subtitle="Saved profiles, connection, backup and replication",
-        )
-        self._health_panel = InfrastructureHealthPanel(health_body, self.theme)
-        self._health_panel.pack(fill="x")
-        self._apply_health_dashboard()
+        """Detail panels below the command-center rows.
 
+        "Service Status" (InfrastructureHealthPanel) used to render here too, but every
+        one of its 4 rows (saved profiles, connection, backup, replication) already has a
+        home above — the KPI row, the "Database Health Overview" panel, and the
+        "Backup & Recovery Status" panel — so it was pure duplication with zero unique
+        data. Dropped rather than kept redundant (docs/ui_plan.md §6).
+        """
         db_body = section_block(
             scroll,
             self.theme,
@@ -853,18 +964,25 @@ class DashboardView(BaseView):
 
         sparks = refs.get("sparklines") or {}
         if sparks:
-            sparks.get("latency", ctk.CTkLabel()).configure(
-                text=metrics.get("latency", "Connect a database") if not connected else metrics.get("latency", "—")
-            )
-            sparks.get("connections", ctk.CTkLabel()).configure(
-                text="Offline" if not connected else str(conn_n)
-            )
-            sparks.get("slow", ctk.CTkLabel()).configure(
-                text="—" if not connected else str(metrics.get("slow_num", "—"))
-            )
-            sparks.get("replication", ctk.CTkLabel()).configure(
-                text=str(metrics.get("replication_lag", "N/A"))
-            )
+            # NOTE: `.get(key, ctk.CTkLabel())` looks like a safe fallback but
+            # isn't — Python evaluates the default argument eagerly, so
+            # ctk.CTkLabel() was being constructed (and crashing, missing its
+            # required `master`) on every call regardless of whether the key
+            # existed. Only configure a label when it's actually present.
+            latency_lbl = sparks.get("latency")
+            if latency_lbl:
+                latency_lbl.configure(
+                    text=metrics.get("latency", "Connect a database") if not connected else metrics.get("latency", "—")
+                )
+            connections_lbl = sparks.get("connections")
+            if connections_lbl:
+                connections_lbl.configure(text="Offline" if not connected else str(conn_n))
+            slow_lbl = sparks.get("slow")
+            if slow_lbl:
+                slow_lbl.configure(text="—" if not connected else str(metrics.get("slow_num", "—")))
+            replication_lbl = sparks.get("replication")
+            if replication_lbl:
+                replication_lbl.configure(text=str(metrics.get("replication_lag", "N/A")))
 
     def _apply_security_dashboard(self) -> None:
         if not self._security_refs:
@@ -1027,12 +1145,7 @@ class DashboardView(BaseView):
                 active_name = (self.connection.saved_name or self.connection.name or "").strip()
                 active_engine = self.connection.db_type.value.upper()
 
-            db_count = 0
-            if self.connection:
-                try:
-                    db_count = len(fetch_server_databases(self.connection))
-                except Exception:
-                    db_count = 0
+            db_count = len(self._cached_server_databases()) if self.connection else 0
 
             active_jobs, pending_jobs = self.monitoring.count_live_jobs()
             backup_success, backup_failed = self.monitoring.count_audit_today(
@@ -1244,17 +1357,27 @@ class DashboardView(BaseView):
                 metrics = fetch_database_performance(connection)
             except Exception:
                 metrics = {"connected": False}
+            rows: list = []
+            if connection is not None:
+                try:
+                    rows = fetch_server_databases(connection)
+                except Exception:
+                    rows = []
             try:
-                self.after(0, lambda m=metrics: self._finish_db_poll(m))
+                self.after(0, lambda m=metrics, r=rows: self._finish_db_poll(m, r))
             except RuntimeError:
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_db_poll(self, metrics: dict) -> None:
+    def _finish_db_poll(self, metrics: dict, db_rows: list | None = None) -> None:
         self._db_poll_busy = False
         if not self._timers_active or not self.winfo_exists():
             return
+        if db_rows is not None:
+            import time
+
+            self._db_list_cache = (time.monotonic(), db_rows)
         self._last_db_metrics = metrics
         self._apply_db_performance_dashboard(metrics)
         self._apply_health_dashboard(metrics)
@@ -1282,27 +1405,50 @@ class DashboardView(BaseView):
             sessions = str(int(metrics.get("connections_num") or 0))
         else:
             sessions = "—"
-        last_refresh = datetime.now().strftime("%H:%M:%S")
 
         updater(
             connection_status=conn_status,
             version=version,
             uptime=uptime,
             sessions=sessions,
-            last_refresh=last_refresh,
         )
 
-    def _schedule_system_poll(self) -> None:
+    def _dashboard_visible(self) -> bool:
+        try:
+            return bool(self._timers_active and self.winfo_ismapped())
+        except Exception:
+            return False
+
+    def _request_system_metrics(self) -> None:
+        if self._sys_poll_busy:
+            return
+        self._sys_poll_busy = True
+        monitoring = self.monitoring
+
+        def worker() -> None:
+            sys_m = None
+            try:
+                sys_m = monitoring.get_system_metrics()
+            except Exception:
+                pass
+            try:
+                self.after(0, lambda m=sys_m: self._finish_system_poll(m))
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_system_poll(self, sys_m: dict | None) -> None:
+        self._sys_poll_busy = False
+        if not self._timers_active or not self.winfo_exists() or not sys_m:
+            return
+        self._apply_system_metrics(sys_m)
+
+    def _request_live_poll(self) -> None:
+        """Refresh gauges and database stats without blocking the UI thread."""
         if not self._timers_active or not self.winfo_exists():
             return
-        try:
-            sys_m = self.monitoring.get_system_metrics()
-            self._apply_system_metrics(sys_m)
-        except Exception:
-            pass
-
-        # Live DB metrics apply command-center panels when the worker finishes.
-        # Avoid rebuilding the same panels twice in one cycle (that caused blinking).
+        self._request_system_metrics()
         if self.connection:
             self._poll_database_metrics()
         else:
@@ -1310,28 +1456,25 @@ class DashboardView(BaseView):
             self._refresh_key_metrics()
             if self._health_panel:
                 self._apply_health_dashboard()
-
         self._apply_security_dashboard()
-        self._poll_job = self.after(5000, self._schedule_system_poll)
+
+    def _schedule_system_poll(self) -> None:
+        if not self._timers_active or not self.winfo_exists():
+            return
+        # Hidden pages must not keep querying the database or the host.
+        if self._dashboard_visible():
+            self._request_live_poll()
+        self._poll_job = self.after(10000, self._schedule_system_poll)
+
+    def resume(self) -> None:
+        """Restart live updates when the dashboard is shown again."""
+        self._request_live_poll()
 
     def refresh(self) -> None:
         try:
-            self._panel_fingerprint.clear()
-            self._db_list_cache = None
-            if self._datetime_label:
-                self._datetime_label.configure(text=f"Last updated {_datetime_text()}")
-
             self._refresh_key_metrics()
 
-            try:
-                sys_m = self.monitoring.get_system_metrics()
-                self._apply_system_metrics(sys_m)
-            except Exception:
-                pass
-
-            if self.connection:
-                self._poll_database_metrics()
-            else:
+            if not self.connection:
                 self._db_samples.clear()
                 empty = fetch_database_performance(None)
                 self._last_db_metrics = empty
@@ -1339,11 +1482,19 @@ class DashboardView(BaseView):
                 self._apply_health_dashboard(empty)
 
             self._apply_security_dashboard()
-            self._apply_command_center_panels(force=True)
+            self._apply_command_center_panels()
 
             if self.sidebar_refresh:
                 self.sidebar_refresh()
 
+            self._request_system_metrics()
+            if self.connection:
+                self._poll_database_metrics()
+
             self.log("Dashboard refreshed", "SUCCESS")
         except Exception as exc:
             self.log(f"Dashboard refresh failed: {exc}", "ERROR")
+        finally:
+            root = self.winfo_toplevel()
+            if callable(getattr(root, "mark_last_updated", None)):
+                root.mark_last_updated()

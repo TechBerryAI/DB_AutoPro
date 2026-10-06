@@ -239,42 +239,49 @@ def fetch_database_performance(connection: ConnectionResult | None) -> dict[str,
     except Exception:
         return _empty_metrics(connected=False)
 
-    latency_ms = _measure_latency_ms(connector)
-    version = ""
-    try:
-        version = connector.get_version() or ""
-    except Exception:
-        pass
-
-    collector = _COLLECTORS.get(connection.db_type)
-    details = {"connections": "0", "slow_queries": "0", "replication_lag": "N/A"}
-    collector_ok = False
-    if collector:
+    def _collect() -> dict[str, Any]:
+        latency_ms = _measure_latency_ms(connector)
+        version = ""
         try:
-            details = collector(connector)
-            collector_ok = True
+            version = connector.get_version() or ""
         except Exception:
             pass
 
-    connected = collector_ok or latency_ms is not None
-    if latency_ms is None and connected:
-        try:
-            start = time.perf_counter()
-            if connector.test_connection():
-                latency_ms = round((time.perf_counter() - start) * 1000, 1)
-        except Exception:
-            pass
+        collector = _COLLECTORS.get(connection.db_type)
+        details = {"connections": "0", "slow_queries": "0", "replication_lag": "N/A"}
+        collector_ok = False
+        if collector:
+            try:
+                details = collector(connector)
+                collector_ok = True
+            except Exception:
+                pass
 
-    return {
-        "connected": connected,
-        "latency_ms": latency_ms,
-        "latency": _format_latency(latency_ms),
-        "connections": details.get("connections", "0"),
-        "slow_queries": details.get("slow_queries", "0"),
-        "replication_lag": details.get("replication_lag", "N/A"),
-        "version": version,
-        **_extended_metrics(connector, connection.db_type, details),
-    }
+        connected = collector_ok or latency_ms is not None
+        if latency_ms is None and connected:
+            try:
+                start = time.perf_counter()
+                if connector.test_connection():
+                    latency_ms = round((time.perf_counter() - start) * 1000, 1)
+            except Exception:
+                pass
+
+        return {
+            "connected": connected,
+            "latency_ms": latency_ms,
+            "latency": _format_latency(latency_ms),
+            "connections": details.get("connections", "0"),
+            "slow_queries": details.get("slow_queries", "0"),
+            "replication_lag": details.get("replication_lag", "N/A"),
+            "version": version,
+            **_extended_metrics(connector, connection.db_type, details),
+        }
+
+    reuse = getattr(connector, "reused_connection", None)
+    if callable(reuse):
+        with reuse():
+            return _collect()
+    return _collect()
 
 
 def _parse_replication_seconds(text: str) -> float:

@@ -12,57 +12,6 @@ from desktop.design_system import font
 from desktop.theme import ThemeManager
 
 
-def _kpi_tile(
-    parent: ctk.CTkFrame,
-    theme: ThemeManager,
-    *,
-    icon: str,
-    title: str,
-    color_key: str,
-) -> ctk.CTkLabel:
-    card = ctk.CTkFrame(
-        parent,
-        corner_radius=theme.radius("md"),
-        fg_color=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
-        border_width=1,
-        border_color=theme.c("border"),
-    )
-    card.pack(side="left", fill="both", expand=True, padx=4)
-
-    inner = ctk.CTkFrame(card, fg_color="transparent")
-    inner.pack(fill="both", expand=True, padx=14, pady=12)
-
-    top = ctk.CTkFrame(inner, fg_color="transparent")
-    top.pack(fill="x")
-    ctk.CTkLabel(top, text=icon, font=font(theme, 16), text_color=theme.c(color_key)).pack(side="left")
-    ctk.CTkLabel(
-        top,
-        text=title,
-        font=font(theme, 10, weight="bold"),
-        text_color=theme.c("text_muted"),
-    ).pack(side="right")
-
-    value = ctk.CTkLabel(
-        inner,
-        text="—",
-        font=font(theme, 18, weight="bold"),
-        text_color=theme.c("text_primary"),
-        anchor="w",
-    )
-    value.pack(anchor="w", pady=(8, 2))
-
-    subtitle = ctk.CTkLabel(
-        inner,
-        text="",
-        font=font(theme, 10),
-        text_color=theme.c("text_muted"),
-        anchor="w",
-    )
-    subtitle.pack(anchor="w")
-    value._subtitle = subtitle  # type: ignore[attr-defined]
-    return value
-
-
 def _multi_line_chart(
     parent: ctk.CTkFrame,
     theme: ThemeManager,
@@ -90,6 +39,8 @@ def _multi_line_chart(
     keys = [k for k, _, _ in series_specs]
     colors = [theme.c(c) for _, _, c in series_specs]
     last_series: list[dict] = []
+    redraw_job: str | None = None
+    drawn_width = -1
 
     def update(series: list[dict] | None = None) -> None:
         nonlocal last_series
@@ -105,7 +56,6 @@ def _multi_line_chart(
                 font=("Segoe UI", 10),
             )
             return
-        canvas.update_idletasks()
         w = max(canvas.winfo_width(), 640)
         h = height
         pad_l, pad_r, pad_t, pad_b = 28, 12, 12, 24
@@ -132,9 +82,20 @@ def _multi_line_chart(
                 font=("Segoe UI", 7),
             )
 
-    def _on_configure(_event=None) -> None:
-        if last_series:
-            update()
+    def _on_configure(event=None) -> None:
+        nonlocal redraw_job, drawn_width
+        if not last_series:
+            return
+        width = getattr(event, "width", 0) or 0
+        if width <= 1 or width == drawn_width:
+            return
+        drawn_width = width
+        if redraw_job is not None:
+            try:
+                canvas.after_cancel(redraw_job)
+            except Exception:
+                pass
+        redraw_job = canvas.after(80, update)
 
     canvas.bind("<Configure>", _on_configure)
     return update
@@ -166,22 +127,17 @@ def _sparkline_row(parent: ctk.CTkFrame, theme: ThemeManager) -> dict[str, ctk.C
 
 
 def build_database_performance_section(parent: ctk.CTkFrame, theme: ThemeManager) -> dict:
-    """Build Database Performance: KPI strip + full-width real-time chart."""
-    refs: dict = {}
+    """Build Database Performance: full-width real-time chart + sparkline row.
 
-    # ── KPI row ──
-    kpi_row = ctk.CTkFrame(parent, fg_color="transparent")
-    kpi_row.pack(fill="x", pady=(0, 12))
-    refs["kpi_status"] = _kpi_tile(kpi_row, theme, icon="🛡", title="Status", color_key="success")
-    refs["kpi_status"]._subtitle.configure(text="Connection health")  # type: ignore[attr-defined]
-    refs["kpi_uptime"] = _kpi_tile(kpi_row, theme, icon="◷", title="Uptime", color_key="metric_blue")
-    refs["kpi_uptime"]._subtitle.configure(text="Database server")  # type: ignore[attr-defined]
-    refs["kpi_connections"] = _kpi_tile(kpi_row, theme, icon="◎", title="Total Connections", color_key="metric_purple")
-    refs["kpi_connections"]._subtitle.configure(text="Active / Max")  # type: ignore[attr-defined]
-    refs["kpi_latency"] = _kpi_tile(kpi_row, theme, icon="◉", title="DB Response Time", color_key="metric_amber")
-    refs["kpi_latency"]._subtitle.configure(text="Round-trip ping")  # type: ignore[attr-defined]
-    refs["kpi_throughput"] = _kpi_tile(kpi_row, theme, icon="⇅", title="Activity", color_key="primary")
-    refs["kpi_throughput"]._subtitle.configure(text="Lifetime counter")  # type: ignore[attr-defined]
+    Used to also render a 5-tile KPI strip (status/uptime/connections/latency/
+    activity), but every one of those numbers already appears in the "Database
+    Activity" panel higher up the dashboard — this section's actual unique value is
+    the real-time chart and sparklines, so the redundant tile strip was dropped
+    (docs/ui_plan.md §6). dashboard.py's _apply_db_performance_dashboard() already
+    guards each of these refs with `.get(...)` + `if lbl:`, so leaving those keys
+    absent from `refs` is a no-op there, not a break.
+    """
+    refs: dict = {}
 
     # ── Full-width performance chart ──
     perf_card, perf_body = analytics_card(

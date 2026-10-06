@@ -132,10 +132,12 @@ hiddenimports = [
 # UI yet, so the import graph does not reach them. Bundled anyway, so the
 # packaged app stays complete if they are wired up later.
 hiddenimports += [
-    "desktop.views.fdw_view",
     "desktop.views.migration_view",
     "desktop.views.monitoring_view",
     "desktop.views.patch_view",
+    "desktop.overlay",
+    "desktop.ui_helpers",
+    "desktop.shell_header",
 ]
 
 a = Analysis(

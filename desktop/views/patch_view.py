@@ -28,8 +28,16 @@ class PatchView(BaseView):
             context.grid(row=row, column=0, padx=20, pady=(12, 8), sticky="ew")
             row += 1
 
-        title = self.create_section_title("Patch Management")
-        title.grid(row=row, column=0, padx=20, pady=20, sticky="w")
+        title_wrap = ctk.CTkFrame(self, fg_color="transparent")
+        title_wrap.grid(row=row, column=0, padx=24, pady=(16, 0), sticky="ew")
+        from desktop.ops_widgets import page_header
+
+        page_header(
+            title_wrap,
+            self.theme,
+            "Patching",
+            subtitle="Execute SQL patch scripts and review history.",
+        )
         row += 1
 
         form = self.card_frame(self)

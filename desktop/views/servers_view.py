@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+import customtkinter as ctk
+
 from desktop.connection import ConnectionResult
 from desktop.connection_panel import ConnectionPanel
+from desktop.ops_widgets import page_header
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
 
@@ -26,6 +29,7 @@ class ServersView(BaseView):
     ) -> None:
         servers_filter = kwargs.pop("servers_filter", "all")
         saved_server = kwargs.pop("saved_server", None)
+        new_connection = kwargs.pop("new_connection", False)
         super().__init__(master, theme, log_callback, **kwargs)
         self.establish_callback = establish_callback
         self.disconnect_callback = disconnect_callback
@@ -33,11 +37,21 @@ class ServersView(BaseView):
         self._panel: ConnectionPanel | None = None
         self._servers_filter = servers_filter
         self._pending_saved_server = saved_server
+        self._pending_new_connection = new_connection
         self._build_ui()
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(16, 0))
+        page_header(
+            header,
+            self.theme,
+            "Servers",
+            subtitle="Connect to database targets and manage saved server profiles.",
+        )
 
         self._panel = ConnectionPanel(
             self,
@@ -47,9 +61,12 @@ class ServersView(BaseView):
             on_saved_servers_changed=self.saved_servers_changed_callback,
             log_callback=self.log,
         )
-        self._panel.grid(row=0, column=0, sticky="nsew")
+        self._panel.grid(row=1, column=0, sticky="nsew")
 
-        if self._pending_saved_server:
+        if self._pending_new_connection:
+            self._pending_new_connection = False
+            self._panel._new_connection()
+        elif self._pending_saved_server:
             loaded = self._panel.load_saved_by_name(self._pending_saved_server)
             self._pending_saved_server = None
             if not loaded and self.connection:
@@ -71,6 +88,13 @@ class ServersView(BaseView):
     def load_saved_server(self, name: str) -> None:
         if self._panel:
             self._panel.load_saved_by_name(name)
+
+    def start_new_connection(self) -> None:
+        """Reset the connection form to a blank, unselected PostgreSQL default."""
+        if self._panel:
+            self._panel._new_connection()
+        else:
+            self._pending_new_connection = True
 
     def _update_session(self) -> None:
         if self._panel:

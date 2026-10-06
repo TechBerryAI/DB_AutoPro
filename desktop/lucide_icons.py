@@ -35,9 +35,17 @@ LUCIDE_ALIASES: dict[str, str] = {
     "backup": "archive",
     "restore": "upload",
     "logs": "scroll-text",
+    "audit": "shield-check",
     "reports": "file-chart-column",
     "settings": "settings",
+    "sign_out": "log-out",
+    "logout": "log-out",
+    "theme_light": "sun",
+    "theme_dark": "moon",
     "cpu": "cpu",
+    "migration": "briefcase",
+    "patching": "circle-check",
+    "monitoring": "activity",
 }
 
 
