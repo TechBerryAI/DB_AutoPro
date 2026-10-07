@@ -211,12 +211,9 @@ def status_chip(
 
 
 def page_scroll(parent, theme: ThemeManager) -> ctk.CTkScrollableFrame:
-    scroll = ctk.CTkScrollableFrame(
-        parent,
-        fg_color="transparent",
-        scrollbar_button_color=theme.c("bg_elevated"),
-        scrollbar_button_hover_color=theme.c("primary"),
-    )
+    from desktop.theme import themed_scrollable_frame
+
+    scroll = themed_scrollable_frame(parent, theme)
     scroll.grid_columnconfigure(0, weight=1)
     return scroll
 

@@ -75,6 +75,7 @@ class ShellHeader(ctk.CTkFrame):
         self._sidebar_collapsed = sidebar_collapsed
         self._last_updated: datetime | None = None
         self._updating = True
+        self._refreshing = False
         self.grid_propagate(False)
         self._build()
         self.set_connection(connection)
@@ -106,10 +107,11 @@ class ShellHeader(ctk.CTkFrame):
         self._sidebar_btn.pack(side="left")
         self.set_sidebar_collapsed(self._sidebar_collapsed)
 
-        # Single non-wrapping action row (avoids a clipped second "Refre…" under Refresh).
-        right = ctk.CTkFrame(row, fg_color="transparent", height=30)
+        # Action row — let natural width drive packing so Light/Dark stays clickable
+        # (fixed pack_propagate(False) frames clipped the theme button hit target).
+        right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="right")
-        right.pack_propagate(False)
+        self._header_actions = right
 
         self._updated_label = ctk.CTkLabel(
             right,
@@ -139,10 +141,9 @@ class ShellHeader(ctk.CTkFrame):
             text="Dark",
             command=self._handle_theme,
             height=30,
-            width=88,
+            width=96,
         )
         self._theme_btn.pack(side="left")
-        self._fit_header_actions()
         self._sync_theme_button()
 
     def _theme_target(self) -> tuple[str, str]:
@@ -151,35 +152,64 @@ class ShellHeader(ctk.CTkFrame):
             return "Light", "theme_light"
         return "Dark", "theme_dark"
 
-    def _fit_header_actions(self) -> None:
-        """Keep Updated + Refresh + theme on one row at a stable width."""
-        try:
-            self.update_idletasks()
-            width = (
-                max(72, self._updated_label.winfo_reqwidth())
-                + 10
-                + 96
-                + 8
-                + 88
-            )
-            self._updated_label.master.configure(width=width, height=30)
-        except Exception:
-            try:
-                self._updated_label.master.configure(width=280, height=30)
-            except Exception:
-                pass
-
     def _sync_theme_button(self) -> None:
         label, icon_key = self._theme_target()
         color = self.theme.c("text_primary")
         img = lucide_ctk_image(icon_key, color, size=14)
-        self._theme_btn.configure(text=f" {label}", image=img, compound="left", width=88)
+        # Keep command wired — configure(image=...) must not drop the handler.
+        self._theme_btn.configure(
+            text=f" {label}",
+            image=img,
+            compound="left",
+            width=96,
+            command=self._handle_theme,
+        )
         self._theme_btn._lucide_image = img  # type: ignore[attr-defined]
-        self._fit_header_actions()
 
     def _handle_refresh(self) -> None:
+        if self._refreshing:
+            return
         if self._on_refresh:
             self._on_refresh()
+
+    def set_refreshing(self, busy: bool) -> None:
+        """Disable Refresh and show a loading label while a page reload runs."""
+        self._refreshing = bool(busy)
+        btn = getattr(self, "_refresh_btn", None)
+        if btn is None:
+            return
+        if busy:
+            self.set_updating()
+            color = self.theme.c("text_muted")
+            img = lucide_ctk_image("refresh-cw", color, size=14)
+            btn.configure(
+                text=" Loading…",
+                image=img,
+                compound="left",
+                state="disabled",
+                text_color=color,
+                fg_color=self.theme.c("bg_elevated"),
+                border_color=self.theme.c("border_subtle"),
+                width=110,
+                command=self._handle_refresh,
+            )
+            btn._lucide_image = img  # type: ignore[attr-defined]
+            return
+        color = self.theme.c("text_primary")
+        img = lucide_ctk_image("refresh-cw", color, size=14)
+        btn.configure(
+            text="Refresh",
+            image=img,
+            compound="left",
+            state="normal",
+            text_color=color,
+            fg_color=self.theme.c("bg_elevated"),
+            hover_color=self.theme.c("bg_card_hover"),
+            border_color=self.theme.c("border"),
+            width=96,
+            command=self._handle_refresh,
+        )
+        btn._lucide_image = img  # type: ignore[attr-defined]
 
     def _handle_theme(self) -> None:
         if self._on_theme:
@@ -228,7 +258,6 @@ class ShellHeader(ctk.CTkFrame):
             stamp = text
         self._updating = False
         self._updated_label.configure(text=f"Updated {stamp}")
-        self._fit_header_actions()
 
     def apply_theme(self, theme: ThemeManager) -> None:
         self.theme = theme
@@ -248,12 +277,15 @@ class ShellHeader(ctk.CTkFrame):
                 border_color=theme.c("border"),
                 text_color=theme.c("text_primary"),
             )
-        img = lucide_ctk_image("refresh-cw", theme.c("text_primary"), size=14)
-        self._refresh_btn.configure(image=img)
-        self._refresh_btn._lucide_image = img  # type: ignore[attr-defined]
         self._sync_theme_button()
         self.set_connection(self.connection)
-        if self._updating or self._last_updated is None:
+        if self._refreshing:
+            self.set_refreshing(True)
+        elif self._updating or self._last_updated is None:
             self.set_updating()
+            self.set_refreshing(False)
         else:
             self.set_last_updated(self._last_updated)
+            self.set_refreshing(False)
+        # Re-bind after theme restyle so Light/Dark always fires.
+        self._theme_btn.configure(command=self._handle_theme)

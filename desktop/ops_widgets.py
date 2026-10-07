@@ -336,7 +336,7 @@ def health_overview_visual(
         ("healthy", "Healthy", theme.c("success")),
         ("warning", "Warning", theme.c("warning")),
         ("critical", "Critical", theme.c("error")),
-        ("offline", "Offline", theme.c("text_muted")),
+        ("offline", "Registered", theme.c("text_muted")),
     ]
     for key, label, color in legend_specs:
         row = ctk.CTkFrame(right, fg_color="transparent")

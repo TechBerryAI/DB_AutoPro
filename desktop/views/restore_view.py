@@ -30,6 +30,7 @@ from backend.services.restore_catalog import (
 from backend.services.restore_service import RestoreService
 from desktop.connection_store import SavedServer, load_saved_servers
 from desktop.db_catalog import fetch_server_databases
+from desktop.design_system import primary_button
 from desktop.remote_directory_browser import RemoteDirectoryBrowser
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
@@ -54,6 +55,25 @@ class RestoreView(BaseView):
         self._sync_mongo_fields()
         self._refresh_methods()
         self._populate_database_dropdown()
+
+    def refresh(self, *, force: bool = False) -> None:
+        """Reload restore form data from the active connection / server."""
+        del force
+        if self.connection and hasattr(self, "db_type"):
+            try:
+                self.db_type.set(self.connection.db_type.value)
+            except Exception:
+                pass
+        self._init_restore_defaults()
+        self._sync_mongo_fields()
+        self._refresh_methods()
+        self._populate_database_dropdown()
+        self._sync_source_fields()
+        try:
+            self._update_command_preview()
+        except Exception:
+            pass
+        self.log("Restore page refreshed")
 
     def _init_restore_defaults(self) -> None:
         saved = self._find_saved_server()
@@ -256,7 +276,9 @@ class RestoreView(BaseView):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        from desktop.theme import themed_scrollable_frame
+
+        scroll = themed_scrollable_frame(self, self.theme)
         scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(16, 12))
         scroll.grid_columnconfigure(0, weight=1)
 
@@ -698,15 +720,14 @@ class RestoreView(BaseView):
         btn_frame = ctk.CTkFrame(form, fg_color="transparent")
         btn_frame.grid(row=16, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
 
-        ctk.CTkButton(
+        # Same charcoal/primary CTA as Migration "Start Migration".
+        primary_button(
             btn_frame,
+            self.theme,
             text="Run Restore",
             command=self._run_restore,
             width=140,
             height=38,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color=self.theme.c("primary"),
-            hover_color=self.theme.c("primary_hover"),
         ).pack(side="left")
 
         progress_frame = ctk.CTkFrame(scroll, fg_color="transparent")

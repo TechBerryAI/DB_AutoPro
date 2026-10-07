@@ -60,8 +60,9 @@ class MonitoringView(BaseView):
         )
         self.results.grid(row=1, column=0, padx=24, pady=(0, 16), sticky="nsew")
 
-    def refresh(self) -> None:
+    def refresh(self, *, force: bool = False) -> None:
         """Reload audit lines from disk."""
+        del force
         try:
             logs = self.service.get_audit_logs(200)
         except Exception as exc:

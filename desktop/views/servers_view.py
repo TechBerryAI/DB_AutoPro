@@ -110,7 +110,8 @@ class ServersView(BaseView):
             self.disconnect_callback()
         self._update_session()
 
-    def refresh(self) -> None:
+    def refresh(self, *, force: bool = False) -> None:
+        del force
         if self._panel:
             self._panel._refresh_saved_list()
         self._update_session()

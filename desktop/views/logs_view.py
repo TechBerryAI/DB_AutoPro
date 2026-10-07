@@ -48,6 +48,13 @@ class LogsView(BaseView):
         if self._register_log_panel:
             self._register_log_panel(self._panel)
 
+    def refresh(self, *, force: bool = False) -> None:
+        """Re-render the execution log panel from the shared store."""
+        del force
+        if self._panel is not None and hasattr(self._panel, "refresh"):
+            self._panel.refresh()
+        self.log("Execution log refreshed")
+
     def destroy(self) -> None:
         if self._register_log_panel:
             self._register_log_panel(None)

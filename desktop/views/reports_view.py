@@ -66,7 +66,9 @@ class ReportsView(BaseView):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        from desktop.theme import themed_scrollable_frame
+
+        scroll = themed_scrollable_frame(self, self.theme)
         scroll.grid(row=0, column=0, sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
 
@@ -605,11 +607,15 @@ class ReportsView(BaseView):
         elif choice == "Export PDF":
             self._export_pdf()
 
-    def refresh(self, period=None) -> None:
-        """Refresh when navigating back, but skip if a report just finished."""
+    def refresh(self, period=None, *, force: bool = False) -> None:
+        """Refresh when navigating back; header Refresh always regenerates."""
         if self._report_busy:
             return
-        if self._last_report_at and (datetime.now() - self._last_report_at).total_seconds() < 30:
+        if (
+            not force
+            and self._last_report_at
+            and (datetime.now() - self._last_report_at).total_seconds() < 30
+        ):
             return
         self.generate_report()
 

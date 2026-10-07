@@ -25,7 +25,20 @@ class SettingsView(BaseView):
         # theme_toggle_callback kept for older callers; theme switch lives in the shell header.
         del theme_toggle_callback
         super().__init__(master, theme, log_callback, **kwargs)
+        self._info_card: ctk.CTkFrame | None = None
         self._build_ui()
+
+    def refresh(self, *, force: bool = False) -> None:
+        """Rebuild settings fields from current connection / config."""
+        del force
+        if self._info_card is not None:
+            try:
+                self._info_card.destroy()
+            except Exception:
+                pass
+            self._info_card = None
+        self._build_info_card()
+        self.log("Settings refreshed")
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -39,9 +52,13 @@ class SettingsView(BaseView):
             subtitle="Application configuration and environment profile",
         )
 
+        self._build_info_card()
+
+    def _build_info_card(self) -> None:
         settings = get_settings()
         info = self.card_frame(self)
         info.grid(row=1, column=0, padx=24, pady=8, sticky="nsew")
+        self._info_card = info
 
         labels = [
             ("Application", APP_NAME),

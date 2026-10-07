@@ -11,6 +11,10 @@ THEME_PREF_PATH = Path(__file__).resolve().parent.parent / "config" / "ui_prefer
 
 RADIUS = {"sm": 8, "md": 12, "lg": 14, "xl": 16, "pill": 999}
 
+# Shared shell chrome sizes (CustomTkinter — not CSS, but one source of truth).
+FOOTER_HEIGHT = 36
+CONTENT_BOTTOM_INSET = FOOTER_HEIGHT + 16  # scroll content clears the fixed status bar
+
 # 4/8-based spacing scale, in pixels — use via ThemeManager.spacing(key) instead of a
 # literal padx/pady number, so a future spacing change is a one-line edit here.
 SPACING = {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24, "xxl": 32}
@@ -37,22 +41,25 @@ THEMES = {
         "bg_app": "#030508",
         "bg_sidebar": "#070b12",
         "bg_content": "#0a0e16",
-        "bg_card": "#0f1520",
-        "bg_card_hover": "#151d2c",
-        "bg_elevated": "#121a28",
+        # Cards slightly above page bg so panels read as surfaces.
+        "bg_card": "#131b28",
+        "bg_card_hover": "#1a2436",
+        "bg_elevated": "#182233",
         "bg_input": "#0a1018",
-        "bg_glass": "#111827",
-        "bg_list": "#0c121c",
-        "border": "#1e2a3d",
-        "border_subtle": "#141c28",
+        "bg_glass": "#131b28",
+        "bg_list": "#0e1520",
+        # Borders one step lighter for clear but subtle card edges.
+        "border": "#2f3f57",
+        "border_subtle": "#243044",
         "border_focus": "#5b9aff",
         "primary": "#5b9aff",
         "primary_hover": "#4a8ef5",
         "primary_muted": "#152847",
         "primary_glow": "#3b82f640",
         "text_primary": "#f8fafc",
-        "text_secondary": "#9aa8bc",
-        "text_muted": "#6b7a90",
+        # Secondary/muted: clearly readable on navy cards (still below primary).
+        "text_secondary": "#d7e0ec",
+        "text_muted": "#b4c2d4",
         "text_on_primary": "#ffffff",
         "success": "#3dd68c",
         "success_muted": "#0d3d2a",
@@ -62,11 +69,11 @@ THEMES = {
         "error_muted": "#4a1515",
         "info": "#bae6fd",
         "info_muted": "#0c4a6e",
-        "neutral": "#9aa8bc",
-        "neutral_muted": "#121a28",
+        "neutral": "#d7e0ec",
+        "neutral_muted": "#182233",
         "background": "#030508",
-        "surface": "#0f1520",
-        "surface_raised": "#121a28",
+        "surface": "#131b28",
+        "surface_raised": "#182233",
         "destructive_bg": "#3f1515",
         "destructive_hover": "#5c1d1d",
         "destructive_text": "#fca5a5",
@@ -83,26 +90,26 @@ THEMES = {
         "metric_amber": "#f5c451",
         "metric_amber_bg": "#4a3410",
         "nav_active_text": "#E6E9EF",
-        "nav_idle_text": "#8b9bb0",
+        "nav_idle_text": "#c5d0de",
         "nav_indicator": "#3B82F6",
         "nav_active_bg": "#152847",
-        "log_info": "#9aa8bc",
+        "log_info": "#d7e0ec",
         "log_success": "#3dd68c",
         "log_warning": "#f5c451",
         "log_error": "#ff6b6b",
         "terminal_bg": "#050810",
-        "sidebar_border": "#141c28",
+        "sidebar_border": "#243044",
         "sidebar_text_primary": "#f1f5f9",
-        "sidebar_text_secondary": "#94a3b8",
-        "sidebar_text_muted": "#64748b",
-        "sidebar_bg_card": "#0f1520",
-        "sidebar_bg_hover": "#151d2c",
+        "sidebar_text_secondary": "#c5d0de",
+        "sidebar_text_muted": "#b4c2d4",
+        "sidebar_bg_card": "#131b28",
+        "sidebar_bg_hover": "#1a2436",
         "sidebar_bg_list": "#0a0e16",
         "sidebar_nav_active": "#152847",
         "sidebar_nav_hover": "#121a28",
         "sidebar_nav_accent": "#3B82F6",
         "bg_primary": "#030508",
-        "bg_secondary": "#0f1520",
+        "bg_secondary": "#131b28",
         "bg_sidebar_legacy": "#070b12",
     },
     "light": {
@@ -258,6 +265,23 @@ class ThemeManager:
     def sc(self, key: str) -> str:
         fallback = _SIDEBAR_FALLBACKS.get(key, key)
         return self.colors.get(f"sidebar_{key}", self.c(fallback))
+
+    def scroll_kwargs(self) -> dict[str, str]:
+        """Colors for CTkScrollableFrame so dark mode never shows a light OS bar."""
+        return {
+            "scrollbar_button_color": self.c("bg_elevated"),
+            "scrollbar_button_hover_color": self.c("primary"),
+        }
+
+
+def themed_scrollable_frame(parent, theme: "ThemeManager", **kwargs):
+    """CTkScrollableFrame with theme-matched scrollbar (fixes light-gray dark-mode bars)."""
+    import customtkinter as ctk
+
+    opts = theme.scroll_kwargs()
+    opts.update(kwargs)
+    opts.setdefault("fg_color", "transparent")
+    return ctk.CTkScrollableFrame(parent, **opts)
 
 
 def _load_ui_prefs() -> dict:
