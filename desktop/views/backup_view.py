@@ -33,6 +33,7 @@ from desktop.db_catalog import (
     fetch_postgresql_tables,
     fetch_server_databases,
 )
+from desktop.design_system import primary_button, secondary_button
 from desktop.remote_directory_browser import RemoteDirectoryBrowser
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
@@ -140,11 +141,30 @@ class BackupView(BaseView):
         self._update_ssh_status_label()
         self._update_collection_scope_label()
 
-    def refresh(self) -> None:
-        """Re-sync backup form when the active connection changes."""
+    def refresh(self, *, force: bool = False) -> None:
+        """Reload backup form data from the active connection / server."""
+        del force  # always re-fetch on header Refresh
+        if self.connection and hasattr(self, "db_type"):
+            try:
+                self.db_type.set(self.connection.db_type.value)
+            except Exception:
+                pass
         self._init_remote_defaults()
+        self._sync_source_fields()
         self._populate_database_dropdown()
+        try:
+            self._load_scope_targets()
+        except Exception:
+            pass
+        if self._is_mongodb_session():
+            try:
+                self._load_collections()
+            except Exception:
+                pass
+        self._update_ssh_status_label()
+        self._update_collection_scope_label()
         self._update_command_preview()
+        self.log("Backup page refreshed")
 
     def _is_mongodb_session(self) -> bool:
         return self._active_db_type() == DatabaseType.MONGODB
@@ -624,7 +644,9 @@ class BackupView(BaseView):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        from desktop.theme import themed_scrollable_frame
+
+        scroll = themed_scrollable_frame(self, self.theme)
         scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(16, 12))
         scroll.grid_columnconfigure(0, weight=1)
 
@@ -1184,21 +1206,21 @@ class BackupView(BaseView):
         btn_frame = ctk.CTkFrame(form, fg_color="transparent")
         btn_frame.grid(row=15, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
 
-        ctk.CTkButton(
+        # Same charcoal/primary CTA as Migration "Start Migration".
+        primary_button(
             btn_frame,
+            self.theme,
             text="Run Backup",
             command=self._run_backup,
             width=140,
             height=38,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color=self.theme.c("primary"),
-            hover_color=self.theme.c("primary_hover"),
         ).pack(side="left", padx=(0, 10))
 
         # Apply Retention — disabled in UI for now; backend apply_retention_policy() kept for future use.
 
-        ctk.CTkButton(
+        secondary_button(
             btn_frame,
+            self.theme,
             text="List Backups",
             command=self._list_backups,
             width=120,

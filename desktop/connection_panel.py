@@ -12,7 +12,7 @@ from desktop.connection import ConnectionResult, DB_DEFAULTS, test_connection
 from desktop.connection_store import SavedServer, load_saved_servers, remove_server, upsert_server
 from desktop.db_icons import DB_ICON_META
 from desktop.ui_helpers import confirm
-from desktop.theme import ThemeManager
+from desktop.theme import ThemeManager, themed_scrollable_frame
 
 SIDEBAR_WIDTH = 280
 ENTRY_HEIGHT = 36
@@ -143,7 +143,7 @@ class ConnectionPanel(ctk.CTkFrame):
         ).pack(fill="x", pady=(0, 12))
 
         # Server rows — height follows content (scrolls when many servers)
-        self.saved_list = ctk.CTkScrollableFrame(body, fg_color="transparent", height=120)
+        self.saved_list = themed_scrollable_frame(body, self.theme, height=120)
         self.saved_list.pack(fill="x", padx=12, pady=(0, 4))
 
         # Active session strip (shown when connected)
@@ -238,8 +238,9 @@ class ConnectionPanel(ctk.CTkFrame):
         main.grid_rowconfigure(0, weight=1)
         main.grid_columnconfigure(0, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(main, fg_color="transparent")
+        scroll = themed_scrollable_frame(main, self.theme)
         scroll.grid(row=0, column=0, sticky="nsew")
+        self._form_scroll = scroll
 
         self._build_database_type_card(scroll)
         self._build_linux_access_card(scroll)
@@ -1339,6 +1340,18 @@ class ConnectionPanel(ctk.CTkFrame):
         """Re-apply theme tokens after light/dark toggle."""
         self.theme = theme
         self.configure(fg_color=theme.c("bg_content"))
+        scroll = getattr(self, "_form_scroll", None)
+        if scroll is not None:
+            try:
+                scroll.configure(**theme.scroll_kwargs())
+            except Exception:
+                pass
+        saved = getattr(self, "saved_list", None)
+        if saved is not None:
+            try:
+                saved.configure(**theme.scroll_kwargs())
+            except Exception:
+                pass
         self._refresh_saved_list()
         self._apply_db_type_tiles(DatabaseType(self._db_type_var.get()))
         self._style_inputs()

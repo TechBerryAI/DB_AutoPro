@@ -7,7 +7,7 @@ import re
 import customtkinter as ctk
 
 from desktop.design_system import font
-from desktop.theme import ThemeManager
+from desktop.theme import FOOTER_HEIGHT, ThemeManager
 
 
 def format_footer_version(raw: str) -> str:
@@ -60,7 +60,7 @@ class StatusFooterBar(ctk.CTkFrame):
     def __init__(self, master, theme: ThemeManager, **kwargs) -> None:
         super().__init__(
             master,
-            height=36,
+            height=FOOTER_HEIGHT,
             corner_radius=0,
             fg_color=theme.c("bg_content"),
             border_width=0,

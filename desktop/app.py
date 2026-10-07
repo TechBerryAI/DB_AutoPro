@@ -88,7 +88,8 @@ SIDEBAR_WIDTH = 232
 SIDEBAR_MIN_WIDTH = 180
 SIDEBAR_MAX_WIDTH = 420
 SIDEBAR_SASH_WIDTH = 4
-NAV_ROW_HEIGHT = 34
+NAV_ROW_HEIGHT = 30
+NAV_GROUP_PADY = (4, 1)
 
 # Pages that need an active DB session. Observability (logs, audit, reports) stays offline-ready.
 CONNECTION_REQUIRED_KEYS = {
@@ -132,6 +133,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._sidebar_width = load_sidebar_width(SIDEBAR_WIDTH)
         self._brand_row: ctk.CTkFrame | None = None
         self._nav_host: ctk.CTkScrollableFrame | ctk.CTkFrame | None = None
+        self._nav_scroll_sync_job = None
         self._sidebar_sash: ctk.CTkFrame | None = None
         self._sidebar_toggle_busy = False
         self._sash_dragging = False
@@ -140,6 +142,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._sash_pending_w: int | None = None
         self._resize_guide = None  # lightweight tk line during drag only
         self._theme_switching = False
+        self._page_refreshing = False
         self._session_poll_job: str | None = None
         self._session_poll_busy = False
         self.shell_header: ShellHeader | None = None
@@ -205,7 +208,7 @@ class DatabaseAutomationApp(ctk.CTk):
 
         # Row 0: brand
         brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        brand.grid(row=0, column=0, sticky="ew", padx=8, pady=(12, 4))
+        brand.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 2))
         self._brand_row = brand
         self._brand_title = ctk.CTkLabel(
             brand,
@@ -229,12 +232,21 @@ class DatabaseAutomationApp(ctk.CTk):
             scrollbar_button_color=self._t.c("sidebar_bg_hover"),
             scrollbar_button_hover_color=self._t.c("sidebar_border"),
         )
-        nav_host.grid(row=2, column=0, sticky="nsew", padx=(2, 0), pady=(4, 4))
+        nav_host.grid(row=2, column=0, sticky="nsew", padx=(2, 0), pady=(2, 2))
         self._nav_host = nav_host
         self._nav_group_labels = []
         self._nav_rows = {}
         self._nav_accents = {}
         self._nav_labels = {}
+        # Hide CTk's default scrollbar until content actually overflows (prevents
+        # the floating blue thumb in the empty sidebar region).
+        self._set_nav_scrollbar_visible(False)
+        try:
+            canvas = getattr(nav_host, "_parent_canvas", None)
+            if canvas is not None:
+                canvas.bind("<Configure>", lambda _e: self._request_nav_scrollbar_sync(80), add="+")
+        except Exception:
+            pass
 
         idle_icon = self._t.sc("text_secondary") if self._t.is_light else self._t.c("nav_idle_text")
         for group_name, items in NAV_GROUPS:
@@ -245,7 +257,7 @@ class DatabaseAutomationApp(ctk.CTk):
                 text_color=self._t.sc("text_muted"),
                 anchor="w",
             )
-            group_lbl.pack(anchor="w", padx=8, pady=(8, 2))
+            group_lbl.pack(anchor="w", padx=8, pady=NAV_GROUP_PADY)
             self._nav_group_labels.append(group_lbl)
 
             for key, label, _ in items:
@@ -329,17 +341,17 @@ class DatabaseAutomationApp(ctk.CTk):
 
         self._nav_header = self._nav_group_labels[0] if self._nav_group_labels else None
 
-        # Row 3: Sign Out pinned at bottom (nav list style + hairline divider).
+        # Row 3: Sign Out pinned at bottom (outside the scrollable nav).
         self.sidebar.grid_rowconfigure(3, weight=0)
         sign_out_wrap = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        sign_out_wrap.grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 10))
+        sign_out_wrap.grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 8))
         self._sign_out_wrap = sign_out_wrap
 
         border = self._t.sc("border") if self._t.is_light else self._t.c("border_subtle")
         self._sign_out_divider = ctk.CTkFrame(
             sign_out_wrap, height=1, fg_color=border, corner_radius=0
         )
-        self._sign_out_divider.pack(fill="x", padx=8, pady=(4, 6))
+        self._sign_out_divider.pack(fill="x", padx=8, pady=(2, 4))
 
         danger = self._t.c("destructive_text")
         sign_out_img = lucide_ctk_image("sign_out", danger, size=15)
@@ -359,6 +371,9 @@ class DatabaseAutomationApp(ctk.CTk):
         )
         self._sign_out_btn._lucide_image = sign_out_img  # type: ignore[attr-defined]
         self._sign_out_btn.pack(fill="x")
+
+        self._request_nav_scrollbar_sync(80)
+        self.bind("<Configure>", self._on_shell_configure_nav_scroll, add="+")
 
         # Thin drag handle between sidebar and content (Claude-style resize).
         self._sidebar_sash = ctk.CTkFrame(
@@ -414,7 +429,7 @@ class DatabaseAutomationApp(ctk.CTk):
     def _build_sidebar_identity(self) -> None:
         """Compact account card — name + role only (no username)."""
         wrap = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        wrap.grid(row=1, column=0, sticky="ew", padx=8, pady=(6, 2))
+        wrap.grid(row=1, column=0, sticky="ew", padx=8, pady=(4, 2))
 
         card = ctk.CTkFrame(
             wrap,
@@ -427,27 +442,27 @@ class DatabaseAutomationApp(ctk.CTk):
         self._identity_card = card
 
         inner = ctk.CTkFrame(card, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=8)
+        inner.pack(fill="x", padx=8, pady=6)
 
         self._identity_avatar = ctk.CTkLabel(
             inner,
             text=initials(self.employee),
-            width=32,
-            height=32,
-            corner_radius=16,
+            width=28,
+            height=28,
+            corner_radius=14,
             fg_color=self._t.c("sidebar_bg_hover"),
             text_color=self._t.c("sidebar_text_primary"),
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
         )
         self._identity_avatar.pack(side="left")
 
         text_col = ctk.CTkFrame(inner, fg_color="transparent")
-        text_col.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        text_col.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
         self._identity_name = ctk.CTkLabel(
             text_col,
             text=display_name(self.employee),
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             text_color=self._t.c("sidebar_text_primary"),
             anchor="w",
         )
@@ -456,12 +471,98 @@ class DatabaseAutomationApp(ctk.CTk):
         self._identity_role = ctk.CTkLabel(
             text_col,
             text=role_label(self.employee),
-            font=ctk.CTkFont(family="Segoe UI", size=11),
+            font=ctk.CTkFont(family="Segoe UI", size=10),
             text_color=self._t.c("sidebar_text_muted"),
             anchor="w",
         )
-        self._identity_role.pack(anchor="w", pady=(1, 0))
+        self._identity_role.pack(anchor="w")
         self._identity_meta = None
+
+    def _on_shell_configure_nav_scroll(self, _event=None) -> None:
+        if getattr(self, "_nav_scroll_sync_job", None):
+            try:
+                self.after_cancel(self._nav_scroll_sync_job)
+            except Exception:
+                pass
+        self._nav_scroll_sync_job = self.after(120, self._sync_nav_scrollbar)
+
+    def _request_nav_scrollbar_sync(self, delay_ms: int = 80) -> None:
+        """Debounced scrollbar sync — call after nav expand/collapse/resize."""
+        if getattr(self, "_nav_scroll_sync_job", None):
+            try:
+                self.after_cancel(self._nav_scroll_sync_job)
+            except Exception:
+                pass
+        self._nav_scroll_sync_job = self.after(delay_ms, self._sync_nav_scrollbar)
+
+    def _set_nav_scrollbar_visible(self, visible: bool) -> None:
+        """Theme the nav scrollbar; collapse width when unused (keep grid so scroll works)."""
+        nav = self._nav_host
+        if nav is None:
+            return
+        scrollbar = getattr(nav, "_scrollbar", None)
+        if scrollbar is None:
+            return
+        # Always keep the CTk grid slot so mousewheel / yview keep working.
+        if not scrollbar.winfo_manager():
+            try:
+                scrollbar.grid(row=0, column=1, sticky="ns")
+            except Exception:
+                pass
+        if visible:
+            try:
+                scrollbar.configure(
+                    width=10,
+                    button_color=self._t.c("sidebar_bg_hover"),
+                    button_hover_color=self._t.c("sidebar_border"),
+                    fg_color=self._t.c("bg_sidebar"),
+                )
+            except Exception:
+                pass
+            return
+        # Invisible when content fits — no floating thumb in empty sidebar space.
+        try:
+            sidebar_bg = self._t.c("bg_sidebar")
+            scrollbar.configure(
+                width=0,
+                button_color=sidebar_bg,
+                button_hover_color=sidebar_bg,
+                fg_color=sidebar_bg,
+            )
+        except Exception:
+            pass
+
+    def _sync_nav_scrollbar(self) -> None:
+        """Show the nav scrollbar only when the list actually overflows."""
+        self._nav_scroll_sync_job = None
+        nav = self._nav_host
+        if nav is None or not hasattr(nav, "_scrollbar"):
+            return
+        try:
+            nav.update_idletasks()
+            canvas = getattr(nav, "_parent_canvas", None)
+            if canvas is None:
+                return
+            visible_h = int(canvas.winfo_height())
+            # Layout not ready yet — retry shortly instead of flashing the bar.
+            if visible_h < 24:
+                self._request_nav_scrollbar_sync(60)
+                return
+            bbox = canvas.bbox("all")
+            if not bbox:
+                self._set_nav_scrollbar_visible(False)
+                return
+            content_h = int(bbox[3] - bbox[1])
+            overflows = content_h > visible_h + 2
+            self._set_nav_scrollbar_visible(overflows)
+            # If everything fits, snap back to top so Settings isn't left off-screen.
+            if not overflows:
+                try:
+                    canvas.yview_moveto(0)
+                except Exception:
+                    pass
+        except Exception:
+            self._set_nav_scrollbar_visible(False)
 
     def _apply_sidebar_identity_theme(self, t: ThemeManager) -> None:
         if self._identity_card is None:
@@ -782,19 +883,67 @@ class DatabaseAutomationApp(ctk.CTk):
             self.shell_header.set_updating()
 
     def _refresh_active_view(self) -> None:
-        """Header Refresh: reload the visible workspace page."""
-        key = self._active_nav
-        view = self.views.get(key)
-        if view is None:
+        """Header Refresh: reload the visible workspace page with a loading state."""
+        if getattr(self, "_page_refreshing", False):
             return
+        key = self._active_nav
+        if not key:
+            return
+        self._page_refreshing = True
+        if self.shell_header:
+            self.shell_header.set_refreshing(True)
         self.set_updating()
-        if hasattr(view, "refresh"):
-            view.refresh()
-        # Dashboard marks the stamp in refresh(); other pages mark here.
-        if key != "dashboard":
+        # Run outside the button event so CTk stays responsive.
+        self.after(1, lambda k=key: self._run_active_view_refresh(k))
+
+    def _run_active_view_refresh(self, key: str) -> None:
+        try:
+            view = self.views.get(key)
+            refreshed = False
+            if view is not None and callable(getattr(view, "refresh", None)):
+                try:
+                    view.refresh(force=True)  # type: ignore[call-arg]
+                    refreshed = True
+                except TypeError:
+                    view.refresh()
+                    refreshed = True
+
+            if not refreshed:
+                # Pages without refresh(): hard-reload by recreating the view.
+                if view is not None:
+                    try:
+                        view.destroy()
+                    except Exception:
+                        pass
+                    self.views.pop(key, None)
+                extras: dict = {}
+                if key == "servers":
+                    extras["servers_filter"] = self._servers_filter or "all"
+                    if self._active_saved_connection:
+                        extras["saved_server"] = self._active_saved_connection
+                elif key == "dashboard":
+                    extras["initial_refresh"] = False
+                self.navigate(key, log=False, view_extra=extras)
+                if key == "dashboard":
+                    dash = self.views.get("dashboard")
+                    if dash and hasattr(dash, "refresh"):
+                        dash.refresh()
+
+            if key != "dashboard":
+                self.mark_last_updated()
+            if self.connection:
+                self._poll_session_status()
+            self.append_log(f"Refreshed {key.replace('_', ' ')}", "INFO")
+        except Exception as exc:
+            try:
+                self.append_log(f"Refresh failed: {exc}", "ERROR")
+            except Exception:
+                pass
             self.mark_last_updated()
-        if self.connection:
-            self._poll_session_status()
+        finally:
+            self._page_refreshing = False
+            if self.shell_header:
+                self.shell_header.set_refreshing(False)
 
     def _on_connection_changed(
         self,
@@ -1063,6 +1212,7 @@ class DatabaseAutomationApp(ctk.CTk):
                     text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
                     border_width=0,
                 )
+        self._request_nav_scrollbar_sync(60)
 
     def _style_navigation(self, key: str) -> None:
         t = self._t
@@ -1226,81 +1376,104 @@ class DatabaseAutomationApp(ctk.CTk):
         self.destroy()
 
     def _toggle_theme(self) -> None:
+        """Queue the switch off the button event — sync destroy freezes CTk on Windows."""
         if getattr(self, "_theme_switching", False):
             return
         self._theme_switching = True
+        # Failsafe so a hung switch can't permanently disable the Light/Dark button.
+        self.after(4000, self._clear_theme_switching)
+        self.after(1, self._run_theme_switch)
+
+    def _clear_theme_switching(self) -> None:
+        self._theme_switching = False
+
+    def _run_theme_switch(self) -> None:
         try:
             new_theme = self.theme_manager.toggle()
             self._t = self.theme_manager
             self._apply_theme(new_theme)
         except Exception as exc:
             self._theme_switching = False
-            self.append_log(f"Theme switch failed: {exc}", "ERROR")
+            try:
+                self.append_log(f"Theme switch failed: {exc}", "ERROR")
+            except Exception:
+                pass
 
     def _apply_theme(self, theme_name: str) -> None:
         t = self._t
-        self.configure(fg_color=t.c("bg_app"))
-        sidebar_bg = t.sc("bg_sidebar") if t.is_light else t.c("bg_sidebar")
-        self.sidebar.configure(
-            fg_color=sidebar_bg,
-            border_color=t.sc("border") if t.is_light else t.c("border_subtle"),
-        )
-        if self._nav_host is not None:
-            try:
-                self._nav_host.configure(
-                    fg_color=sidebar_bg,
-                    scrollbar_button_color=t.c("sidebar_bg_hover"),
-                    scrollbar_button_hover_color=t.c("sidebar_border"),
+        current = self._active_nav or "dashboard"
+        try:
+            self.configure(fg_color=t.c("bg_app"))
+            sidebar_bg = t.sc("bg_sidebar") if t.is_light else t.c("bg_sidebar")
+            self.sidebar.configure(
+                fg_color=sidebar_bg,
+                border_color=t.sc("border") if t.is_light else t.c("border_subtle"),
+            )
+            if self._nav_host is not None:
+                try:
+                    self._nav_host.configure(
+                        fg_color=sidebar_bg,
+                        scrollbar_button_color=t.c("sidebar_bg_hover"),
+                        scrollbar_button_hover_color=t.c("sidebar_border"),
+                    )
+                except Exception:
+                    self._nav_host.configure(fg_color=sidebar_bg)
+            self.content.configure(fg_color=t.c("bg_content"))
+            self.view_container.configure(fg_color=t.c("bg_content"))
+
+            if self._brand_title:
+                self._brand_title.configure(text_color=t.sc("text_primary"))
+            self._apply_sidebar_identity_theme(t)
+            for group_lbl in self._nav_group_labels:
+                group_lbl.configure(text_color=t.sc("text_muted"))
+            if self._nav_header and self._nav_header not in self._nav_group_labels:
+                self._nav_header.configure(text_color=t.sc("text_muted"))
+
+            for key, btn in self.nav_buttons.items():
+                btn.configure(
+                    hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
                 )
+            for sub_key, btn in self._servers_sub_buttons.items():
+                btn.configure(
+                    hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
+                )
+            for btn in self._servers_saved_buttons.values():
+                btn.configure(
+                    hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
+                )
+            if self._sign_out_divider is not None:
+                self._sign_out_divider.configure(
+                    fg_color=t.sc("border") if t.is_light else t.c("border_subtle"),
+                )
+            if self._sign_out_btn is not None:
+                danger = t.c("destructive_text")
+                img = lucide_ctk_image("sign_out", danger, size=15)
+                self._sign_out_btn.configure(
+                    text_color=danger,
+                    hover_color=t.c("destructive_bg"),
+                    image=img,
+                )
+                self._sign_out_btn._lucide_image = img  # type: ignore[attr-defined]
+            self._apply_sidebar_mode()
+
+            if self.shell_header:
+                self.shell_header.apply_theme(t)
+                self.shell_header.set_connection(self.connection)
+            self.status_footer.apply_theme(t)
+
+            for view in list(self.views.values()):
+                try:
+                    view.destroy()
+                except Exception:
+                    pass
+            self.views.clear()
+        except Exception as exc:
+            self._theme_switching = False
+            try:
+                self.append_log(f"Theme apply failed: {exc}", "ERROR")
             except Exception:
-                self._nav_host.configure(fg_color=sidebar_bg)
-        self.content.configure(fg_color=t.c("bg_content"))
-        self.view_container.configure(fg_color=t.c("bg_content"))
-
-        if self._brand_title:
-            self._brand_title.configure(text_color=t.sc("text_primary"))
-        self._apply_sidebar_identity_theme(t)
-        for group_lbl in self._nav_group_labels:
-            group_lbl.configure(text_color=t.sc("text_muted"))
-        if self._nav_header and self._nav_header not in self._nav_group_labels:
-            self._nav_header.configure(text_color=t.sc("text_muted"))
-
-        for key, btn in self.nav_buttons.items():
-            btn.configure(
-                hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
-            )
-        for sub_key, btn in self._servers_sub_buttons.items():
-            btn.configure(
-                hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
-            )
-        for btn in self._servers_saved_buttons.values():
-            btn.configure(
-                hover_color=t.sc("nav_hover") if t.is_light else t.c("bg_card_hover"),
-            )
-        if self._sign_out_divider is not None:
-            self._sign_out_divider.configure(
-                fg_color=t.sc("border") if t.is_light else t.c("border_subtle"),
-            )
-        if self._sign_out_btn is not None:
-            danger = t.c("destructive_text")
-            img = lucide_ctk_image("sign_out", danger, size=15)
-            self._sign_out_btn.configure(
-                text_color=danger,
-                hover_color=t.c("destructive_bg"),
-                image=img,
-            )
-            self._sign_out_btn._lucide_image = img  # type: ignore[attr-defined]
-        self._apply_sidebar_mode()
-
-        if self.shell_header:
-            self.shell_header.apply_theme(t)
-            self.shell_header.set_connection(self.connection)
-        self.status_footer.apply_theme(t)
-
-        current = self._active_nav
-        for view in list(self.views.values()):
-            view.destroy()
-        self.views.clear()
+                pass
+            return
 
         self.update_idletasks()
         self.after(1, lambda: self._finish_theme_switch(theme_name, current))
@@ -1310,15 +1483,18 @@ class DatabaseAutomationApp(ctk.CTk):
             view_extra: dict = {}
             if current == "dashboard":
                 view_extra["initial_refresh"] = False
-            self.navigate(current, log=False, view_extra=view_extra)
+            self.navigate(current or "dashboard", log=False, view_extra=view_extra)
             self.append_log(f"Theme switched to {theme_name}", "SUCCESS")
 
             if current == "dashboard":
                 dash = self.views.get("dashboard")
-                if dash:
+                if dash and hasattr(dash, "refresh"):
                     self.after(300, dash.refresh)
             self.after(150, self.refresh_server_databases)
         except Exception as exc:
-            self.append_log(f"Theme switch failed: {exc}", "ERROR")
+            try:
+                self.append_log(f"Theme switch failed: {exc}", "ERROR")
+            except Exception:
+                pass
         finally:
             self._theme_switching = False

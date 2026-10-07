@@ -34,7 +34,7 @@ from desktop.ops_widgets import (
     threshold_color,
 )
 from desktop.security_widgets import build_security_section, security_alert_item, top_risk_row
-from desktop.theme import ThemeManager
+from desktop.theme import CONTENT_BOTTOM_INSET, ThemeManager
 from desktop.views.base_view import BaseView
 
 
@@ -166,7 +166,7 @@ class DashboardView(BaseView):
             scrollbar_button_color=self.theme.c("bg_elevated"),
             scrollbar_button_hover_color=self.theme.c("primary"),
         )
-        scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(12, 12))
+        scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(12, 0))
         scroll.grid_columnconfigure(0, weight=1)
         self._build_command_center(scroll)
 
@@ -189,6 +189,12 @@ class DashboardView(BaseView):
         self._build_backup_jobs_row(scroll)
         self._build_recent_activity(scroll)
         self._build_legacy_detail_sections(scroll)
+        # Clear the fixed status footer so the last row is fully visible.
+        footer_clearance = ctk.CTkFrame(
+            scroll, fg_color="transparent", height=CONTENT_BOTTOM_INSET
+        )
+        footer_clearance.pack(fill="x")
+        footer_clearance.pack_propagate(False)
 
     def _build_kpi_row(self, scroll: ctk.CTkScrollableFrame) -> None:
         grid = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -245,14 +251,22 @@ class DashboardView(BaseView):
                 ]
 
             if key in ("databases", "healthy_dbs"):
-                rows = self._cached_server_databases()
+                saved = load_saved_servers(self.owner_username) or load_saved_servers()
+                active = ""
+                if self._is_actively_connected():
+                    active = (self.connection.saved_name or self.connection.name or "").strip()
                 out: list[tuple[str, str]] = []
-                for row in rows:
-                    name = str(row.get("name", row) if isinstance(row, dict) else row)
-                    size = ""
-                    if isinstance(row, dict):
-                        size = str(row.get("size") or row.get("size_pretty") or "")
-                    out.append((name, size or "—"))
+                for s in sorted(saved, key=lambda x: x.name.lower()):
+                    if active and s.name == active:
+                        bucket = self._connection_health_bucket(self._last_db_metrics or {})
+                        out.append((s.name, f"Connected · {bucket.title()}"))
+                    else:
+                        out.append((s.name, "Registered"))
+                if self._is_actively_connected() and active and not any(
+                    s.name == active for s in saved
+                ):
+                    bucket = self._connection_health_bucket(self._last_db_metrics or {})
+                    out.insert(0, (active, f"Connected · {bucket.title()}"))
                 return out
 
             if key == "active_jobs":
@@ -599,45 +613,53 @@ class DashboardView(BaseView):
         self._apply_automation_jobs_panel(force=force)
         self._apply_recent_activity_panel(force=force)
 
+    def _is_actively_connected(self, metrics: dict | None = None) -> bool:
+        """True only when a live session exists (not merely a saved profile)."""
+        if not self.connection:
+            return False
+        m = metrics if metrics is not None else (self._last_db_metrics or {})
+        if "connected" in m:
+            return bool(m.get("connected"))
+        return True
+
+    def _connection_health_bucket(self, metrics: dict) -> str:
+        """Return healthy|warning|critical for the active connected session."""
+        status = str(metrics.get("status", "")).lower()
+        load = float(metrics.get("load_pct") or 0)
+        if load >= 85 or status in {"critical", "error", "down", "offline"}:
+            return "critical"
+        if load >= 70 or status in {"warning", "degraded"}:
+            return "warning"
+        return "healthy"
+
     def _apply_db_health_overview(self, metrics: dict, *, force: bool = False) -> None:
+        """Health counts are for *connected* profiles only; others stay Registered."""
         saved = load_saved_servers(self.owner_username)
         if not saved and self.owner_username:
             saved = load_saved_servers()
-        connected = bool(self.connection and metrics.get("connected"))
-        db_count = 0
-        if self.connection:
-            db_count = len(self._cached_server_databases())
+        registered = len(saved)
+        connected = self._is_actively_connected(metrics)
 
-        healthy = db_count if connected and str(metrics.get("status", "")).lower() in ("", "healthy", "ok", "online") else (1 if connected else 0)
-        if connected and metrics.get("status") and str(metrics.get("status")).lower() not in ("healthy", "ok", "online", ""):
-            healthy = max(0, db_count - 1) if db_count else 0
-        warning = 1 if connected and float(metrics.get("load_pct") or 0) >= 70 else 0
-        critical = 1 if connected and float(metrics.get("load_pct") or 0) >= 85 else 0
-        offline = 0 if connected else max(1, len(saved)) if saved else 1
-        total = max(db_count, len(saved), 1 if not saved else len(saved))
-
+        healthy = warning = critical = 0
         if connected:
-            offline = 0
-            total = max(db_count, 1)
-            if critical:
-                healthy = max(0, total - critical - warning)
-            elif warning:
-                healthy = max(0, total - warning)
+            bucket = self._connection_health_bucket(metrics)
+            if bucket == "critical":
+                critical = 1
+            elif bucket == "warning":
+                warning = 1
             else:
-                healthy = total
-        else:
-            healthy = 0
-            warning = 0
-            critical = 0
-            offline = total
-            total = max(len(saved), 0)
+                healthy = 1
+
+        connected_count = 1 if connected else 0
+        registered_only = max(0, registered - connected_count)
+        total = max(registered, connected_count)
 
         count_map = {
             "total": total,
             "healthy": healthy,
             "warning": warning,
             "critical": critical,
-            "offline": offline,
+            "offline": registered_only,  # gray segment = registered / not connected
         }
 
         show_empty = not connected and not saved
@@ -655,7 +677,9 @@ class DashboardView(BaseView):
             return
 
         rows: list[tuple[str, str, str]] = []
+        active_saved = ""
         if self.connection:
+            active_saved = (self.connection.saved_name or self.connection.name or "").strip()
             label = f"{self.connection.db_type.value.upper()}  {self.connection.name}"
             if critical:
                 rows.append((label, "Critical", "error"))
@@ -664,16 +688,14 @@ class DashboardView(BaseView):
             elif connected:
                 rows.append((label, "Healthy", "success"))
             else:
-                rows.append((label, "Offline", "neutral"))
-        for server in saved[:6]:
-            name = f"{server.db_type.upper()}  {server.name}"
-            if self.connection and (
-                server.name == (self.connection.saved_name or self.connection.name)
-            ):
+                rows.append((label, "Registered", "neutral"))
+        for server in saved:
+            if active_saved and server.name == active_saved:
                 continue
-            rows.append((name, "Offline" if not connected else "Registered", "neutral"))
+            name = f"{server.db_type.upper()}  {server.name}"
+            rows.append((name, "Registered", "neutral"))
 
-        fingerprint = f"empty={show_empty}|{rows[:5]}|{count_map}"
+        fingerprint = f"empty={show_empty}|{rows[:8]}|{count_map}"
         if not self._content_changed("health_rows", fingerprint, force=force):
             return
 
@@ -693,7 +715,7 @@ class DashboardView(BaseView):
             )
             return
 
-        for title, status, tone in rows[:5]:
+        for title, status, tone in rows[:8]:
             line = ctk.CTkFrame(self._db_health_rows, fg_color="transparent")
             line.pack(fill="x", pady=3)
             ctk.CTkLabel(
@@ -1145,7 +1167,12 @@ class DashboardView(BaseView):
                 active_name = (self.connection.saved_name or self.connection.name or "").strip()
                 active_engine = self.connection.db_type.value.upper()
 
-            db_count = len(self._cached_server_databases()) if self.connection else 0
+            # Connected = live session only; registered = saved profiles.
+            connected_count = 1 if self._is_actively_connected() else 0
+            metrics = self._last_db_metrics or {}
+            healthy = 0
+            if connected_count:
+                healthy = 1 if self._connection_health_bucket(metrics) == "healthy" else 0
 
             active_jobs, pending_jobs = self.monitoring.count_live_jobs()
             backup_success, backup_failed = self.monitoring.count_audit_today(
@@ -1166,11 +1193,10 @@ class DashboardView(BaseView):
             bak_ok, bak_fail = self.monitoring.count_audit_today(
                 actions=("backup",), user=self.owner_username,
             )
-            healthy = db_count if self.connection and self._last_db_metrics.get("connected") else 0
 
             for key, value in {
                 "linux_servers": str(saved_count),
-                "databases": str(db_count),
+                "databases": str(connected_count),
                 "healthy_dbs": str(healthy),
                 "active_jobs": str(active_jobs),
                 "active_alerts": str(alerts_n),
@@ -1186,12 +1212,22 @@ class DashboardView(BaseView):
             else:
                 saved_secondary = "No saved profiles"
 
+            if saved_count:
+                databases_secondary = f"{connected_count} of {saved_count} registered"
+            else:
+                databases_secondary = "Connected" if connected_count else "Not connected"
+
+            if healthy:
+                healthy_secondary = "Passing health checks"
+            elif connected_count:
+                healthy_secondary = "Needs attention"
+            else:
+                healthy_secondary = "None online"
+
             sec_map = {
                 "linux_servers": saved_secondary,
-                "databases": (
-                    f"On {active_name}" if active_name else "Not connected"
-                ),
-                "healthy_dbs": "Healthy online" if healthy else "None online",
+                "databases": databases_secondary,
+                "healthy_dbs": healthy_secondary,
                 "active_jobs": f"{pending_jobs} queued" if pending_jobs else "None running",
                 "active_alerts": "Needs attention" if alerts_n else "All clear",
                 "failed_today": f"{bak_ok} succeeded today",
@@ -1470,7 +1506,8 @@ class DashboardView(BaseView):
         """Restart live updates when the dashboard is shown again."""
         self._request_live_poll()
 
-    def refresh(self) -> None:
+    def refresh(self, *, force: bool = False) -> None:
+        del force
         try:
             self._refresh_key_metrics()
 

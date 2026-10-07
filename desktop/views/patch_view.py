@@ -7,9 +7,10 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from backend.models.schemas import DatabaseType, PatchRequest
+from backend.models.schemas import PatchRequest
 from backend.services.patch_service import PatchService
-from desktop.theme import ThemeManager
+from desktop.ops_widgets import page_header
+from desktop.theme import ThemeManager, themed_scrollable_frame
 from desktop.views.base_view import BaseView
 
 
@@ -21,55 +22,116 @@ class PatchView(BaseView):
         self.service = PatchService()
         self._build_ui()
 
-    def _build_ui(self) -> None:
-        row = 0
-        context = self.create_connection_context()
-        if context:
-            context.grid(row=row, column=0, padx=20, pady=(12, 8), sticky="ew")
-            row += 1
+    def refresh(self, *, force: bool = False) -> None:
+        """Re-sync patching page with the active connection."""
+        del force
+        self.log("Patching page refreshed")
 
-        title_wrap = ctk.CTkFrame(self, fg_color="transparent")
-        title_wrap.grid(row=row, column=0, padx=24, pady=(16, 0), sticky="ew")
-        from desktop.ops_widgets import page_header
+    def _build_ui(self) -> None:
+        # Same shell as Backup / Restore: page fills the content column.
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        scroll = themed_scrollable_frame(self, self.theme)
+        scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(16, 12))
+        scroll.grid_columnconfigure(0, weight=1)
 
         page_header(
-            title_wrap,
+            scroll,
             self.theme,
             "Patching",
             subtitle="Execute SQL patch scripts and review history.",
+            pady=(0, 12),
         )
-        row += 1
 
-        form = self.card_frame(self)
-        form.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
-        row += 1
+        form = self.card_frame(scroll)
+        form.pack(fill="x", pady=(0, 12))
+        form.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(form, text="Connection:").grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        label_kwargs = {
+            "font": ctk.CTkFont(size=12),
+            "text_color": self.theme.c("text_secondary"),
+            "anchor": "w",
+        }
+
+        ctk.CTkLabel(form, text="Connection", **label_kwargs).grid(
+            row=0, column=0, padx=16, pady=10, sticky="w"
+        )
         ctk.CTkLabel(
             form,
             text=self.connection.summary if self.connection else "default",
-        ).grid(row=0, column=1, padx=10, pady=8, sticky="w")
+            font=ctk.CTkFont(size=13),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        ).grid(row=0, column=1, padx=16, pady=10, sticky="ew")
 
-        ctk.CTkLabel(form, text="SQL File:").grid(row=1, column=0, padx=10, pady=8, sticky="w")
+        ctk.CTkLabel(form, text="SQL File", **label_kwargs).grid(
+            row=1, column=0, padx=16, pady=10, sticky="w"
+        )
         path_frame = ctk.CTkFrame(form, fg_color="transparent")
-        path_frame.grid(row=1, column=1, padx=10, pady=8)
-        self.sql_file = ctk.CTkEntry(path_frame, width=300)
-        self.sql_file.pack(side="left")
-        ctk.CTkButton(path_frame, text="Browse", width=80, command=self._browse).pack(side="left", padx=5)
+        path_frame.grid(row=1, column=1, padx=16, pady=10, sticky="ew")
+        path_frame.grid_columnconfigure(0, weight=1)
+        self.sql_file = ctk.CTkEntry(path_frame, placeholder_text="Path to .sql patch file")
+        self.sql_file.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(
+            path_frame,
+            text="Browse",
+            width=90,
+            command=self._browse,
+            fg_color=self.theme.c("bg_elevated"),
+            hover_color=self.theme.c("bg_card_hover"),
+            text_color=self.theme.c("text_primary"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+        ).grid(row=0, column=1, padx=(8, 0))
 
-        ctk.CTkLabel(form, text="Description:").grid(row=2, column=0, padx=10, pady=8, sticky="w")
-        self.description = ctk.CTkEntry(form, width=300)
-        self.description.grid(row=2, column=1, padx=10, pady=8)
+        ctk.CTkLabel(form, text="Description", **label_kwargs).grid(
+            row=2, column=0, padx=16, pady=10, sticky="w"
+        )
+        self.description = ctk.CTkEntry(
+            form, placeholder_text="Optional note for patch history"
+        )
+        self.description.grid(row=2, column=1, padx=16, pady=10, sticky="ew")
 
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=row, column=0, padx=20, pady=10, sticky="w")
-        row += 1
-        ctk.CTkButton(btn_frame, text="Execute Patch", command=self._execute, width=120).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="View History", command=self._show_history, width=120).pack(side="left", padx=5)
+        btn_frame = ctk.CTkFrame(form, fg_color="transparent")
+        btn_frame.grid(row=3, column=0, columnspan=2, padx=16, pady=(4, 16), sticky="ew")
+        ctk.CTkButton(
+            btn_frame,
+            text="Execute Patch",
+            command=self._execute,
+            width=140,
+            height=38,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=self.theme.c("primary"),
+            hover_color=self.theme.c("primary_hover"),
+        ).pack(side="left")
+        ctk.CTkButton(
+            btn_frame,
+            text="View History",
+            command=self._show_history,
+            width=140,
+            height=38,
+            fg_color=self.theme.c("bg_elevated"),
+            hover_color=self.theme.c("bg_card_hover"),
+            text_color=self.theme.c("text_primary"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+        ).pack(side="left", padx=(8, 0))
 
-        self.results = ctk.CTkTextbox(self, height=300)
-        self.results.grid(row=row, column=0, padx=20, pady=10, sticky="nsew")
-        self.grid_rowconfigure(row, weight=1)
+        results_card = self.card_frame(scroll)
+        results_card.pack(fill="both", expand=True, pady=(0, 8))
+        results_card.grid_columnconfigure(0, weight=1)
+        results_card.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            results_card,
+            text="Results",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+        ).grid(row=0, column=0, padx=16, pady=(14, 8), sticky="w")
+
+        self.results = ctk.CTkTextbox(results_card, height=280, activate_scrollbars=True)
+        self.results.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
 
     def _browse(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("SQL files", "*.sql"), ("All", "*.*")])

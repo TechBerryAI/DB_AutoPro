@@ -210,6 +210,10 @@ class ExecutionLogPanel(ctk.CTkFrame):
         self.store.clear()
         self._render()
 
+    def refresh(self) -> None:
+        """Re-draw entries from the shared store (header Refresh)."""
+        self._render()
+
     def filtered_entries(self) -> list[LogEntry]:
         """Entries matching the current level filter and search query."""
         filter_level = self._filter.get()

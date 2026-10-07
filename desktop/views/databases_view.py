@@ -86,18 +86,20 @@ class DatabasesView(BaseView):
             "Databases",
             subtitle="Database Explorer — metadata, schemas, and object structure",
         )
-        self._scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        from desktop.theme import themed_scrollable_frame
+
+        self._scroll = themed_scrollable_frame(self, self.theme)
         self._scroll.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 8))
         self._scroll.grid_columnconfigure(0, weight=1)
 
         self._list_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
         self._list_frame.pack(fill="both", expand=True)
 
-    def refresh(self) -> None:
+    def refresh(self, *, force: bool = False) -> None:
         if not self._list_frame:
             return
-        # Re-opening the page was rebuilding the whole tree and querying again.
-        if self.connection and self._list_frame.winfo_children():
+        # Soft navigations can skip a rebuild for 30s; header Refresh always forces.
+        if not force and self.connection and self._list_frame.winfo_children():
             import time
 
             key = (
