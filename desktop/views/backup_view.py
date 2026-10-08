@@ -33,7 +33,9 @@ from desktop.db_catalog import (
     fetch_postgresql_tables,
     fetch_server_databases,
 )
+from backend.services.monitoring_service import MonitoringService
 from desktop.design_system import primary_button, secondary_button
+from desktop.ops_widgets import empty_state
 from desktop.remote_directory_browser import RemoteDirectoryBrowser
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
@@ -97,9 +99,12 @@ class BackupView(BaseView):
         self._scope_available_names: list[str] = []
         self._tables_schema: str | None = None
         self._schema_available_names: list[str] = []
+        self._results_host: ctk.CTkFrame | None = None
+        self._results_empty: ctk.CTkFrame | None = None
         self._build_ui()
         self._init_remote_defaults()
         self._refresh_methods()
+        self._sync_results_empty_state()
 
     def _init_remote_defaults(self) -> None:
         default_dump = "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongodump"
@@ -164,7 +169,77 @@ class BackupView(BaseView):
         self._update_ssh_status_label()
         self._update_collection_scope_label()
         self._update_command_preview()
+        self._sync_results_empty_state()
         self.log("Backup page refreshed")
+
+    def _has_backup_history(self) -> bool:
+        """True when audit log has at least one backup event for this user/session."""
+        try:
+            monitoring = MonitoringService()
+            user = self.owner_username
+            ok, fail = monitoring.count_audit_for_period(
+                "yearly",
+                actions=("backup",),
+                user=user,
+            )
+            return (ok + fail) > 0
+        except Exception:
+            return False
+
+    def _focus_run_backup(self) -> None:
+        """Scroll/focus the primary Run Backup action from the empty state."""
+        try:
+            self.results.delete("1.0", "end")
+            self.results.insert("end", "Ready to run a backup. Configure options above, then click Run Backup.\n")
+        except Exception:
+            pass
+        self._hide_results_empty_state()
+        try:
+            self.status_label.configure(text="Ready — choose options and click Run Backup")
+        except Exception:
+            pass
+
+    def _hide_results_empty_state(self) -> None:
+        if self._results_empty is not None:
+            try:
+                self._results_empty.destroy()
+            except Exception:
+                pass
+            self._results_empty = None
+        if hasattr(self, "results") and self.results is not None:
+            try:
+                self.results.grid(row=0, column=0, sticky="nsew")
+            except Exception:
+                pass
+
+    def _sync_results_empty_state(self) -> None:
+        """Show 'No backups yet' when there is no backup history."""
+        host = self._results_host
+        if host is None or not hasattr(self, "results"):
+            return
+        if self._has_backup_history():
+            self._hide_results_empty_state()
+            return
+        # Already showing empty state.
+        if self._results_empty is not None and self._results_empty.winfo_exists():
+            return
+        try:
+            self.results.grid_forget()
+        except Exception:
+            pass
+        wrap = ctk.CTkFrame(host, fg_color="transparent")
+        wrap.grid(row=0, column=0, sticky="nsew")
+        self._results_empty = wrap
+        empty_state(
+            wrap,
+            self.theme,
+            icon="archive",
+            title="No backups yet",
+            message="Run your first backup to populate history and recovery options.",
+            action_text="Run backup",
+            action_command=self._focus_run_backup,
+            tone="info",
+        )
 
     def _is_mongodb_session(self) -> bool:
         return self._active_db_type() == DatabaseType.MONGODB
@@ -1249,8 +1324,13 @@ class BackupView(BaseView):
             text_color=self.theme.c("text_primary"),
         ).grid(row=0, column=0, padx=16, pady=(14, 8), sticky="w")
 
-        self.results = ctk.CTkTextbox(results_card, height=160, activate_scrollbars=True)
-        self.results.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self._results_host = ctk.CTkFrame(results_card, fg_color="transparent")
+        self._results_host.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="nsew")
+        self._results_host.grid_columnconfigure(0, weight=1)
+        self._results_host.grid_rowconfigure(0, weight=1)
+
+        self.results = ctk.CTkTextbox(self._results_host, height=160, activate_scrollbars=True)
+        self.results.grid(row=0, column=0, sticky="nsew")
 
     def _active_db_type(self) -> DatabaseType:
         if self.connection:
@@ -2578,6 +2658,7 @@ class BackupView(BaseView):
     def _run_backup(self) -> None:
         self.progress.set(0.02)
         self.status_label.configure(text="Starting backup...")
+        self._hide_results_empty_state()
         self.results.delete("1.0", "end")
         self.results.insert("end", "Backup in progress...\n")
 

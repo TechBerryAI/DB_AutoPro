@@ -18,6 +18,7 @@ from desktop.shell_header import ShellHeader, display_name, initials, role_label
 from desktop.status_footer import StatusFooterBar
 from desktop.window_icon import schedule_window_icon
 from desktop.theme import (
+    CONTENT_BOTTOM_INSET,
     ThemeManager,
     load_sidebar_collapsed,
     load_sidebar_width,
@@ -91,7 +92,8 @@ SIDEBAR_SASH_WIDTH = 4
 NAV_ROW_HEIGHT = 30
 NAV_GROUP_PADY = (4, 1)
 
-# Pages that need an active DB session. Observability (logs, audit, reports) stays offline-ready.
+# Pages that need an active DB session. Observability stays offline-ready.
+# Backup (sidebar + Dashboard "Open backup") prompts to connect first.
 CONNECTION_REQUIRED_KEYS = {
     "databases",
     "backup",
@@ -1307,6 +1309,8 @@ class DatabaseAutomationApp(ctk.CTk):
                     elif view_cls is LogsView:
                         kwargs["log_store"] = self.log_store
                         kwargs["register_log_panel"] = self._register_log_panel
+                        if extra.get("log_filter"):
+                            kwargs["log_filter"] = extra["log_filter"]
                     if key == "audit":
                         kwargs["auto_action"] = "audit"
                     self.views[key] = view_cls(
@@ -1314,10 +1318,14 @@ class DatabaseAutomationApp(ctk.CTk):
                         self.theme_manager,
                         **kwargs,
                     )
-                    self.views[key].grid(row=0, column=0, sticky="nsew")
+                    self.views[key].grid(
+                        row=0, column=0, sticky="nsew", pady=(0, CONTENT_BOTTOM_INSET)
+                    )
                     break
         else:
-            self.views[key].grid(row=0, column=0, sticky="nsew")
+            self.views[key].grid(
+                row=0, column=0, sticky="nsew", pady=(0, CONTENT_BOTTOM_INSET)
+            )
             if key == "servers":
                 servers_view = self.views[key]
                 if hasattr(servers_view, "set_servers_filter"):
@@ -1330,6 +1338,11 @@ class DatabaseAutomationApp(ctk.CTk):
                         servers_view.load_saved_server(saved)
                     elif not saved and hasattr(servers_view, "refresh"):
                         servers_view.refresh()
+            elif key == "logs":
+                logs_view = self.views[key]
+                if hasattr(logs_view, "apply_log_filter"):
+                    # None clears a previous alerts/jobs chip from Dashboard.
+                    logs_view.apply_log_filter(extra.get("log_filter"))
             elif key == "dashboard" and hasattr(self.views[key], "resume"):
                 self.views[key].resume()
             elif hasattr(self.views[key], "refresh"):

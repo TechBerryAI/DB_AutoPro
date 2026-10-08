@@ -34,7 +34,7 @@ from desktop.ops_widgets import (
     threshold_color,
 )
 from desktop.security_widgets import build_security_section, security_alert_item, top_risk_row
-from desktop.theme import CONTENT_BOTTOM_INSET, ThemeManager
+from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
 
 
@@ -152,9 +152,30 @@ class DashboardView(BaseView):
             return self._db_list_cache[1]
         return []
 
-    def _nav(self, key: str) -> None:
-        if self.navigate_callback:
+    def _nav(self, key: str, **extra) -> None:
+        """Same path as sidebar navigation so the active nav item highlights."""
+        if not self.navigate_callback:
+            return
+        if extra:
+            self.navigate_callback(key, view_extra=extra)
+        else:
             self.navigate_callback(key)
+
+    def _nav_kpi(self, key: str) -> None:
+        """Stat cards deep-link into workspace pages (not detail dialogs)."""
+        routes = {
+            "linux_servers": ("servers", {}),
+            "databases": ("databases", {}),
+            "healthy_dbs": ("databases", {}),
+            "active_jobs": ("logs", {"log_filter": "jobs"}),
+            "active_alerts": ("logs", {"log_filter": "alerts"}),
+            "failed_today": ("backup", {}),
+        }
+        target = routes.get(key)
+        if not target:
+            return
+        page, extra = target
+        self._nav(page, **extra)
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -189,12 +210,6 @@ class DashboardView(BaseView):
         self._build_backup_jobs_row(scroll)
         self._build_recent_activity(scroll)
         self._build_legacy_detail_sections(scroll)
-        # Clear the fixed status footer so the last row is fully visible.
-        footer_clearance = ctk.CTkFrame(
-            scroll, fg_color="transparent", height=CONTENT_BOTTOM_INSET
-        )
-        footer_clearance.pack(fill="x")
-        footer_clearance.pack_propagate(False)
 
     def _build_kpi_row(self, scroll: ctk.CTkScrollableFrame) -> None:
         grid = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -228,12 +243,11 @@ class DashboardView(BaseView):
             )
             self._metric_values[key] = val
             self._metric_secondary[key] = sec
-            accent = self.theme.c(KPI_ICONS.get(key, ("", "primary", ""))[1])
             make_clickable(
                 card,
                 self.theme,
-                lambda k=key, lb=label: self._open_metric_detail(k, lb),
-                hover_border=accent,
+                lambda k=key: self._nav_kpi(k),
+                hover_border=self.theme.c("primary"),
             )
 
     # ------------------------------------------------------------------
@@ -411,7 +425,7 @@ class DashboardView(BaseView):
             "Active Alerts",
             subtitle="Critical failures and warnings",
             action_text="View alerts →",
-            action_command=lambda: self._nav("logs"),
+            action_command=lambda: self._nav("logs", log_filter="alerts"),
         )
         alerts_shell, alerts_content = panel_card(right_body, self.theme)
         alerts_shell.pack(fill="both", expand=True)
@@ -556,7 +570,7 @@ class DashboardView(BaseView):
             "Running Automation Jobs",
             subtitle="In-memory backup and restore operations",
             action_text="View jobs →",
-            action_command=lambda: self._nav("logs"),
+            action_command=lambda: self._nav("logs", log_filter="jobs"),
         )
         jobs_shell, jobs_content = panel_card(right_body, self.theme)
         jobs_shell.pack(fill="both", expand=True)

@@ -22,12 +22,15 @@ class LogsView(BaseView):
         log_callback=None,
         log_store: ExecutionLogStore | None = None,
         register_log_panel: Callable[[ExecutionLogPanel | None], None] | None = None,
+        log_filter: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(master, theme, log_callback, **kwargs)
         self._register_log_panel = register_log_panel
         self._panel: ExecutionLogPanel | None = None
         self._build_ui(log_store)
+        if log_filter:
+            self.apply_log_filter(log_filter)
 
     def _build_ui(self, log_store: ExecutionLogStore | None) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -47,6 +50,11 @@ class LogsView(BaseView):
 
         if self._register_log_panel:
             self._register_log_panel(self._panel)
+
+    def apply_log_filter(self, preset: str | None) -> None:
+        """Apply a dashboard deep-link preset (alerts | jobs | None)."""
+        if self._panel is not None:
+            self._panel.apply_preset_filter(preset)
 
     def refresh(self, *, force: bool = False) -> None:
         """Re-render the execution log panel from the shared store."""
