@@ -14,6 +14,30 @@ from desktop.theme import ThemeManager
 
 LEVELS = ("ALL", "INFO", "SUCCESS", "WARNING", "ERROR")
 
+# Dashboard deep-link presets → chip label + match rules.
+PRESET_FILTERS: dict[str, dict] = {
+    "alerts": {
+        "label": "Errors & warnings",
+        "levels": frozenset({"WARNING", "ERROR"}),
+        "keywords": (),
+    },
+    "jobs": {
+        "label": "Running jobs (backup / restore)",
+        "levels": None,  # any level
+        "keywords": (
+            "backup",
+            "restore",
+            "running",
+            "in progress",
+            "automation job",
+            "pg_dump",
+            "mysqldump",
+            "mongodump",
+            "mongorestore",
+        ),
+    },
+}
+
 
 @dataclass
 class LogEntry:
@@ -65,6 +89,9 @@ class ExecutionLogPanel(ctk.CTkFrame):
         self.theme = theme
         self.store = store or ExecutionLogStore()
         self._auto_scroll = ctk.BooleanVar(value=True)
+        self._preset_filter: str | None = None
+        self._chip_row: ctk.CTkFrame | None = None
+        self._chip_label: ctk.CTkLabel | None = None
         self._build_ui()
         self._configure_tags()
         self._render()
@@ -75,10 +102,42 @@ class ExecutionLogPanel(ctk.CTkFrame):
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+
+        self._chip_row = ctk.CTkFrame(self, fg_color="transparent")
+        # Hidden until a dashboard preset is applied.
+        self._chip_inner = ctk.CTkFrame(
+            self._chip_row,
+            fg_color=self.theme.c("primary_muted"),
+            corner_radius=self.theme.radius("pill"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+        )
+        self._chip_label = ctk.CTkLabel(
+            self._chip_inner,
+            text="",
+            font=font(self.theme, 11),
+            text_color=self.theme.c("text_primary"),
+        )
+        self._chip_label.pack(side="left", padx=(12, 4), pady=4)
+        clear_chip = ctk.CTkButton(
+            self._chip_inner,
+            text="✕",
+            width=28,
+            height=24,
+            corner_radius=12,
+            fg_color="transparent",
+            hover_color=self.theme.c("bg_card_hover"),
+            text_color=self.theme.c("text_secondary"),
+            font=font(self.theme, 12),
+            cursor="hand2",
+            command=self.clear_preset_filter,
+        )
+        clear_chip.pack(side="left", padx=(0, 6), pady=4)
+        self._chip_inner.pack(side="left")
 
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
-        toolbar.grid(row=0, column=0, sticky="ew", padx=16, pady=(10, 6))
+        toolbar.grid(row=1, column=0, sticky="ew", padx=16, pady=(10, 6))
         toolbar.grid_columnconfigure(2, weight=1)
 
         header = ctk.CTkFrame(toolbar, fg_color="transparent")
@@ -173,7 +232,7 @@ class ExecutionLogPanel(ctk.CTkFrame):
             corner_radius=self.theme.radius("md"),
             activate_scrollbars=True,
         )
-        self._text.grid(row=1, column=0, padx=16, pady=(0, 12), sticky="nsew")
+        self._text.grid(row=2, column=0, padx=16, pady=(0, 12), sticky="nsew")
         self._text.configure(state="disabled")
 
     def _configure_tags(self) -> None:
@@ -214,12 +273,56 @@ class ExecutionLogPanel(ctk.CTkFrame):
         """Re-draw entries from the shared store (header Refresh)."""
         self._render()
 
+    def apply_preset_filter(self, preset: str | None) -> None:
+        """Apply or clear a named preset from Dashboard deep-links."""
+        if preset and preset in PRESET_FILTERS:
+            self._preset_filter = preset
+            spec = PRESET_FILTERS[preset]
+            if self._chip_label is not None:
+                self._chip_label.configure(text=spec["label"])
+            if self._chip_row is not None and not self._chip_row.winfo_manager():
+                self._chip_row.grid(row=0, column=0, sticky="w", padx=16, pady=(10, 0))
+            # Keep the level combo aligned with alerts when possible.
+            if preset == "alerts":
+                try:
+                    self._filter.set("ALL")
+                except Exception:
+                    pass
+        else:
+            self.clear_preset_filter()
+            return
+        self._render()
+
+    def clear_preset_filter(self) -> None:
+        self._preset_filter = None
+        if self._chip_row is not None and self._chip_row.winfo_manager():
+            self._chip_row.grid_forget()
+        self._render()
+
+    def _matches_preset(self, entry: LogEntry) -> bool:
+        if not self._preset_filter:
+            return True
+        spec = PRESET_FILTERS.get(self._preset_filter)
+        if not spec:
+            return True
+        levels = spec.get("levels")
+        if levels is not None and entry.level not in levels:
+            return False
+        keywords = spec.get("keywords") or ()
+        if keywords:
+            msg = entry.message.lower()
+            if not any(k in msg for k in keywords):
+                return False
+        return True
+
     def filtered_entries(self) -> list[LogEntry]:
-        """Entries matching the current level filter and search query."""
+        """Entries matching the current level filter, preset, and search query."""
         filter_level = self._filter.get()
         query = self._search.get().strip().lower()
         rows: list[LogEntry] = []
         for entry in self.store.entries:
+            if not self._matches_preset(entry):
+                continue
             if filter_level != "ALL" and entry.level != filter_level:
                 continue
             if query and query not in entry.message.lower() and query not in entry.level.lower():

@@ -164,28 +164,48 @@ def make_clickable(
     *,
     hover_border: str | None = None,
 ) -> None:
-    """Make a card open a detail view. Hover uses a token border colour."""
+    """Make a card clickable. Hover stays steady while the pointer is over it.
+
+    Enter/Leave fire when the pointer crosses from the card onto its labels,
+    which used to flash the border. Only drop the hover once the pointer
+    is actually outside the card.
+    """
     normal = theme.c("border")
     hover = hover_border or theme.c("border_focus")
 
+    def _pointer_inside() -> bool:
+        try:
+            px, py = widget.winfo_pointerxy()
+            x, y = widget.winfo_rootx(), widget.winfo_rooty()
+            return x <= px < x + widget.winfo_width() and y <= py < y + widget.winfo_height()
+        except Exception:
+            return False
+
     def _enter(_event=None) -> None:
         if widget.winfo_exists():
-            widget.configure(border_width=1, border_color=hover)
+            widget.configure(border_color=hover)
 
     def _leave(_event=None) -> None:
-        if widget.winfo_exists():
-            widget.configure(border_color=normal)
+        if not widget.winfo_exists():
+            return
+        if _pointer_inside():
+            return
+        widget.configure(border_color=normal)
 
     def _click(_event=None) -> None:
         command()
 
     def _bind_clicks(node) -> None:
+        try:
+            node.configure(cursor="hand2")
+        except Exception:
+            pass
         node.bind("<Button-1>", _click)
+        node.bind("<Enter>", _enter)
+        node.bind("<Leave>", _leave)
         for child in node.winfo_children():
             _bind_clicks(child)
 
-    widget.bind("<Enter>", _enter)
-    widget.bind("<Leave>", _leave)
     _bind_clicks(widget)
 
 

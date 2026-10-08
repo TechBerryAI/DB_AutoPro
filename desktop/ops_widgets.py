@@ -106,6 +106,23 @@ def section_header(
     header = ctk.CTkFrame(wrap, fg_color="transparent")
     header.pack(fill="x", pady=(0, 8))
 
+    # Action link first (right), then title — avoids dead clicks under an expand fill.
+    if action_text and action_command:
+        btn = ghost_button(
+            header,
+            theme,
+            text=action_text,
+            command=action_command,
+            height=28,
+        )
+        btn.configure(
+            text_color=theme.c("primary"),
+            hover_color=theme.c("primary_muted"),
+            font=font(theme, 12),
+            cursor="hand2",
+        )
+        btn.pack(side="right", padx=(8, 0))
+
     left = ctk.CTkFrame(header, fg_color="transparent")
     left.pack(side="left", fill="x", expand=True)
     ctk.CTkLabel(
@@ -123,21 +140,6 @@ def section_header(
             text_color=theme.c("text_secondary"),
             anchor="w",
         ).pack(anchor="w", pady=(3, 0))
-
-    if action_text and action_command:
-        btn = ghost_button(
-            header,
-            theme,
-            text=action_text,
-            command=action_command,
-            height=28,
-        )
-        btn.configure(
-            text_color=theme.c("text_secondary"),
-            hover_color=theme.c("bg_card_hover"),
-            font=font(theme, 12),
-        )
-        btn.pack(side="right")
 
     body = ctk.CTkFrame(wrap, fg_color="transparent")
     body.pack(fill="x")
