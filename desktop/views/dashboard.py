@@ -163,8 +163,14 @@ class DashboardView(BaseView):
 
     def _nav_kpi(self, key: str) -> None:
         """Stat cards deep-link into workspace pages (not detail dialogs)."""
+        connected_name = ""
+        if self.connection:
+            connected_name = (self.connection.saved_name or self.connection.name or "").strip()
+        server_extra: dict = {"servers_filter": "all", "open_saved": True}
+        if connected_name:
+            server_extra["saved_server"] = connected_name
         routes = {
-            "linux_servers": ("servers", {}),
+            "linux_servers": ("servers", server_extra),
             "databases": ("databases", {}),
             "healthy_dbs": ("databases", {}),
             "active_jobs": ("logs", {"log_filter": "jobs"}),

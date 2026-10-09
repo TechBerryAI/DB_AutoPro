@@ -1259,7 +1259,16 @@ class DatabaseAutomationApp(ctk.CTk):
         extra = view_extra or {}
         if key == "servers":
             self._servers_filter = extra.get("servers_filter", self._servers_filter or "all")
-            if "saved_server" in extra:
+            if extra.get("open_saved"):
+                # Dashboard "Saved Servers": expand the list and mark the live profile.
+                self._servers_nav_expanded = True
+                self._saved_list_expanded = True
+                self._servers_filter = "all"
+                connected = (extra.get("saved_server") or "").strip()
+                self._active_saved_connection = connected or None
+            elif "saved_server" in extra:
+                self._servers_nav_expanded = True
+                self._saved_list_expanded = True
                 self._active_saved_connection = extra.get("saved_server")
             elif self._servers_filter != "all":
                 self._active_saved_connection = None
