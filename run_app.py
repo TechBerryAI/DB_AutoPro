@@ -63,6 +63,8 @@ def _selftest() -> int:
         "desktop.explorer",
         "backend.services",
         "backend.connectors",
+        "backend.services.mysql_patch",
+        "backend.services.mysql_patch.adapters",
     ]
     modules: list[str] = [
         "desktop.app",
@@ -83,10 +85,14 @@ def _selftest() -> int:
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
 
     # Resources the UI loads from disk at runtime.
-    from desktop.lucide_icons import _ICONS_DIR
+    from desktop.lucide_icons import _ICONS_DIR, _load_svg
 
     if not any(_ICONS_DIR.glob("*.svg")):
         failures.append(f"missing lucide SVG assets in {_ICONS_DIR}")
+    try:
+        _load_svg("mysql_patch")
+    except OSError as exc:
+        failures.append(f"mysql patch icon: {exc}")
     if not (APP_ROOT / "config" / "default.yaml").exists():
         failures.append("missing config/default.yaml")
 

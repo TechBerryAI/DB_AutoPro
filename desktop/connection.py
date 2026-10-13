@@ -209,8 +209,12 @@ def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
             error = health.get("error", "Connection failed")
             return False, _friendly_error(Exception(error), conn)
 
+    from backend.services.ssh_host_keys import SshHostKeyError
+
     try:
         return _probe_db(connection)
+    except SshHostKeyError:
+        raise
     except RuntimeError as exc:
         ssh_err = str(exc)
         # SSH unreachable: try direct DB so Connect is not blocked by a dead SSH hop.

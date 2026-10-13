@@ -47,7 +47,7 @@ Build: `deployment\build.bat` · Spec: `deployment/DataAutomationPro.spec` · mi
 
 - Overview: Dashboard  
 - Infrastructure: Servers (+ New / Saved subnav), Databases  
-- Operations: Backup, Restore, Migration, Patching, MySQL Patch Management, FDW  
+- Operations: Backup, Restore, Migration, Patching (submenu: MySQL Patch Management), FDW  
 - Observability: Monitoring, Execution Log, Audit Log, Reports  
 - System: Settings  
 

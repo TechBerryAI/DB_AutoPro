@@ -31,13 +31,13 @@ Apply Patch runs `apt-get -s` only. The history row stays `dry_run_passed` and `
 2. Take a backup with **Backup** and keep that file.
 3. The precheck only checks that the file can be read. It does not prove the backup can be restored.
 4. Plan a maintenance window. An Ubuntu MySQL package update commonly restarts MySQL. This app does not know your change calendar.
-5. The SSH client accepts unknown host keys. The page will not say the host key was verified.
+5. An unknown SSH host key is rejected. Read the fingerprint on the server and type it into the trust dialog. The presented fingerprint is not saved by itself. A changed key is rejected and is not replaced.
 
 The remote user must be root or have passwordless `sudo`. The app will not ask for a sudo password.
 
 ## Using the page
 
-Open **Operations → MySQL Patch Management**.
+Open **Operations → Patching**, then choose **MySQL Patch Management** in the menu under that row.
 
 1. Choose the saved server and the backup file.
 2. **Run Prechecks.** Pass, warning, and failure lines appear in the results box. Disk must have at least 1 GiB free on `/`, `/var`, and the filesystem that holds the APT cache. That 1 GiB floor is this app's rule, not a number published by MySQL.

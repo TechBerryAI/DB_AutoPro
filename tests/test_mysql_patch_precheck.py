@@ -99,12 +99,23 @@ def test_successful_precheck_is_ready_for_a_plan():
     assert report.ready_for_plan is True
     assert report.recovery_proven is False
     assert report.host_key_verified is False
+    host_key = next(item for item in report.checks if item.code == "host_key")
+    assert "accepts unknown" not in host_key.summary
     assert report.service_interruption_expected is True
     assert report.backup_state == BackupReadinessState.READABLE_UNVERIFIED
     assert any(item.code == "host_key" and item.status.value == "warning" for item in report.checks)
     assert "prove" in next(item.summary for item in report.checks if item.code == "backup")
     assert not any(marker in command for command in runner.calls for marker in MUTATING_MARKERS)
     assert set(report.commands_run).issubset(allowed_commands())
+
+
+def test_pinned_runner_marks_the_host_key_verified():
+    runner = FakeRunner(_ready_responses())
+    runner.host_key_verified = True
+    report = _service().precheck(runner, server_id="db-01", backup_path="C:/backup.sql")
+
+    assert report.host_key_verified is True
+    assert any(item.code == "host_key" and item.status.value == "pass" for item in report.checks)
 
 
 def test_unsupported_os_skips_remote_safety_commands():

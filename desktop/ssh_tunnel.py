@@ -115,20 +115,23 @@ class ParamikoTunnel:
                 _ssh_unreachable_message(ssh_host, ssh_port, probe_reason)
             )
 
+        from backend.services.ssh_host_keys import SshHostKeyError, connect_verified_client
+
         self._client = paramiko.SSHClient()
-        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            self._client.connect(
+            connect_verified_client(
+                self._client,
                 hostname=ssh_host,
                 port=ssh_port,
                 username=ssh_username,
-                password=ssh_password or None,
-                allow_agent=False,
-                look_for_keys=False,
+                password=ssh_password,
                 timeout=15,
                 banner_timeout=20,
                 auth_timeout=20,
             )
+        except SshHostKeyError:
+            self._client.close()
+            raise
         except paramiko.AuthenticationException as exc:
             raise RuntimeError(
                 f"SSH authentication failed for Linux user '{ssh_username}' on "

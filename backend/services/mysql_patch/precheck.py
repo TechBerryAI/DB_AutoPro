@@ -148,16 +148,27 @@ class PrecheckService:
             self._candidate_check(checks, discovery)
             self._service_check(checks, discovery)
             if discovery.transport_error is None and report.stop_reason is None:
-                checks.append(
-                    DiscoveryCheck(
-                        code="host_key",
-                        status=CheckStatus.WARNING,
-                        summary=(
-                            "SSH responded, but the host key was not pinned. "
-                            "The shared SSH client accepts unknown host keys."
-                        ),
+                pinned = bool(getattr(runner, "host_key_verified", False))
+                report.host_key_verified = pinned
+                if pinned:
+                    checks.append(
+                        DiscoveryCheck(
+                            code="host_key",
+                            status=CheckStatus.PASS,
+                            summary="SSH host key matched the trusted key for this server.",
+                        )
                     )
-                )
+                else:
+                    checks.append(
+                        DiscoveryCheck(
+                            code="host_key",
+                            status=CheckStatus.WARNING,
+                            summary=(
+                                "SSH responded, but this check cannot confirm a pinned host key. "
+                                "Enter the fingerprint you read on the server before trusting it."
+                            ),
+                        )
+                    )
 
         self._backup_check(checks, report, backup_path)
         self._job_check(checks, discovery.server_id)

@@ -1,14 +1,24 @@
-"""Persist saved database server profiles for the desktop connection dialog."""
+"""Persist saved database server profiles for the desktop connection dialog.
+
+Plaintext profiles still load. A file is encrypted only by migrate_servers_file(),
+which refuses the live saved_servers.json path. After that migration, later
+saves of an already protected file keep the passwords encrypted.
+"""
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from backend.core.paths import DATA_DIR
 from backend.models.schemas import DatabaseType
+from desktop.windows_dpapi import CredentialProtectionError, protect_bytes, unprotect_bytes
 
 STORE_PATH = DATA_DIR / "saved_servers.json"
+PROTECTION_ID = "dpapi-user-v1"
+_PASSWORD_KEYS = ("password", "linux_password")
 
 
 @dataclass
@@ -43,12 +53,12 @@ class SavedServer:
             host=data.get("host", "localhost"),
             port=int(data.get("port", 5432)),
             username=data.get("username", ""),
-            password=data.get("password", ""),
+            password=_reveal_secret(data, "password"),
             database=data.get("database", "postgres"),
             auth_database=data.get("auth_database", ""),
             ssh_enabled=bool(data.get("ssh_enabled", False)),
             linux_username=data.get("linux_username", ""),
-            linux_password=data.get("linux_password", ""),
+            linux_password=_reveal_secret(data, "linux_password"),
             ssh_host=data.get("ssh_host", ""),
             ssh_port=int(data.get("ssh_port", 22)),
             mongodump_path=data.get("mongodump_path", ""),
@@ -83,13 +93,108 @@ class SavedServer:
         )
 
 
+def _reveal_secret(data: dict, name: str) -> str:
+    """Use a protected field when present. Otherwise keep the legacy plaintext."""
+    protected = data.get(f"{name}_protected") or ""
+    if protected:
+        try:
+            raw = base64.b64decode(str(protected), validate=True)
+        except (ValueError, TypeError) as exc:
+            raise CredentialProtectionError("Saved credential is not valid protected data.") from exc
+        try:
+            return unprotect_bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CredentialProtectionError("Saved credential could not be read.") from exc
+    return str(data.get(name) or "")
+
+
+def _protected_server_dict(server: SavedServer) -> dict:
+    payload = asdict(server)
+    for name in _PASSWORD_KEYS:
+        secret = str(payload.get(name) or "")
+        payload[name] = ""
+        payload[f"{name}_protected"] = base64.b64encode(protect_bytes(secret.encode("utf-8"))).decode("ascii") if secret else ""
+    return payload
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _is_protected_file(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    return isinstance(data, dict) and data.get("credential_protection") == PROTECTION_ID
+
+
+def _write_legacy(path: Path, servers: list[SavedServer]) -> None:
+    payload = {"servers": [asdict(server) for server in servers]}
+    _atomic_write(path, json.dumps(payload, indent=2))
+
+
+def _write_protected(path: Path, servers: list[SavedServer]) -> None:
+    payload = {
+        "credential_protection": PROTECTION_ID,
+        "servers": [_protected_server_dict(server) for server in servers],
+    }
+    _atomic_write(path, json.dumps(payload, indent=2))
+
+
+def load_servers_from_path(path: Path) -> list[SavedServer]:
+    """Load profiles from an explicit file. Used by tests and migration."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return [SavedServer.from_dict(item) for item in data.get("servers", [])]
+
+
+def migrate_servers_file(path: Path) -> Path:
+    """Encrypt passwords in a chosen file and keep a byte-for-byte backup.
+
+    Refuses the live application store. Call this only for a file you intend
+    to migrate, after taking your own copy if you need one outside this backup.
+    """
+    target = Path(path)
+    if target.resolve() == STORE_PATH.resolve():
+        raise CredentialProtectionError(
+            "Refusing to migrate the live saved_servers.json file. "
+            "That step needs a separate approval."
+        )
+    if not target.exists():
+        raise CredentialProtectionError("Saved server file was not found.")
+    original = target.read_bytes()
+    try:
+        data = json.loads(original.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise CredentialProtectionError("Saved server file is not valid JSON.") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("servers", []), list):
+        raise CredentialProtectionError("Saved server file is not a server list.")
+    if data.get("credential_protection") == PROTECTION_ID:
+        raise CredentialProtectionError("This file is already protected. It was not changed.")
+    backup = target.with_name(target.name + ".bak")
+    backup.write_bytes(original)
+    try:
+        servers = [SavedServer.from_dict(item) for item in data.get("servers", [])]
+        _write_protected(target, servers)
+    except Exception:
+        target.write_bytes(original)
+        raise
+    return backup
+
+
 def _load_all_servers() -> list[SavedServer]:
     if not STORE_PATH.exists():
         return []
     try:
-        data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        return [SavedServer.from_dict(item) for item in data.get("servers", [])]
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return load_servers_from_path(STORE_PATH)
+    except CredentialProtectionError:
+        raise
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError, UnicodeError):
         return []
 
 
@@ -110,10 +215,13 @@ def load_saved_servers(owner_username: str | None = None) -> list[SavedServer]:
     return [s for s in servers if _server_belongs_to_user(s, owner_username)]
 
 
-def save_servers(servers: list[SavedServer]) -> None:
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"servers": [asdict(server) for server in servers]}
-    STORE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+def save_servers(servers: list[SavedServer], *, path: Path | None = None) -> None:
+    """Write profiles. An unprotected file stays plaintext until migrate_servers_file()."""
+    target = Path(path) if path is not None else STORE_PATH
+    if _is_protected_file(target):
+        _write_protected(target, servers)
+    else:
+        _write_legacy(target, servers)
 
 
 def upsert_server(server: SavedServer, owner_username: str | None = None) -> None:

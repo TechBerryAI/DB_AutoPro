@@ -11,9 +11,10 @@ app's ``sys._MEIPASS`` is the application folder itself. That makes every
 ``Path(__file__).parents[...]`` lookup in the existing source resolve exactly as
 it does when running from a checkout:
 
-    <app>/config      <- YAML profiles + runtime JSON state
-    <app>/logs        <- audit.log, app.log, patch_history.json
-    <app>/backups     <- default backup output directory
+    <app>/config      <- YAML settings only
+    <app>/var/logs    <- audit.log, app.log, patch_history.json
+    <app>/var/backups <- default backup output directory
+    <app>/var/data    <- saved servers, employees, UI preferences, patch jobs
     <app>/desktop/assets/lucide
 
 No application module had to be modified to support packaging.
@@ -128,13 +129,19 @@ hiddenimports = [
     "apscheduler.jobstores.memory",
 ]
 
-# View modules that exist in desktop/views but are not referenced by the running
-# UI yet, so the import graph does not reach them. Bundled anyway, so the
-# packaged app stays complete if they are wired up later.
+# Extra modules the frozen build must keep even when the import graph is shallow.
+# mysql_patch_view is also imported by the sidebar; it is listed so a packaged
+# build cannot drop it.
 hiddenimports += [
     "desktop.views.migration_view",
     "desktop.views.monitoring_view",
     "desktop.views.patch_view",
+    "desktop.views.mysql_patch_view",
+    "desktop.mysql_patch_flow",
+    "desktop.mysql_patch_export",
+    "backend.services.mysql_patch",
+    "backend.services.mysql_patch.adapters.mysql_apt_ubuntu",
+    "fpdf.enums",
     "desktop.overlay",
     "desktop.ui_helpers",
     "desktop.shell_header",

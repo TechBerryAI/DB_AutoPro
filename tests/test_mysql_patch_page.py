@@ -6,15 +6,19 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from backend.services.mysql_patch.models import MysqlPatchAuditRecord
-from desktop.app import CONNECTION_REQUIRED_KEYS, NAV_GROUPS
+from desktop.app import CONNECTION_REQUIRED_KEYS, NAV_GROUPS, NAV_ITEMS, PATCH_SUBNAV
 from desktop.mysql_patch_export import export_patch_csv, export_patch_pdf
 from desktop.mysql_patch_flow import apply_allowed, approve_allowed, plan_allowed, precheck_allowed, refresh_allowed
 
 
 def test_mysql_patch_page_is_in_operations_and_does_not_require_a_db_session():
-    keys = [key for _group, items in NAV_GROUPS for key, _label, _cls in items]
-    assert "mysql_patch" in keys
-    assert "patching" in keys
+    group_keys = [key for _group, items in NAV_GROUPS for key, _label, _cls in items]
+    child_keys = [key for key, _label, _cls in PATCH_SUBNAV]
+    item_keys = [key for key, _label, _cls in NAV_ITEMS]
+    assert "patching" in group_keys
+    assert "mysql_patch" not in group_keys
+    assert child_keys == ["mysql_patch"]
+    assert "mysql_patch" in item_keys
     assert "mysql_patch" not in CONNECTION_REQUIRED_KEYS
 
 

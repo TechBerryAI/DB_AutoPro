@@ -1276,8 +1276,19 @@ class ConnectionPanel(ctk.CTkFrame):
 
     def _run_connection_test(self, connection: ConnectionResult, *, on_success_connect: bool) -> None:
         def task() -> None:
-            ok, message = test_connection(connection)
-            self.after(0, lambda: self._on_test_complete(ok, message, connection, on_success_connect))
+            from backend.services.ssh_host_keys import SshHostKeyError
+
+            host_key_error = None
+            try:
+                ok, message = test_connection(connection)
+            except SshHostKeyError as exc:
+                ok, message, host_key_error = False, str(exc), exc
+            self.after(
+                0,
+                lambda ok=ok, message=message, err=host_key_error: self._on_test_complete(
+                    ok, message, connection, on_success_connect, err
+                ),
+            )
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -1307,6 +1318,7 @@ class ConnectionPanel(ctk.CTkFrame):
         message: str,
         connection: ConnectionResult,
         on_success_connect: bool,
+        host_key_error: Exception | None = None,
     ) -> None:
         self._set_busy(testing=False, connecting=False)
         if ok:
@@ -1319,6 +1331,10 @@ class ConnectionPanel(ctk.CTkFrame):
                     self.on_connect_success(connection)
         else:
             self._set_status(message, "error")
+            if host_key_error is not None:
+                from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+                maybe_offer_host_key_trust(self, host_key_error)
 
     def _style_inputs(self) -> None:
         for name in (
