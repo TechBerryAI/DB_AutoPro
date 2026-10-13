@@ -233,22 +233,23 @@ class ConnectionPanel(ctk.CTkFrame):
             column=1 if SHOW_SAVED_CONNECTIONS_SIDEBAR else 0,
             sticky="nsew",
             padx=24,
-            pady=20,
+            pady=(12, 0),
         )
-        main.grid_rowconfigure(0, weight=1)
         main.grid_columnconfigure(0, weight=1)
 
-        scroll = themed_scrollable_frame(main, self.theme)
-        scroll.grid(row=0, column=0, sticky="nsew")
+        # Pack the action block first so it stays at the bottom. A scrollable
+        # frame in the same grid steals the cell and leaves a gap under the buttons.
+        footer = ctk.CTkFrame(main, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", pady=(6, 0))
+        footer.grid_columnconfigure(0, weight=1)
+
+        scroll = themed_scrollable_frame(main, self.theme, height=120)
+        scroll.pack(fill="both", expand=True)
         self._form_scroll = scroll
 
         self._build_database_type_card(scroll)
         self._build_linux_access_card(scroll)
         self._build_details_card(scroll)
-
-        footer = ctk.CTkFrame(main, fg_color="transparent")
-        footer.grid(row=1, column=0, sticky="ew", pady=(16, 0))
-        footer.grid_columnconfigure(0, weight=1)
 
         if not SHOW_SAVED_CONNECTIONS_SIDEBAR:
             self._main_session_bar = ctk.CTkFrame(
@@ -259,7 +260,7 @@ class ConnectionPanel(ctk.CTkFrame):
                 border_color=self.theme.c("border"),
             )
             session_row = ctk.CTkFrame(self._main_session_bar, fg_color="transparent")
-            session_row.pack(fill="x", padx=14, pady=10)
+            session_row.pack(fill="x", padx=12, pady=4)
             self._main_session_label = ctk.CTkLabel(
                 session_row,
                 text="",
@@ -272,7 +273,7 @@ class ConnectionPanel(ctk.CTkFrame):
                 session_row,
                 text="Disconnect",
                 width=110,
-                height=32,
+                height=28,
                 fg_color="#7f1d1d",
                 hover_color="#ef4444",
                 text_color="#fecaca",
@@ -281,10 +282,10 @@ class ConnectionPanel(ctk.CTkFrame):
             self._main_disconnect_btn.pack(side="right")
 
         self.status_frame = ctk.CTkFrame(footer, corner_radius=8, fg_color=self.theme.c("bg_card_hover"), border_width=1, border_color=self.theme.c("border"))
-        self.status_frame.grid(row=1 if not SHOW_SAVED_CONNECTIONS_SIDEBAR else 0, column=0, sticky="ew", pady=(0, 14))
+        self.status_frame.grid(row=1 if not SHOW_SAVED_CONNECTIONS_SIDEBAR else 0, column=0, sticky="ew", pady=(0, 6))
 
         status_inner = ctk.CTkFrame(self.status_frame, fg_color="transparent")
-        status_inner.pack(fill="x", padx=14, pady=10)
+        status_inner.pack(fill="x", padx=12, pady=4)
 
         self.status_indicator = ctk.CTkLabel(status_inner, text="●", font=ctk.CTkFont(size=14), text_color=self.theme.c("text_muted"))
         self.status_indicator.pack(side="left", padx=(0, 8))
@@ -306,8 +307,8 @@ class ConnectionPanel(ctk.CTkFrame):
         self.test_btn = ctk.CTkButton(
             actions,
             text="Test Connection",
-            width=150,
-            height=40,
+            width=140,
+            height=32,
             fg_color=self.theme.c("bg_card"),
             hover_color=self.theme.c("bg_card_hover"),
             border_width=1,
@@ -321,8 +322,8 @@ class ConnectionPanel(ctk.CTkFrame):
         self.save_btn = ctk.CTkButton(
             actions,
             text="Save Connection",
-            width=150,
-            height=40,
+            width=140,
+            height=32,
             fg_color=self.theme.c("bg_elevated"),
             hover_color=self.theme.c("bg_card_hover"),
             border_width=1,
@@ -336,8 +337,8 @@ class ConnectionPanel(ctk.CTkFrame):
         self.delete_btn = ctk.CTkButton(
             actions,
             text="Delete Connection",
-            width=160,
-            height=40,
+            width=150,
+            height=32,
             fg_color="#b91c1c",
             hover_color="#dc2626",
             text_color="#ffffff",
@@ -348,9 +349,9 @@ class ConnectionPanel(ctk.CTkFrame):
         self.connect_btn = ctk.CTkButton(
             actions,
             text="Connect",
-            width=180,
-            height=44,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            width=140,
+            height=32,
+            font=ctk.CTkFont(size=13, weight="bold"),
             fg_color=self.theme.c("primary"),
             hover_color=self.theme.c("primary_hover"),
             command=self._on_connect,
@@ -969,7 +970,7 @@ class ConnectionPanel(ctk.CTkFrame):
                         f"{connection.host}:{connection.port}"
                     ),
                 )
-                bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+                bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
                 btn.configure(state="normal")
             else:
                 bar.grid_remove()
