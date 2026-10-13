@@ -472,7 +472,7 @@ class BackupView(BaseView):
                 self._verify_other_ssh_connection(ssh_opts)
                 self.after(0, lambda: self._on_other_ssh_connected(connect_host, ssh_opts))
             except Exception as exc:
-                self.after(0, lambda msg=str(exc): self._on_other_ssh_failed(msg))
+                self.after(0, lambda msg=str(exc), err=exc: self._on_other_ssh_failed(msg, err))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -503,7 +503,7 @@ class BackupView(BaseView):
         self._update_ssh_status_label()
         self._update_command_preview()
 
-    def _on_other_ssh_failed(self, message: str) -> None:
+    def _on_other_ssh_failed(self, message: str, host_key_error: Exception | None = None) -> None:
         host = self.other_ssh_host.get().strip()
         message = self._enhance_ssh_error_message(message, host)
         short = message.split("\n", 1)[0]
@@ -527,6 +527,10 @@ class BackupView(BaseView):
             self.results.insert("end", f"SSH connection failed:\n{message}\n")
         self._update_ssh_status_label()
         self._update_command_preview()
+        if host_key_error is not None:
+            from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+            maybe_offer_host_key_trust(self, host_key_error)
 
     def _on_other_path_selected(self, path: str) -> None:
         self.other_dir_entry.delete(0, "end")
@@ -644,11 +648,18 @@ class BackupView(BaseView):
             except Exception as exc:
                 msg = str(exc)
                 color = self.theme.c("error")
+                host_key_error = exc
+            else:
+                host_key_error = None
 
-            self.after(
-                0,
-                lambda: self.ssh_status_label.configure(text=msg, text_color=color),
-            )
+            def show(msg: str = msg, color: str = color, err=host_key_error) -> None:
+                self.ssh_status_label.configure(text=msg, text_color=color)
+                if err is not None:
+                    from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+                    maybe_offer_host_key_trust(self, err)
+
+            self.after(0, show)
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -2715,10 +2726,13 @@ class BackupView(BaseView):
             except Exception as exc:
                 message = str(exc)
 
-                def show_error(msg: str = message) -> None:
+                def show_error(msg: str = message, err: Exception = exc) -> None:
                     self.results.delete("1.0", "end")
                     self.results.insert("end", f"Error: {msg}\n")
                     self.status_label.configure(text="Backup failed")
+                    from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+                    maybe_offer_host_key_trust(self, err)
 
                 self.after(0, show_error)
                 self.log(f"Backup failed: {exc}", "ERROR")

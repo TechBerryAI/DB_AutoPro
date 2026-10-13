@@ -31,7 +31,7 @@ Prerequisites: the project `venv`, `pyinstaller`, and Inno Setup 6
 `run_app.py` (project root) is a thin launcher equivalent to
 `python run.py desktop`. It adds no application behaviour; it only exists so
 PyInstaller has one GUI-only entry script, and so a packaged build can report a
-start-up failure to `logs\launcher_error.log` instead of dying silently.
+start-up failure to `var\logs\launcher_error.log` instead of dying silently.
 
 The spec sets `contents_directory='.'`, which keeps PyInstaller's flat one-dir
 layout. That makes the frozen app's root the install folder itself, so every
@@ -60,11 +60,11 @@ account on first launch. A fresh install therefore contains no secrets.
 
 Per-user install into `%LOCALAPPDATA%\Programs\Data Automation Pro`
 (`PrivilegesRequired=lowest`). No UAC prompt, and the app can write its own
-`config/`, `logs/` and `backups/` folders. Installing into `Program Files`
+`config/`, `var\logs` and `var\backups` folders. Installing into `Program Files`
 would break those writes, because the app writes next to its binaries.
 
 Re-running the installer upgrades in place: the fixed `AppId` prevents a second
-Add/Remove Programs entry, `config\*.json`, `logs\*` and `backups\*` are
+Add/Remove Programs entry, `var\data\*.json`, `var\logs\*` and `var\backups\*` are
 excluded from the payload, and those folders are marked `uninsneveruninstall`
 so user data survives both upgrade and uninstall.
 

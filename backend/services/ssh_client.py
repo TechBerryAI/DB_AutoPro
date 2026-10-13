@@ -98,17 +98,17 @@ def run_ssh_command(
     except ImportError as exc:
         raise RuntimeError("paramiko is not installed. Run: pip install paramiko") from exc
 
+    from backend.services.ssh_host_keys import SshHostKeyError, connect_verified_client
+
     resolved_host = resolve_ssh_host(ssh_host, fallback_host)
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
+        connect_verified_client(
+            client,
             hostname=resolved_host,
             port=ssh_port,
             username=username,
-            password=password or None,
-            allow_agent=False,
-            look_for_keys=False,
+            password=password,
             timeout=15,
             banner_timeout=30,
             auth_timeout=30,
@@ -174,6 +174,8 @@ def run_ssh_command(
         out_text = b"".join(stdout_chunks).decode("utf-8", errors="replace")
         err_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
         return exit_code, out_text, err_text
+    except SshHostKeyError:
+        raise
     except paramiko.AuthenticationException as exc:
         raise RuntimeError(
             format_ssh_connect_error(resolved_host, ssh_port, username, exc)
@@ -573,26 +575,31 @@ def _open_ssh_client(ssh: dict[str, Any]):
     if not username:
         raise RuntimeError("SSH username is required.")
 
+    from backend.services.ssh_host_keys import SshHostKeyError, connect_verified_client
+
     resolved_host = resolve_ssh_host(host, fallback or host)
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
+        connect_verified_client(
+            client,
             hostname=resolved_host,
             port=port,
             username=username,
-            password=password or None,
-            allow_agent=False,
-            look_for_keys=False,
+            password=password,
             timeout=15,
             banner_timeout=30,
             auth_timeout=30,
         )
+    except SshHostKeyError:
+        client.close()
+        raise
     except paramiko.AuthenticationException as exc:
+        client.close()
         raise RuntimeError(
             format_ssh_connect_error(resolved_host, port, username, exc)
         ) from exc
     except Exception as exc:
+        client.close()
         raise RuntimeError(
             format_ssh_connect_error(resolved_host, port, username, exc)
         ) from exc
@@ -775,10 +782,11 @@ def stream_ssh_stdout_to_file(
     except ImportError as exc:
         raise RuntimeError("paramiko is not installed. Run: pip install paramiko") from exc
 
+    from backend.services.ssh_host_keys import SshHostKeyError, connect_verified_client
+
     kwargs = _ssh_kwargs(ssh)
     resolved_host = resolve_ssh_host(kwargs["ssh_host"], kwargs["fallback_host"])
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
     stderr_chunks: list[bytes] = []
@@ -801,13 +809,12 @@ def stream_ssh_stdout_to_file(
             written += len(data)
 
     try:
-        client.connect(
+        connect_verified_client(
+            client,
             hostname=resolved_host,
             port=kwargs["ssh_port"],
             username=kwargs["username"],
-            password=kwargs["password"] or None,
-            allow_agent=False,
-            look_for_keys=False,
+            password=kwargs["password"],
             timeout=15,
             banner_timeout=30,
             auth_timeout=30,
@@ -900,6 +907,8 @@ def stream_ssh_stdout_to_file(
         if on_progress:
             on_progress(written, int(time.monotonic() - started), err_text[-240:])
         return exit_code, err_text
+    except SshHostKeyError:
+        raise
     except paramiko.AuthenticationException as exc:
         raise RuntimeError(
             f"SSH authentication failed for Linux user '{kwargs['username']}'."

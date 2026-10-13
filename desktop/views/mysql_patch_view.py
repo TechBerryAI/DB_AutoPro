@@ -503,7 +503,7 @@ class MysqlPatchView(BaseView):
                 result = work()
             except Exception as exc:
                 message = redact_text(str(exc)) or "The patch action failed"
-                self.after(0, lambda: self._show_error(message))
+                self.after(0, lambda message=message, err=exc: self._show_error(message, err))
                 return
             self.after(0, lambda: self._show_success(on_success, result))
 
@@ -514,12 +514,16 @@ class MysqlPatchView(BaseView):
         on_success(result)
         self._sync_buttons()
 
-    def _show_error(self, message: str) -> None:
+    def _show_error(self, message: str, host_key_error: Exception | None = None) -> None:
         self._busy = False
         self.progress_label.configure(text="Execution progress: failed before completion")
         self._write(self.log_box, message)
         self.log(f"MySQL patch action failed: {message}", "ERROR")
         self._sync_buttons()
+        if host_key_error is not None:
+            from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+            maybe_offer_host_key_trust(self, host_key_error)
 
 
 def _checks_text(checks, stop_reason: str | None) -> str:

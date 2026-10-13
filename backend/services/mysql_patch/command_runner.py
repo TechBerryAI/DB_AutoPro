@@ -143,6 +143,7 @@ class SshCommandRunner:
         self.username = username
         self._password = password
         self.fallback_host = fallback_host or host
+        self.host_key_verified = False
 
     def __repr__(self) -> str:
         return (
@@ -169,4 +170,5 @@ class SshCommandRunner:
         )
         if len(stdout) > MAX_OUTPUT_CHARS or len(stderr) > MAX_OUTPUT_CHARS:
             raise MysqlPatchSafetyError("Remote command output exceeded the size limit")
+        self.host_key_verified = True
         return CommandResult(exit_code=code, stdout=stdout, stderr=stderr)

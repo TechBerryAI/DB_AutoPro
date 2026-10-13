@@ -62,7 +62,7 @@ set DAP_SELFTEST=1
 set "RC=%ERRORLEVEL%"
 set DAP_SELFTEST=
 if not "%RC%"=="0" (
-    echo [ERROR] Source self-test failed. See logs\selftest.log
+    echo [ERROR] Source self-test failed. See var\logs\selftest.log
     exit /b 1
 )
 echo       source self-test OK

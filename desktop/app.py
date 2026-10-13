@@ -64,7 +64,6 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
             ("restore", "Restore", RestoreView),
             ("migration", "Migration", MigrationView),
             ("patching", "Patching", PatchView),
-            ("mysql_patch", "MySQL Patch Management", MysqlPatchView),
         ],
     ),
     (
@@ -83,9 +82,14 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
     ),
 ]
 
+# Software patch pages live under the Patching row. SQL script patching stays the parent page.
+PATCH_SUBNAV: list[tuple[str, str, type]] = [
+    ("mysql_patch", "MySQL Patch Management", MysqlPatchView),
+]
+
 NAV_ITEMS: list[tuple[str, str, type]] = [
     (key, label, cls) for _, items in NAV_GROUPS for key, label, cls in items
-]
+] + PATCH_SUBNAV
 
 SIDEBAR_WIDTH = 232
 SIDEBAR_MIN_WIDTH = 180
@@ -122,6 +126,9 @@ class DatabaseAutomationApp(ctk.CTk):
         self._servers_subnav_frame: ctk.CTkFrame | None = None
         self._servers_saved_frame: ctk.CTkFrame | None = None
         self._servers_nav_expanded = False
+        self._patch_nav_expanded = False
+        self._patch_subnav_frame: ctk.CTkFrame | None = None
+        self._patch_sub_buttons: dict[str, ctk.CTkButton] = {}
         self._saved_list_expanded = True
         self._servers_filter = "all"
         self._active_saved_connection: str | None = None
@@ -280,7 +287,12 @@ class DatabaseAutomationApp(ctk.CTk):
                 accent.pack(side="left", fill="y")
                 accent.pack_propagate(False)
 
-                btn_command = self._toggle_servers_nav if key == "servers" else (lambda k=key: self.navigate(k))
+                if key == "servers":
+                    btn_command = self._toggle_servers_nav
+                elif key == "patching":
+                    btn_command = self._toggle_patch_nav
+                else:
+                    btn_command = lambda k=key: self.navigate(k)
                 icon_img = lucide_ctk_image(key, idle_icon, size=15)
                 btn = ctk.CTkButton(
                     row,
@@ -342,6 +354,27 @@ class DatabaseAutomationApp(ctk.CTk):
                     self._servers_saved_frame = ctk.CTkFrame(self._servers_subnav_frame, fg_color="transparent")
                     self._servers_saved_frame.pack(fill="x", padx=4, pady=(0, 2))
                     self._refresh_servers_saved_nav()
+
+                if key == "patching":
+                    self._patch_subnav_frame = ctk.CTkFrame(nav_host, fg_color="transparent")
+                    self._patch_subnav_frame.pack(fill="x", pady=(0, 2))
+                    self._patch_subnav_frame.pack_forget()
+                    muted = self._t.sc("text_muted") if self._t.is_light else self._t.c("text_muted")
+                    for child_key, child_label, _child_cls in PATCH_SUBNAV:
+                        child = ctk.CTkButton(
+                            self._patch_subnav_frame,
+                            text=f"      {child_label}",
+                            anchor="w",
+                            height=28,
+                            corner_radius=0,
+                            fg_color="transparent",
+                            text_color=muted,
+                            hover_color=self._t.sc("nav_hover") if self._t.is_light else self._t.c("bg_card_hover"),
+                            font=ctk.CTkFont(family="Segoe UI", size=11),
+                            command=lambda k=child_key: self._navigate_patch_child(k),
+                        )
+                        child.pack(fill="x", pady=0, padx=6)
+                        self._patch_sub_buttons[child_key] = child
 
         self._nav_header = self._nav_group_labels[0] if self._nav_group_labels else None
 
@@ -767,9 +800,18 @@ class DatabaseAutomationApp(ctk.CTk):
         *,
         navigate_to: str | None = "databases",
     ) -> None:
+        from backend.services.ssh_host_keys import SshHostKeyError
+
         close_ssh_tunnel()
         apply_connection(connection)
-        effective = open_ssh_tunnel(connection)
+        try:
+            effective = open_ssh_tunnel(connection)
+        except SshHostKeyError as exc:
+            self.append_log(str(exc), "ERROR")
+            from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+            maybe_offer_host_key_trust(self, exc)
+            return
         # Re-apply so DB uses the tunnel bind address while SSH extras keep the real host.
         apply_connection(effective)
         self.set_connection(effective, navigate_to=navigate_to)
@@ -1008,6 +1050,58 @@ class DatabaseAutomationApp(ctk.CTk):
         self._refresh_servers_saved_nav()
         self._style_servers_subnav()
 
+    def _toggle_patch_nav(self) -> None:
+        """Expand or collapse software-patch pages under Patching."""
+        if self._patch_nav_expanded:
+            self._patch_nav_expanded = False
+            self._style_patch_subnav()
+            return
+        self._patch_nav_expanded = True
+        if self.connection is not None and self._active_nav != "patching":
+            self.navigate("patching")
+            return
+        if self.connection is not None:
+            self._style_navigation("patching")
+            return
+        self._style_patch_subnav()
+
+    def _navigate_patch_child(self, key: str) -> None:
+        self._patch_nav_expanded = True
+        self.navigate(key)
+
+    def _style_patch_subnav(self) -> None:
+        t = self._t
+        show = self._patch_nav_expanded and not self._sidebar_collapsed
+        frame = self._patch_subnav_frame
+        if frame is not None:
+            if show:
+                if not frame.winfo_manager():
+                    row = self._nav_rows.get("patching")
+                    if row is not None:
+                        frame.pack(after=row, fill="x", pady=(0, 2))
+                    else:
+                        frame.pack(fill="x", pady=(0, 2))
+            else:
+                frame.pack_forget()
+        parent = self.nav_buttons.get("patching")
+        if parent is not None:
+            arrow = "▾" if show else "▸"
+            parent.configure(text=f"  {arrow}  Patching")
+        for child_key, btn in self._patch_sub_buttons.items():
+            active = show and self._active_nav == child_key
+            if active:
+                btn.configure(
+                    fg_color=t.sc("nav_active") if t.is_light else t.c("nav_active_bg"),
+                    text_color=t.c("nav_active_text"),
+                    border_width=0,
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=t.sc("text_muted") if t.is_light else t.c("text_muted"),
+                    border_width=0,
+                )
+
     def _toggle_servers_nav(self) -> None:
         """Expand/collapse the full Servers sub-menu."""
         if self._servers_nav_expanded and self._active_nav == "servers":
@@ -1223,7 +1317,7 @@ class DatabaseAutomationApp(ctk.CTk):
         accent_color = t.sc("nav_accent") if t.is_light else t.c("nav_indicator")
         active_bg = t.sc("nav_active") if t.is_light else t.c("nav_active_bg")
         for k, btn in self.nav_buttons.items():
-            active = k == key
+            active = k == key or (k == "patching" and key == "mysql_patch")
             accent = self._nav_accents.get(k)
             row = self._nav_rows.get(k)
             if active:
@@ -1248,6 +1342,7 @@ class DatabaseAutomationApp(ctk.CTk):
                 )
             self._apply_nav_icon(k, btn, active=active)
         self._style_servers_subnav()
+        self._style_patch_subnav()
 
     def navigate(self, key: str, *, log: bool = True, view_extra: dict | None = None) -> None:
         if key in CONNECTION_REQUIRED_KEYS and self.connection is None:
@@ -1278,6 +1373,10 @@ class DatabaseAutomationApp(ctk.CTk):
         self._active_nav = key
         if key != "servers":
             self._servers_nav_expanded = False
+        if key in {"patching", "mysql_patch"}:
+            self._patch_nav_expanded = True
+        else:
+            self._patch_nav_expanded = False
         self._style_navigation(key)
 
         for view in self.views.values():

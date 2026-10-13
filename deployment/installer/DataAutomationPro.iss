@@ -7,8 +7,8 @@
 ;  Install model
 ;  -------------
 ;  Per-user install into {localappdata}\Programs\Data Automation, so the app
-;  runs without administrator rights AND can write its own config/, logs/ and
-;  backups/ folders. See deployment\README.md for the production alternative.
+;  runs without administrator rights AND can write its own var\data, var\logs
+;  and var\backups folders. Older logs\ and backups\ folders are still kept.
 ; ---------------------------------------------------------------------------
 
 #define AppName "Data Automation Pro"
@@ -72,12 +72,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "{app}\backups"; Flags: uninsneveruninstall
 Name: "{app}\logs"; Flags: uninsneveruninstall
 Name: "{app}\config"; Flags: uninsneveruninstall
+Name: "{app}\var\data"; Flags: uninsneveruninstall
+Name: "{app}\var\logs"; Flags: uninsneveruninstall
+Name: "{app}\var\backups"; Flags: uninsneveruninstall
 
 [Files]
 ; Application payload. config\*.json is excluded here and handled below so that
 ; a re-install never overwrites saved servers, accounts or UI preferences.
 Source: "{#DistDir}\*"; DestDir: "{app}"; \
-    Excludes: "config\*.json,logs\*,backups\*"; \
+    Excludes: "config\*.json,logs\*,backups\*,var\data\*.json,var\logs\*,var\backups\*"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; YAML profiles ship with the app and are refreshed on upgrade; client-specific
@@ -107,5 +110,8 @@ begin
     ForceDirectories(ExpandConstant('{app}\logs'));
     ForceDirectories(ExpandConstant('{app}\backups'));
     ForceDirectories(ExpandConstant('{app}\config'));
+    ForceDirectories(ExpandConstant('{app}\var\data'));
+    ForceDirectories(ExpandConstant('{app}\var\logs'));
+    ForceDirectories(ExpandConstant('{app}\var\backups'));
   end;
 end;

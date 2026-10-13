@@ -921,7 +921,7 @@ class RestoreView(BaseView):
                 self._verify_other_ssh_connection(ssh_opts)
                 self.after(0, lambda: self._on_other_ssh_connected(connect_host, ssh_opts))
             except Exception as exc:
-                self.after(0, lambda msg=str(exc): self._on_other_ssh_failed(msg))
+                self.after(0, lambda msg=str(exc), err=exc: self._on_other_ssh_failed(msg, err))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -953,7 +953,7 @@ class RestoreView(BaseView):
         self._sync_restore_target_visibility()
         self._update_command_preview()
 
-    def _on_other_ssh_failed(self, message: str) -> None:
+    def _on_other_ssh_failed(self, message: str, host_key_error: Exception | None = None) -> None:
         host = self.other_ssh_host.get().strip()
         message = self._enhance_ssh_error_message(message, host)
         short = message.split("\n", 1)[0]
@@ -977,6 +977,10 @@ class RestoreView(BaseView):
             self.results.delete("1.0", "end")
             self.results.insert("end", f"SSH connection failed:\n{message}\n")
         self._update_command_preview()
+        if host_key_error is not None:
+            from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+            maybe_offer_host_key_trust(self, host_key_error)
 
     def _browse_local_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -1307,7 +1311,13 @@ class RestoreView(BaseView):
                 )
                 self.log("Restore completed")
             except Exception as exc:
-                self.after(0, lambda: self.results.insert("end", f"Error: {exc}\n"))
+                def show_error(err: Exception = exc) -> None:
+                    self.results.insert("end", f"Error: {err}\n")
+                    from desktop.ssh_host_trust import maybe_offer_host_key_trust
+
+                    maybe_offer_host_key_trust(self, err)
+
+                self.after(0, show_error)
                 self.log(f"Restore failed: {exc}", "ERROR")
 
         threading.Thread(target=task, daemon=True).start()
