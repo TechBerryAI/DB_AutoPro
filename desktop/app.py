@@ -1249,6 +1249,12 @@ class DatabaseAutomationApp(ctk.CTk):
             self._apply_nav_icon(k, btn, active=active)
         self._style_servers_subnav()
 
+    def _view_bottom_inset(self, key: str) -> int:
+        """Servers pins its own action row, so it only needs a slim gap above the status bar."""
+        if key == "servers":
+            return 8
+        return CONTENT_BOTTOM_INSET
+
     def navigate(self, key: str, *, log: bool = True, view_extra: dict | None = None) -> None:
         if key in CONNECTION_REQUIRED_KEYS and self.connection is None:
             # Land on the dashboard rather than opening a page that has
@@ -1332,12 +1338,12 @@ class DatabaseAutomationApp(ctk.CTk):
                         **kwargs,
                     )
                     self.views[key].grid(
-                        row=0, column=0, sticky="nsew", pady=(0, CONTENT_BOTTOM_INSET)
+                        row=0, column=0, sticky="nsew", pady=(0, self._view_bottom_inset(key))
                     )
                     break
         else:
             self.views[key].grid(
-                row=0, column=0, sticky="nsew", pady=(0, CONTENT_BOTTOM_INSET)
+                row=0, column=0, sticky="nsew", pady=(0, self._view_bottom_inset(key))
             )
             if key == "servers":
                 servers_view = self.views[key]
