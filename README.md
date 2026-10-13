@@ -41,6 +41,8 @@ Default demo login (API / auth): `admin` / `admin123` (change in production).
 | **Restore** | Restore from local or remote backup artifacts |
 | **Dashboard** | KPIs, host gauges, DB performance chart, security/activity panels |
 | **Logs** | In-app execution log (filter, search, export) |
+| **Patching** | Run a SQL script against the connected database |
+| **MySQL Patch Management** | Read-only Ubuntu MySQL package check, dry-run, and job history. See [docs/mysql_patch_management.md](docs/mysql_patch_management.md). Packages are not installed in this version |
 | **Reports** | Filterable operations report + CSV/PDF export |
 | **Settings** | Theme (dark/light) and app preferences |
 
@@ -157,7 +159,7 @@ Shared contracts live in `backend/models/schemas.py` (Pydantic). Important types
 | `DashboardStats` | Aggregated dashboard numbers |
 | `UserLogin` / `UserCreate` / `UserResponse` / `TokenResponse` | Auth API |
 
-Desktop-specific session objects (connection result, employee session, saved servers JSON) sit under `desktop/` and `config/saved_servers.json`.
+Desktop-specific session objects (connection result, employee session) sit under `desktop/`. Saved servers, employee accounts, and UI preferences are runtime data in `var/data/`.
 
 ---
 
@@ -283,7 +285,7 @@ Details: [docs/api.md](docs/api.md).
 
 - **Theme tokens** — `desktop/theme.py` (dark / light palettes, spacing, radius, type scale).
 - **Shared widgets** — `desktop/design_system.py`, `desktop/overlay.py` (dialogs, toasts).
-- Preferences persist in `config/ui_preferences.json` (theme, remembered login).
+- Preferences persist in `var/data/ui_preferences.json` (theme, remembered login).
 
 ---
 

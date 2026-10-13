@@ -12,9 +12,7 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_DIR = PROJECT_ROOT / "config"
-LOGS_DIR = PROJECT_ROOT / "logs"
+from backend.core.paths import BACKUPS_DIR, CONFIG_DIR, LOGS_DIR, PROJECT_ROOT
 
 
 class DatabaseConnectionConfig(BaseSettings):
@@ -32,7 +30,7 @@ class DatabaseConnectionConfig(BaseSettings):
 class BackupConfig(BaseSettings):
     """Backup-related settings."""
 
-    output_dir: Path = Field(default=PROJECT_ROOT / "backups")
+    output_dir: Path = Field(default=BACKUPS_DIR)
     compression: bool = True
     compression_format: str = "gzip"  # gzip, zip, none
     retention_days: int = 30
@@ -102,7 +100,27 @@ class Settings(BaseSettings):
                 profile_data = yaml.safe_load(f) or {}
                 data = _deep_merge(data, profile_data)
 
+        _resolve_runtime_paths(data)
         return cls(**data)
+
+
+def _resolve_runtime_paths(data: dict[str, Any]) -> None:
+    """Turn relative backup and log paths into paths under the project root."""
+    backup = data.get("backup")
+    if isinstance(backup, dict) and backup.get("output_dir"):
+        backup["output_dir"] = str(_under_root(backup["output_dir"]))
+    logging_cfg = data.get("logging")
+    if isinstance(logging_cfg, dict):
+        for key in ("audit_log_path", "app_log_path"):
+            if logging_cfg.get(key):
+                logging_cfg[key] = str(_under_root(logging_cfg[key]))
+
+
+def _under_root(value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return (PROJECT_ROOT / path).resolve()
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

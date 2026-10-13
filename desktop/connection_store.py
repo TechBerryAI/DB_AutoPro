@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from pathlib import Path
 
+from backend.core.paths import DATA_DIR
 from backend.models.schemas import DatabaseType
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-STORE_PATH = PROJECT_ROOT / "config" / "saved_servers.json"
+STORE_PATH = DATA_DIR / "saved_servers.json"
 
 
 @dataclass

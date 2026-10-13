@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.connectors.base import get_connector
-from backend.core.config import PROJECT_ROOT
+from backend.core.paths import LOGS_DIR
 from backend.core.exceptions import PatchError
 from backend.core.logging import get_audit_logger, get_logger
 from backend.models.schemas import OperationStatus, PatchHistoryEntry, PatchRequest
@@ -16,7 +16,7 @@ from backend.models.schemas import OperationStatus, PatchHistoryEntry, PatchRequ
 logger = get_logger("services.patch")
 audit = get_audit_logger()
 
-HISTORY_FILE = PROJECT_ROOT / "logs" / "patch_history.json"
+HISTORY_FILE = LOGS_DIR / "patch_history.json"
 
 
 class PatchService:

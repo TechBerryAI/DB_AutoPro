@@ -33,6 +33,7 @@ from desktop.views.logs_view import LogsView
 from desktop.views.migration_view import MigrationView
 from desktop.views.monitoring_view import MonitoringView
 from desktop.views.patch_view import PatchView
+from desktop.views.mysql_patch_view import MysqlPatchView
 from desktop.views.reports_view import ReportsView
 from desktop.views.restore_view import RestoreView
 from backend.models.schemas import DatabaseType
@@ -63,6 +64,7 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
             ("restore", "Restore", RestoreView),
             ("migration", "Migration", MigrationView),
             ("patching", "Patching", PatchView),
+            ("mysql_patch", "MySQL Patch Management", MysqlPatchView),
         ],
     ),
     (
@@ -1315,6 +1317,8 @@ class DatabaseAutomationApp(ctk.CTk):
                             kwargs["saved_server"] = restore
                         if extra.get("new_connection"):
                             kwargs["new_connection"] = True
+                    elif view_cls is MysqlPatchView:
+                        kwargs["employee"] = self.employee
                     elif view_cls is LogsView:
                         kwargs["log_store"] = self.log_store
                         kwargs["register_log_panel"] = self._register_log_panel

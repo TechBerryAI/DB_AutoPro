@@ -19,7 +19,7 @@ connections:
     ssl_mode: prefer
 
 backup:
-  output_dir: "./backups"
+  output_dir: "./var/backups"
   compression: true
   compression_format: gzip
   retention_days: 30
@@ -34,8 +34,8 @@ jwt:
 logging:
   level: INFO
   format: json
-  audit_log_path: "./logs/audit.log"
-  app_log_path: "./logs/app.log"
+  audit_log_path: "./var/logs/audit.log"
+  app_log_path: "./var/logs/app.log"
 
 allowed_roles:
   - admin

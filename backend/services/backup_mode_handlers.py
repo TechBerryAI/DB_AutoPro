@@ -814,14 +814,27 @@ def _mysql_full(
     from backend.services.ssh_client import ssh_options_for_backup
 
     ssh = ssh_options_for_backup(request, conn)
-    if request.use_remote_exec and not ssh:
-        raise BackupError(
-            "Saving on the Linux server requires SSH on the connection. "
-            "Enable SSH Tunnel and reconnect."
-        )
-    if ssh:
+    if request.use_remote_exec:
+        if not ssh:
+            raise BackupError(
+                "Saving on the Linux server requires SSH on the connection. "
+                "Enable SSH Tunnel and reconnect."
+            )
         return _mysql_full_via_ssh(request, output_path, conn, ssh, progress_callback)
-    return _mysql_full_local(request, output_path, conn, progress_callback)
+
+    # Local destination: dump on this PC when mysqldump is installed.
+    # Otherwise run mysqldump on the Linux host over SSH and download the file.
+    try:
+        return _mysql_full_local(request, output_path, conn, progress_callback)
+    except BackupError as exc:
+        if ssh and "not found" in str(exc).lower():
+            if progress_callback:
+                progress_callback(
+                    0.1,
+                    "mysqldump is not on this PC — running it on the Linux server, then downloading...",
+                )
+            return _mysql_full_via_ssh(request, output_path, conn, ssh, progress_callback)
+        raise
 
 
 def _mysql_full_local(
@@ -889,6 +902,44 @@ def _mysql_full_local(
     return sql_path
 
 
+def _best_effort_remove_remote(ssh: dict, remote_path: str) -> None:
+    """Delete a remote dump if the SSH user can; ignore permission errors."""
+    from backend.services.ssh_client import remove_remote_path
+
+    try:
+        remove_remote_path(ssh, remote_path)
+    except Exception:
+        pass
+
+
+def _mysql_ssh_staging_file(ssh: dict, remote_name: str) -> str:
+    """Writable path on the Linux host for a dump that will be downloaded."""
+    import shlex
+
+    from backend.services.ssh_client import _ssh_kwargs, run_ssh_command
+
+    code, home_out, _err = run_ssh_command(
+        command='printf %s "$HOME"',
+        timeout=30,
+        **_ssh_kwargs(ssh),
+    )
+    home = (home_out or "").strip() if code == 0 else ""
+    if not home:
+        user = str(ssh.get("username") or "user").strip() or "user"
+        home = f"/home/{user}"
+    staging = f"{home.rstrip('/')}/db_autopro_staging"
+    mkdir = (
+        f"mkdir -p {shlex.quote(staging)} && test -w {shlex.quote(staging)}"
+    )
+    code, _out, err = run_ssh_command(command=mkdir, timeout=30, **_ssh_kwargs(ssh))
+    if code != 0:
+        raise BackupError(
+            "Could not create a writable staging folder on the Linux server "
+            f"({staging}): {(err or '').strip() or f'exit {code}'}"
+        )
+    return f"{staging}/{remote_name}"
+
+
 def _mysql_full_via_ssh(
     request: BackupRequest,
     output_path: Path,
@@ -938,7 +989,7 @@ def _mysql_full_via_ssh(
             raise BackupError(str(exc)) from exc
         remote_path = f"{backup_root}/{remote_name}"
     else:
-        remote_path = f"/tmp/{remote_name}"
+        remote_path = _mysql_ssh_staging_file(ssh, remote_name)
 
     # From the Linux host, MySQL is usually on localhost.
     mysql_host, mysql_port = pg_endpoint_from_connection(conn)
@@ -946,44 +997,28 @@ def _mysql_full_via_ssh(
     password = conn.password
     scope_flags = " ".join(shlex.quote(a) for a in build_mysqldump_scope_args(request))
     table_args = " ".join(shlex.quote(t) for t in tables)
-    common_flags = (
-        f"--single-transaction --routines --triggers --events "
-        f"--result-file={shlex.quote(remote_path)}"
-    )
     db_q = shlex.quote(db)
-
-    # Prefer socket/privileged mysqldump (sees all schemas); fall back to DB user.
-    linux_password = str(ssh.get("password") or "")
-    candidates = [
-        (
-            f"mysqldump -h {shlex.quote(mysql_host)} -P {mysql_port} "
-            f"{scope_flags} {common_flags} {db_q} {table_args}"
-        ).strip(),
-        (
-            f"sudo -n mysqldump -h {shlex.quote(mysql_host)} -P {mysql_port} "
-            f"{scope_flags} {common_flags} {db_q} {table_args}"
-        ).strip(),
-        (
-            f"MYSQL_PWD={shlex.quote(password)} mysqldump "
-            f"-h {shlex.quote(mysql_host)} -P {mysql_port} -u {shlex.quote(user)} "
-            f"{scope_flags} {common_flags} {db_q} {table_args}"
-        ).strip(),
+    auth = (
+        f"MYSQL_PWD={shlex.quote(password)} mysqldump "
+        f"-h {shlex.quote(mysql_host)} -P {mysql_port} -u {shlex.quote(user)}"
+    )
+    result_file = f"--result-file={shlex.quote(remote_path)}"
+    # Database login first. Passwordless/sudo dumps create root-owned files the
+    # SSH user cannot replace, which makes the next attempt fail with errno 13.
+    flag_sets = [
+        f"{scope_flags} --single-transaction --routines --triggers --events {result_file}".strip(),
+        f"{scope_flags} --single-transaction --routines --triggers {result_file}".strip(),
+        f"{scope_flags} --single-transaction {result_file}".strip(),
     ]
-    if linux_password:
-        pw = shlex.quote(linux_password)
-        candidates.insert(
-            1,
-            (
-                f"printf '%s\\n' {pw} | sudo -S -p '' mysqldump "
-                f"-h {shlex.quote(mysql_host)} -P {mysql_port} "
-                f"{scope_flags} {common_flags} {db_q} {table_args}"
-            ).strip(),
-        )
+    candidates = [
+        f"{auth} {flags} {db_q} {table_args}".strip()
+        for flags in flag_sets
+    ]
 
     if progress_callback:
         progress_callback(0.12, "Running mysqldump on Linux server...")
 
-    remove_remote_path(ssh, remote_path)
+    _best_effort_remove_remote(ssh, remote_path)
     last_err = ""
     ok = False
     for command in candidates:
@@ -1000,7 +1035,11 @@ def _mysql_full_via_ssh(
             ok = True
             break
         last_err = (err or "").strip() or f"exit {code}"
-        remove_remote_path(ssh, remote_path)
+        lowered = last_err.lower()
+        # Privilege errors can succeed with fewer flags. Other failures will not.
+        if not any(token in lowered for token in ("access denied", "privilege", "super")):
+            break
+        _best_effort_remove_remote(ssh, remote_path)
 
     if not ok:
         raise BackupError(f"Remote mysqldump failed: {last_err}")
