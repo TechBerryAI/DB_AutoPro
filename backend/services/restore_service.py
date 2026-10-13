@@ -449,10 +449,72 @@ class RestoreService:
             f"-p{conn.password}",
             db,
         ]
-        with backup_path.open(encoding="utf-8", errors="replace") as f:
-            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+        try:
+            with backup_path.open(encoding="utf-8", errors="replace") as f:
+                result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+        except FileNotFoundError:
+            from backend.services.ssh_client import ssh_options_from_connection
+
+            ssh = ssh_options_from_connection(conn)
+            if not ssh:
+                raise RestoreError(
+                    "'mysql' was not found on this PC. Install MySQL client tools and add them to PATH, "
+                    "or enable SSH on the connection so the restore can run on the Linux server."
+                )
+            if progress_callback:
+                progress_callback(
+                    0.2,
+                    "mysql is not on this PC — uploading the backup and restoring on the Linux server...",
+                )
+            remote_source = self._upload_local_backup_for_restore(ssh, backup_path, progress_callback)
+            try:
+                self._restore_mysql_via_ssh(
+                    request, conn, db, remote_source, ssh, progress_callback
+                )
+            finally:
+                from backend.services.ssh_client import remove_remote_path
+
+                try:
+                    remove_remote_path(ssh, remote_source)
+                except Exception:
+                    pass
+            return
         if result.returncode != 0:
             raise RestoreError(f"MySQL restore failed: {result.stderr}")
+
+    def _upload_local_backup_for_restore(
+        self,
+        ssh: dict,
+        backup_path: Path,
+        progress_callback: Callable[[float, str], None] | None,
+    ) -> str:
+        """Copy a local backup onto the Linux host so mysql/psql can read it."""
+        import shlex
+
+        from backend.services.ssh_client import _ssh_kwargs, run_ssh_command, upload_remote_file
+
+        code, home_out, _err = run_ssh_command(
+            command='printf %s "$HOME"',
+            timeout=30,
+            **_ssh_kwargs(ssh),
+        )
+        home = (home_out or "").strip() if code == 0 else ""
+        if not home:
+            user = str(ssh.get("username") or "user").strip() or "user"
+            home = f"/home/{user}"
+        staging = f"{home.rstrip('/')}/db_autopro_staging"
+        mkdir = f"mkdir -p {shlex.quote(staging)} && test -w {shlex.quote(staging)}"
+        code, _out, err = run_ssh_command(command=mkdir, timeout=30, **_ssh_kwargs(ssh))
+        if code != 0:
+            raise RestoreError(
+                "Could not create a writable folder on the Linux server "
+                f"({staging}): {(err or '').strip() or f'exit {code}'}"
+            )
+        remote_path = f"{staging}/{backup_path.name}"
+        if progress_callback:
+            progress_callback(0.3, f"Uploading {backup_path.name} to the Linux server...")
+        upload_remote_file(ssh, backup_path, remote_path)
+        return remote_path
 
     def _restore_mysql_via_ssh(
         self,

@@ -18,7 +18,7 @@ APP_ROOT = Path(__file__).resolve().parent
 
 
 def _crash_log_path() -> Path:
-    return APP_ROOT / "logs" / "launcher_error.log"
+    return APP_ROOT / "var" / "logs" / "launcher_error.log"
 
 
 def _report_startup_failure(exc: BaseException) -> None:
@@ -92,7 +92,7 @@ def _selftest() -> int:
 
     status = "FAIL" if failures else "PASS"
     summary = f"{status}: {len(modules) - len(failures)}/{len(modules)} modules imported"
-    report = APP_ROOT / "logs" / "selftest.log"
+    report = APP_ROOT / "var" / "logs" / "selftest.log"
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text("\n".join([summary, *failures]), encoding="utf-8")
     return 1 if failures else 0

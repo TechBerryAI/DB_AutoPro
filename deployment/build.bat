@@ -89,13 +89,13 @@ popd
 set DAP_SELFTEST=
 if not "%RC%"=="0" (
     echo [ERROR] Packaged executable self-test failed:
-    if exist "%APP_DIR%\logs\selftest.log" type "%APP_DIR%\logs\selftest.log"
+    if exist "%APP_DIR%\var\logs\selftest.log" type "%APP_DIR%\var\logs\selftest.log"
     exit /b 1
 )
-type "%APP_DIR%\logs\selftest.log"
+type "%APP_DIR%\var\logs\selftest.log"
 echo.
 REM Self-test artefacts must not be shipped inside the installer.
-if exist "%APP_DIR%\logs"   rmdir /s /q "%APP_DIR%\logs"
+if exist "%APP_DIR%\var"   rmdir /s /q "%APP_DIR%\var"
 if exist "%APP_DIR%\config\employees.json" del "%APP_DIR%\config\employees.json"
 echo       executable OK: "%APP_DIR%\Data Automation Pro.exe"
 echo.

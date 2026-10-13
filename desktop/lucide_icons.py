@@ -45,6 +45,7 @@ LUCIDE_ALIASES: dict[str, str] = {
     "cpu": "cpu",
     "migration": "briefcase",
     "patching": "circle-check",
+    "mysql_patch": "database-zap",
     "monitoring": "activity",
 }
 

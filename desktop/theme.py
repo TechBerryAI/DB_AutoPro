@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import customtkinter as ctk
 
-THEME_PREF_PATH = Path(__file__).resolve().parent.parent / "config" / "ui_preferences.json"
+from backend.core.paths import DATA_DIR
+
+THEME_PREF_PATH = DATA_DIR / "ui_preferences.json"
 
 RADIUS = {"sm": 8, "md": 12, "lg": 14, "xl": 16, "pill": 999}
 

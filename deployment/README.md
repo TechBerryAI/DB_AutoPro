@@ -41,8 +41,9 @@ it does from a checkout:
 ```
 <install dir>/Data Automation Pro.exe
 <install dir>/config/            default.yaml, dev.yaml, prod.yaml, test.yaml
-<install dir>/logs/              audit.log, app.log, patch_history.json
-<install dir>/backups/           default backup output directory
+<install dir>/var/logs/          audit.log, app.log, patch_history.json
+<install dir>/var/backups/       default backup output directory
+<install dir>/var/data/          saved servers, employees, UI preferences
 <install dir>/desktop/assets/lucide/
 ```
 
@@ -50,8 +51,8 @@ This is why **no application module needed to be modified** for packaging.
 
 ### Files deliberately not shipped
 
-`config\saved_servers.json` and `config\ui_preferences.json` hold **plaintext
-credentials** and are never bundled. `config\employees.json` is not bundled
+`var\data\saved_servers.json` and `var\data\ui_preferences.json` hold **plaintext
+credentials** and are never bundled. `var\data\employees.json` is not bundled
 either — `desktop/employee_store.py` re-seeds a default `admin` / `admin123`
 account on first launch. A fresh install therefore contains no secrets.
 

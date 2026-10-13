@@ -1,11 +1,30 @@
+# Local environments
 venv/
+.venv/
+.env
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime data written by the app (logs, backups, saved connections)
+var/*
+!var/.gitkeep
 logs/
-*.log
-.env
 backups/
+
+# Build / packaging
 dist/
+build/
 deployment/build/
+
+# Editors
+.idea/
+.vscode/

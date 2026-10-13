@@ -12,7 +12,7 @@ connections:
     password: test_pass
 
 backup:
-  output_dir: "./backups/test"
+  output_dir: "./var/backups/test"
   retention_days: 3
 
 logging:

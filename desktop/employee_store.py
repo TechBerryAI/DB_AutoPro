@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 import bcrypt
 
+from backend.core.paths import DATA_DIR
 from backend.models.schemas import UserRole
 
-EMPLOYEES_PATH = Path(__file__).resolve().parent.parent / "config" / "employees.json"
+EMPLOYEES_PATH = DATA_DIR / "employees.json"
 
 
 @dataclass
