@@ -17,7 +17,7 @@ from desktop.theme import (
     save_last_credentials,
     save_last_username,
 )
-from desktop.window_icon import schedule_window_icon
+from desktop.window_icon import prepare_ctk_shutdown, schedule_window_icon
 
 ENTRY_HEIGHT = 36
 BODY_PAD_X = 28
@@ -552,6 +552,10 @@ class AuthDialog(ctk.CTk):
 
         save_last_credentials(username, password)
         self._show_registration_success(full_name, username)
+
+    def destroy(self) -> None:
+        prepare_ctk_shutdown(self)
+        super().destroy()
 
     def _on_close(self) -> None:
         self.session = None

@@ -85,6 +85,33 @@ def apply_window_icon(window) -> None:
         pass
 
 
+def prepare_ctk_shutdown(window) -> None:
+    """Drop scheduled DPI and redraw callbacks before a root window is destroyed.
+
+    Login uses one CustomTkinter root and the main window uses another. If the
+    DPI check is still queued, Tcl runs it after the first root is gone and
+    reports that the application has been destroyed.
+    """
+    try:
+        if window.winfo_exists():
+            for after_id in list(window.tk.call("after", "info")):
+                try:
+                    window.after_cancel(after_id)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker
+
+        ScalingTracker.window_widgets_dict.pop(window, None)
+        ScalingTracker.window_dpi_scaling_dict.pop(window, None)
+        if not ScalingTracker.window_widgets_dict:
+            ScalingTracker.update_loop_running = False
+    except Exception:
+        pass
+
+
 def schedule_window_icon(window) -> None:
     """Apply now and again after CTk's delayed default-icon hook (~200ms)."""
     apply_window_icon(window)
