@@ -1,4 +1,5 @@
 
+
 name: DB AutoPro CI
 
 on:
@@ -7,12 +8,14 @@ on:
       - main
       - master
       - develop
+      - Ganesh
 
   pull_request:
     branches:
       - main
       - master
       - develop
+      - Ganesh
 
   workflow_dispatch:
 
