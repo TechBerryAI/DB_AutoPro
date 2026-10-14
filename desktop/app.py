@@ -16,7 +16,7 @@ from desktop.execution_log import ExecutionLogPanel, ExecutionLogStore
 from desktop.lucide_icons import lucide_ctk_image
 from desktop.shell_header import ShellHeader, display_name, initials, role_label
 from desktop.status_footer import StatusFooterBar
-from desktop.window_icon import schedule_window_icon
+from desktop.window_icon import prepare_ctk_shutdown, schedule_window_icon
 from desktop.theme import (
     CONTENT_BOTTOM_INSET,
     ThemeManager,
@@ -1500,6 +1500,10 @@ class DatabaseAutomationApp(ctk.CTk):
             destructive=True,
             on_confirm=self._do_sign_out,
         )
+
+    def destroy(self) -> None:
+        prepare_ctk_shutdown(self)
+        super().destroy()
 
     def _do_sign_out(self) -> None:
         close_ssh_tunnel()

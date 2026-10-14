@@ -119,7 +119,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit:
+    except (SystemExit, KeyboardInterrupt):
         raise
     except BaseException as exc:  # noqa: BLE001 - last-resort launcher guard
         _report_startup_failure(exc)
