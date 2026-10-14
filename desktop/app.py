@@ -87,6 +87,15 @@ PATCH_SUBNAV: list[tuple[str, str, type]] = [
     ("mysql_patch", "MySQL Patch Management", MysqlPatchView),
 ]
 
+
+def mysql_software_patch_visible(connection) -> bool:
+    """MySQL software patching is offered only for a connected MySQL server."""
+    if connection is None:
+        return False
+    db_type = getattr(connection, "db_type", None)
+    value = getattr(db_type, "value", db_type)
+    return str(value or "").strip().lower() == "mysql"
+
 NAV_ITEMS: list[tuple[str, str, type]] = [
     (key, label, cls) for _, items in NAV_GROUPS for key, label, cls in items
 ] + PATCH_SUBNAV
@@ -998,6 +1007,9 @@ class DatabaseAutomationApp(ctk.CTk):
         disconnected: bool = False,
     ) -> None:
         self._propagate_connection()
+        if self._active_nav == "mysql_patch" and not mysql_software_patch_visible(self.connection):
+            self.navigate("dashboard" if self.connection is None else "patching", log=False)
+            return
         if disconnected and self._active_nav in CONNECTION_REQUIRED_KEYS:
             self.navigate("dashboard", log=False)
         elif navigate_to:
@@ -1008,6 +1020,7 @@ class DatabaseAutomationApp(ctk.CTk):
                 view.resume()
             elif hasattr(view, "refresh"):
                 view.refresh()
+        self._style_patch_subnav()
 
     def _propagate_connection(self) -> None:
         """Update cached views with the current connection without destroying them."""
@@ -1052,6 +1065,13 @@ class DatabaseAutomationApp(ctk.CTk):
 
     def _toggle_patch_nav(self) -> None:
         """Expand or collapse software-patch pages under Patching."""
+        if not mysql_software_patch_visible(self.connection):
+            self._patch_nav_expanded = False
+            if self._active_nav != "patching":
+                self.navigate("patching")
+            else:
+                self._style_navigation("patching")
+            return
         if self._patch_nav_expanded:
             self._patch_nav_expanded = False
             self._style_patch_subnav()
@@ -1066,12 +1086,17 @@ class DatabaseAutomationApp(ctk.CTk):
         self._style_patch_subnav()
 
     def _navigate_patch_child(self, key: str) -> None:
+        if key == "mysql_patch" and not mysql_software_patch_visible(self.connection):
+            self._patch_nav_expanded = False
+            self._style_patch_subnav()
+            return
         self._patch_nav_expanded = True
         self.navigate(key)
 
     def _style_patch_subnav(self) -> None:
         t = self._t
-        show = self._patch_nav_expanded and not self._sidebar_collapsed
+        mysql_ready = mysql_software_patch_visible(self.connection)
+        show = mysql_ready and self._patch_nav_expanded and not self._sidebar_collapsed
         frame = self._patch_subnav_frame
         if frame is not None:
             if show:
@@ -1085,9 +1110,18 @@ class DatabaseAutomationApp(ctk.CTk):
                 frame.pack_forget()
         parent = self.nav_buttons.get("patching")
         if parent is not None:
-            arrow = "▾" if show else "▸"
-            parent.configure(text=f"  {arrow}  Patching")
+            if mysql_ready:
+                arrow = "▾" if show else "▸"
+                parent.configure(text=f"  {arrow}  Patching")
+            else:
+                parent.configure(text="  Patching")
         for child_key, btn in self._patch_sub_buttons.items():
+            if child_key == "mysql_patch" and not mysql_ready:
+                if btn.winfo_manager():
+                    btn.pack_forget()
+                continue
+            if not btn.winfo_manager():
+                btn.pack(fill="x", pady=0, padx=6)
             active = show and self._active_nav == child_key
             if active:
                 btn.configure(
@@ -1375,6 +1409,15 @@ class DatabaseAutomationApp(ctk.CTk):
                 self._active_saved_connection = extra.get("saved_server")
             elif self._servers_filter != "all":
                 self._active_saved_connection = None
+
+        if key == "mysql_patch" and not mysql_software_patch_visible(self.connection):
+            self._patch_nav_expanded = False
+            fallback = "patching" if self.connection is not None else "dashboard"
+            if self._active_nav != fallback:
+                self.navigate(fallback, log=False)
+            else:
+                self._style_navigation(self._active_nav)
+            return
 
         self._active_nav = key
         if key != "servers":
