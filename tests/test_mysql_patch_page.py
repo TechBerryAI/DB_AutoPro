@@ -6,7 +6,13 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from backend.services.mysql_patch.models import MysqlPatchAuditRecord
-from desktop.app import CONNECTION_REQUIRED_KEYS, NAV_GROUPS, NAV_ITEMS, PATCH_SUBNAV
+from desktop.app import (
+    CONNECTION_REQUIRED_KEYS,
+    NAV_GROUPS,
+    NAV_ITEMS,
+    PATCH_SUBNAV,
+    mysql_software_patch_visible,
+)
 from desktop.mysql_patch_export import export_patch_csv, export_patch_pdf
 from desktop.mysql_patch_flow import apply_allowed, approve_allowed, plan_allowed, precheck_allowed, refresh_allowed
 
@@ -20,6 +26,16 @@ def test_mysql_patch_page_is_in_operations_and_does_not_require_a_db_session():
     assert child_keys == ["mysql_patch"]
     assert "mysql_patch" in item_keys
     assert "mysql_patch" not in CONNECTION_REQUIRED_KEYS
+
+
+def test_mysql_patch_menu_is_only_for_a_connected_mysql_server():
+    mysql = SimpleNamespace(db_type=SimpleNamespace(value="mysql"))
+    postgres = SimpleNamespace(db_type=SimpleNamespace(value="postgresql"))
+
+    assert mysql_software_patch_visible(mysql) is True
+    assert mysql_software_patch_visible(postgres) is False
+    assert mysql_software_patch_visible(SimpleNamespace(db_type="oracle")) is False
+    assert mysql_software_patch_visible(None) is False
 
 
 def test_apply_stays_disabled_until_precheck_preview_and_approval():

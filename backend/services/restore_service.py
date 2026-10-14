@@ -269,7 +269,9 @@ class RestoreService:
         if path.is_dir():
             has_data = (
                 any(path.rglob("*.bson"))
+                or any(path.rglob("*.bson.gz"))
                 or any(path.rglob("*.metadata.json"))
+                or any(path.rglob("*.metadata.json.gz"))
                 or any(path.glob("*.archive"))
                 or any(path.glob("*.archive.gz"))
             )
@@ -285,6 +287,10 @@ class RestoreService:
             raise RestoreError(str(exc)) from exc
 
     def _decompress_if_needed(self, path: Path) -> Path:
+        name = path.name.lower()
+        # mongorestore reads these itself when --gzip is set.
+        if name.endswith((".bson.gz", ".metadata.json.gz", ".archive.gz")):
+            return path
         if path.suffix == ".gz":
             decompressed = path.with_suffix("")
             with gzip.open(path, "rb") as f_in, decompressed.open("wb") as f_out:

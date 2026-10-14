@@ -13,6 +13,7 @@ from backend.models.schemas import (
     MongoRestoreScope,
     RestoreRequest,
 )
+from backend.core.exceptions import RestoreError
 from backend.services.mongo_restore import plan_mongorestore
 from backend.services.restore_catalog import restore_method_label, restore_methods_for
 
@@ -64,6 +65,38 @@ def test_mongo_single_collection_accepts_bson_gz(tmp_path: Path) -> None:
     )
     assert "--gzip" in plan.extra_flags
     assert plan.collection == "users"
+
+
+def test_mongo_plain_bson_folder_does_not_add_gzip(tmp_path: Path) -> None:
+    dump = tmp_path / "plain"
+    coll = dump / "mydb"
+    coll.mkdir(parents=True)
+    (coll / "users.bson").write_bytes(b"fake")
+    (coll / "users.metadata.json").write_text("{}", encoding="utf-8")
+
+    plan = plan_mongorestore(
+        RestoreRequest(
+            backup_path=str(dump),
+            mongo_restore_scope=MongoRestoreScope.ALL_DATABASES,
+        ),
+        dump,
+    )
+    assert "--gzip" not in plan.extra_flags
+
+
+def test_mongo_single_collection_rejects_non_bson(tmp_path: Path) -> None:
+    source = tmp_path / "users.json"
+    source.write_text("{}", encoding="utf-8")
+    with pytest.raises(RestoreError, match=r"\.bson"):
+        plan_mongorestore(
+            RestoreRequest(
+                backup_path=str(source),
+                database="sales",
+                collection="users",
+                mongo_restore_scope=MongoRestoreScope.SINGLE_COLLECTION,
+            ),
+            source,
+        )
 
 
 def test_restore_catalog_exposes_mssql_and_oracle() -> None:
