@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 
-def precheck_allowed(*, server_selected: bool, backup_path: str, busy: bool) -> bool:
-    return server_selected and bool(backup_path.strip()) and not busy
+def precheck_allowed(
+    *,
+    server_selected: bool,
+    backup_path: str,
+    busy: bool,
+    backup_checked: bool = True,
+) -> bool:
+    return server_selected and bool(backup_path.strip()) and backup_checked and not busy
 
 
 def refresh_allowed(*, precheck_ready: bool, busy: bool) -> bool:

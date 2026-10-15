@@ -1,21 +1,19 @@
-
-
 name: DB AutoPro CI
 
 on:
   push:
     branches:
-      - main
-      - master
-      - develop
+      - production
+      - Development
       - Ganesh
+      - Riya
 
   pull_request:
     branches:
-      - main
-      - master
-      - develop
+      - production
+      - Development
       - Ganesh
+      - Riya
 
   workflow_dispatch:
 

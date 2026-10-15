@@ -17,7 +17,15 @@ from backend.services.mysql_patch.models import (
     PrecheckReport,
 )
 from backend.services.mysql_patch.plan_service import PlanService
-from backend.services.mysql_patch.precheck import PrecheckService
+from backend.services.mysql_patch.precheck import LocalBackupReadiness, PreparedBackupReadiness, PrecheckService
+from backend.services.mysql_patch.remote_backup import (
+    RemoteBackupBrowser,
+    RemoteBackupCheck,
+    RemoteBackupError,
+    RemoteBackupFile,
+    configured_backup_directory,
+    is_remote_linux_path,
+)
 from backend.services.mysql_patch.preview import PackagePreviewService
 from backend.services.mysql_patch.verification import VerificationService
 from backend.services.mysql_patch.redaction import redact_text
@@ -55,6 +63,9 @@ class MysqlPatchView(BaseView):
         self._plan: PatchPlan | None = None
         self._history: list[MysqlPatchAuditRecord] = []
         self._selected_job = ctk.StringVar(value="")
+        self._backup_origin = "local"
+        self._remote_check: RemoteBackupCheck | None = None
+        self._remote_browser = RemoteBackupBrowser()
         self._build()
         self._load_servers()
 
@@ -76,7 +87,7 @@ class MysqlPatchView(BaseView):
             scroll,
             self.theme,
             "MySQL Patch Management",
-            subtitle="Ubuntu MySQL package update. Apply runs a dry-run and does not install packages.",
+            subtitle="Ubuntu APT or CentOS Stream 10 DNF. Apply runs a dry-run and does not install packages.",
             pady=(0, 12),
         )
 
@@ -92,10 +103,24 @@ class MysqlPatchView(BaseView):
         path_row.grid_columnconfigure(0, weight=1)
         self.backup_path = ctk.CTkEntry(path_row, placeholder_text="Readable backup used for the precheck")
         self.backup_path.grid(row=0, column=0, sticky="ew")
-        self.backup_path.bind("<KeyRelease>", lambda _event: self._sync_buttons())
+        self.backup_path.bind("<KeyRelease>", self._on_backup_typed)
         secondary_button(path_row, self.theme, text="Browse", command=self._browse_backup, width=90).grid(
             row=0, column=1, padx=(8, 0)
         )
+        secondary_button(
+            path_row,
+            self.theme,
+            text="Browse Remote Backups",
+            command=self._browse_remote_backups,
+            width=170,
+        ).grid(row=0, column=2, padx=(8, 0))
+        self.backup_origin_label = ctk.CTkLabel(
+            path_row,
+            text="No backup selected",
+            anchor="w",
+            text_color=self.theme.c("text_secondary"),
+        )
+        self.backup_origin_label.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         self.detected = ctk.CTkLabel(
             form,
             text="OS, package manager, MySQL version, and repository appear after prechecks.",
@@ -223,15 +248,147 @@ class MysqlPatchView(BaseView):
         self._precheck = None
         self._preview = None
         self._plan = None
+        self._clear_backup_selection()
         self._sync_buttons()
+
+    def _clear_backup_selection(self) -> None:
+        self.backup_path.delete(0, "end")
+        self._backup_origin = "local"
+        self._remote_check = None
+        self._apply_backup_assessor()
+        self.backup_origin_label.configure(text="No backup selected")
+
+    def _on_backup_typed(self, _event) -> None:
+        self._backup_origin = "local"
+        self._remote_check = None
+        self._apply_backup_assessor()
+        if is_remote_linux_path(self.backup_path.get()):
+            self.backup_origin_label.configure(text="Remote path needs Browse Remote Backups before prechecks")
+        else:
+            self.backup_origin_label.configure(text="Windows local file")
+        self._sync_buttons()
+
+    def _set_backup_path(self, path: str) -> None:
+        self.backup_path.delete(0, "end")
+        self.backup_path.insert(0, path)
 
     def _browse_backup(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("Backup files", "*.sql *.gz *.dump"), ("All files", "*.*")])
         if not path:
             return
-        self.backup_path.delete(0, "end")
-        self.backup_path.insert(0, path)
+        self._set_backup_path(path)
+        self._backup_origin = "local"
+        self._remote_check = None
+        self._apply_backup_assessor()
+        self.backup_origin_label.configure(text="Windows local file")
         self._sync_buttons()
+
+    def _ssh_options(self, server: SavedServer) -> dict:
+        return {
+            "ssh_host": server.ssh_host or server.host,
+            "fallback_host": server.host,
+            "ssh_port": int(server.ssh_port or 22),
+            "username": server.linux_username,
+            "password": server.linux_password,
+        }
+
+    def _browse_remote_backups(self) -> None:
+        server = self._selected_server()
+        if server is None or self._busy:
+            return
+        directory = configured_backup_directory(server.remote_backup_dir)
+        ssh = self._ssh_options(server)
+
+        def work() -> list[RemoteBackupFile]:
+            return self._remote_browser.list_files(ssh, directory)
+
+        self._run_async(work, lambda files: self._show_remote_picker(server, directory, files))
+
+    def _show_remote_picker(self, server: SavedServer, directory: str, files: list[RemoteBackupFile]) -> None:
+        if not files:
+            self._show_error(f"No regular backup files were found in {directory}")
+            return
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Remote backups")
+        dialog.geometry("720x420")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            dialog,
+            text=f"Regular files in {directory}",
+            anchor="w",
+        ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
+        listing = ctk.CTkScrollableFrame(dialog)
+        listing.grid(row=1, column=0, padx=16, pady=8, sticky="nsew")
+        listing.grid_columnconfigure(0, weight=1)
+        selected = ctk.StringVar(value="")
+        for index, item in enumerate(files):
+            modified = item.modified_at.strftime("%Y-%m-%d %H:%M UTC")
+            ctk.CTkRadioButton(
+                listing,
+                text=f"{item.name}    {item.path}    {item.size} bytes    {modified}",
+                variable=selected,
+                value=item.name,
+            ).grid(row=index, column=0, sticky="w", pady=4)
+
+        def choose() -> None:
+            name = selected.get().strip()
+            if not name:
+                return
+            dialog.destroy()
+            self._validate_remote_selection(server, directory, name)
+
+        secondary_button(dialog, self.theme, text="Use selected file", command=choose).grid(
+            row=2, column=0, padx=16, pady=(8, 16), sticky="e"
+        )
+
+    def _validate_remote_selection(self, server: SavedServer, directory: str, name: str) -> None:
+        ssh = self._ssh_options(server)
+
+        def work() -> RemoteBackupCheck:
+            return self._remote_browser.validate_file(ssh, directory, name)
+
+        def done(check: RemoteBackupCheck) -> None:
+            self._set_backup_path(check.path)
+            self._backup_origin = "remote"
+            self._remote_check = check
+            self._apply_backup_assessor()
+            if check.state.value == "readable_unverified":
+                self.backup_origin_label.configure(text="Remote backup on the Linux server")
+            else:
+                self.backup_origin_label.configure(text="Remote backup failed the limited read")
+            self._write(self.log_box, check.summary)
+            self.log(check.summary)
+            self._sync_buttons()
+
+        self._run_async(work, done)
+
+    def _backup_is_checked(self) -> bool:
+        path = self.backup_path.get().strip()
+        if self._backup_origin == "remote":
+            return (
+                self._remote_check is not None
+                and self._remote_check.path == path
+                and self._remote_check.state.value == "readable_unverified"
+            )
+        return not is_remote_linux_path(path)
+
+    def _apply_backup_assessor(self) -> None:
+        if (
+            self._backup_origin == "remote"
+            and self._remote_check is not None
+            and self._remote_check.path == self.backup_path.get().strip()
+        ):
+            self._prechecks.use_backup_assessor(
+                PreparedBackupReadiness(
+                    self._remote_check.path,
+                    self._remote_check.state,
+                    self._remote_check.summary,
+                )
+            )
+            return
+        self._prechecks.use_backup_assessor(LocalBackupReadiness())
 
     def _sync_buttons(self) -> None:
         server_selected = self._selected_server() is not None
@@ -241,7 +398,14 @@ class MysqlPatchView(BaseView):
         plan_ready = self._plan is not None
         approved = bool(self._plan and self._plan.approval and self._plan.approval.high_risk_confirmed)
         self.precheck_button.configure(
-            state="normal" if precheck_allowed(server_selected=server_selected, backup_path=backup, busy=self._busy) else "disabled"
+            state="normal"
+            if precheck_allowed(
+                server_selected=server_selected,
+                backup_path=backup,
+                busy=self._busy,
+                backup_checked=self._backup_is_checked(),
+            )
+            else "disabled"
         )
         self.refresh_button.configure(state="normal" if refresh_allowed(precheck_ready=precheck_ready, busy=self._busy) else "disabled")
         self.plan_button.configure(state="normal" if plan_allowed(preview_accepted=preview_accepted, busy=self._busy) else "disabled")

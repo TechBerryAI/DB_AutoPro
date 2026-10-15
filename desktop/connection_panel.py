@@ -1000,6 +1000,7 @@ class ConnectionPanel(ctk.CTkFrame):
     def _on_disconnect(self) -> None:
         if self.disconnect_callback:
             self.disconnect_callback()
+        self._set_status("Disconnected. No active session.", "warning")
 
     def _wire_saved_item(self, widget, server: SavedServer, *, root: bool = False) -> None:
         """Make every part of a saved-connection row respond to a single click."""

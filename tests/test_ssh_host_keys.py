@@ -9,6 +9,7 @@ from backend.services.mysql_patch.command_runner import CMD_OS_RELEASE, SshComma
 from backend.services.ssh_host_keys import (
     SshHostKeyError,
     configure_ssh_client,
+    connect_verified_client,
     decide_host_key,
     fingerprint_sha256,
     host_key_error_from_bad_key,
@@ -51,6 +52,39 @@ def test_unknown_host_is_rejected_and_not_stored(tmp_path):
     assert client.host_keys.lookup("10.0.0.9") is None
     assert not path.exists()
     assert type(client.policy).__name__ != "AutoAddPolicy"
+
+
+def test_first_connection_stores_the_host_key_and_continues(tmp_path):
+    path = tmp_path / "ssh_known_hosts"
+    presented = _key()
+
+    class ConnectingClient(FakeSSHClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connects = 0
+
+        def close(self) -> None:
+            return None
+
+        def connect(self, **kwargs) -> None:
+            self.connects += 1
+            hostname = kwargs["hostname"]
+            if self.host_keys.lookup(hostname) is None:
+                self.policy.missing_host_key(self, hostname, presented)
+
+    client = ConnectingClient()
+    connect_verified_client(
+        client,
+        hostname="10.0.0.9",
+        port=22,
+        username="user",
+        password="secret-value",
+        known_hosts_path=path,
+    )
+
+    assert client.connects == 2
+    decide_host_key(load_known_hosts(path), "10.0.0.9", 22, presented)
+    assert "secret-value" not in path.read_text(encoding="utf-8")
 
 
 def test_matching_key_is_accepted_for_a_known_host(tmp_path):
