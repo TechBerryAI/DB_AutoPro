@@ -97,6 +97,7 @@ class BackupMethod(str, Enum):
     MONGORESTORE = "mongorestore"
     MSSQL_BACKUP = "mssql_backup"
     ORACLE_EXPDP = "expdp"
+    ORACLE_IMPDP = "impdp"
 
 
 _BACKUP_METHODS: dict[tuple[DatabaseType, BackupCategory], list[BackupMethod]] = {

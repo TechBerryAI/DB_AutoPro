@@ -16,6 +16,7 @@ from backend.services.mysql_patch.command_runner import (
     CommandResult,
     CommandRunner,
     apt_simulate_command,
+    dnf_upgrade_assumeno_command,
     is_allowed_command,
 )
 from backend.services.mysql_patch.errors import MysqlPatchSafetyError
@@ -46,10 +47,23 @@ RELATED_PACKAGES = frozenset(
         "libmysqlclient24",
     }
 )
+DNF_SCOPE = frozenset({"mysql8.4", "mysql8.4-common", "mysql8.4-errmsg", "mysql8.4-server"})
 
 _INST = re.compile(r"^Inst (?P<name>\S+)(?: \[(?P<old>[^\]]+)\])? \((?P<new>\S+)")
 _REMV = re.compile(r"^Remv (?P<name>\S+)(?: \[(?P<old>[^\]]+)\])?")
 _SUMMARY = re.compile(r"(?P<up>\d+) upgraded, (?P<new>\d+) newly installed, (?P<rem>\d+) to remove")
+_DNF_LINE = re.compile(
+    r"^(?P<name>[A-Za-z0-9._+-]+)\s+\S+\s+(?P<version>\d\S+)\s+\S+\s+\S+"
+)
+_DNF_SECTIONS = {
+    "upgrading:": "upgrade",
+    "installing:": "install",
+    "installing dependencies:": "install",
+    "removing:": "remove",
+    "removing dependent packages:": "remove",
+    "downgrading:": "downgrade",
+    "reinstalling:": "reinstall",
+}
 
 
 class PackagePreviewService:
@@ -88,6 +102,22 @@ class PackagePreviewService:
         version = precheck.discovery.candidate_version
         if not package or not version:
             return self._fail(report, "MySQL candidate package is missing from discovery")
+        if precheck.discovery.package_manager.value == "dnf":
+            return self._preview_dnf(
+                runner,
+                report,
+                precheck.discovery.mysql_server_package or "",
+                precheck.discovery.candidate_version or "",
+            )
+        return self._preview_apt(runner, report, package, version)
+
+    def _preview_apt(
+        self,
+        runner: CommandRunner,
+        report: PackagePreviewReport,
+        package: str,
+        version: str,
+    ) -> PackagePreviewReport:
         try:
             command = apt_simulate_command(package, version)
         except MysqlPatchSafetyError as exc:
@@ -118,11 +148,62 @@ class PackagePreviewService:
         if problem:
             return self._fail(report, problem)
         report.accepted = True
+        report.simulation_only = True
         report.checks.append(
             DiscoveryCheck(
                 code="package_preview",
                 status=CheckStatus.PASS,
                 summary=f"Simulation changes only MySQL-related packages and removes nothing ({len(changes)} change(s))",
+            )
+        )
+        return report
+
+    def _preview_dnf(
+        self,
+        runner: CommandRunner,
+        report: PackagePreviewReport,
+        target_package: str,
+        target_version: str,
+    ) -> PackagePreviewReport:
+        try:
+            command = dnf_upgrade_assumeno_command()
+        except MysqlPatchSafetyError as exc:
+            return self._fail(report, str(exc))
+        try:
+            result = self._run(runner, report, command)
+        except MysqlPatchSafetyError as exc:
+            return self._fail(report, str(exc))
+        except Exception as exc:
+            return self._fail(report, redact_text(str(exc)) or "Package simulation failed")
+
+        report.output_excerpt = redact_text(f"{result.stdout}\n{result.stderr}"[-4000:])
+        combined = f"{result.stdout}\n{result.stderr}"
+        if "complete!" in combined.lower() or "running transaction" in combined.lower():
+            return self._fail(report, "DNF simulation looked like a completed transaction")
+        if result.exit_code not in {0, 1}:
+            detail = redact_text(result.stderr.strip().splitlines()[0]) if result.stderr.strip() else "dnf simulation failed"
+            return self._fail(report, f"Package simulation failed ({detail})")
+        if result.exit_code == 1 and "operation aborted" not in combined.lower() and "nothing to do" not in combined.lower():
+            return self._fail(report, "DNF simulation did not stop before making changes")
+
+        changes, summary, problem = parse_dnf_simulation(result.stdout)
+        report.changes = changes
+        report.transaction_summary = summary
+        report.simulation_only = True
+        if problem:
+            return self._fail(report, problem)
+        problem = assess_dnf_changes(changes, target_package=target_package, target_version=target_version)
+        if problem:
+            return self._fail(report, problem)
+        report.accepted = True
+        report.checks.append(
+            DiscoveryCheck(
+                code="package_preview",
+                status=CheckStatus.PASS,
+                summary=(
+                    "DNF simulation with --assumeno changes only the scoped MySQL packages "
+                    f"and removes nothing ({len(changes)} change(s))"
+                ),
             )
         )
         return report
@@ -141,6 +222,78 @@ class PackagePreviewService:
         report.stop_reason = summary
         report.checks.append(DiscoveryCheck(code="package_preview", status=CheckStatus.FAIL, summary=summary))
         return report
+
+
+def assess_dnf_changes(
+    changes: list[PackageChange],
+    *,
+    target_package: str,
+    target_version: str,
+) -> str | None:
+    """Reject removals, unrelated packages, and a different server-package EVR."""
+    if not changes:
+        return "Package simulation did not propose a package change"
+    expected = parse_mysql_version(target_version)
+    server = next((item for item in changes if item.name == target_package), None)
+    if server is None or server.action not in {"upgrade", "install"}:
+        return f"{target_package or 'mysql8.4-server'} was not included as an install or upgrade"
+    if server.target_version != target_version:
+        return "Simulated target version does not match the discovered candidate"
+    for change in changes:
+        if change.action in {"remove", "downgrade"}:
+            return f"Package simulation would {change.action} {change.name}"
+        if change.name not in DNF_SCOPE:
+            return f"Unrelated package {change.name} would be updated"
+        parsed = parse_mysql_version(change.target_version)
+        if expected is None or parsed is None or (parsed.major, parsed.minor) != (expected.major, expected.minor):
+            return f"{change.name} would move outside the MySQL 8.4 release series"
+    return None
+
+
+def parse_dnf_simulation(text: str) -> tuple[list[PackageChange], str | None, str | None]:
+    """Parse a `dnf upgrade --assumeno` transaction. Nothing was installed."""
+    if "nothing to do" in text.lower():
+        return [], None, "Package simulation did not propose a package change"
+    action: str | None = None
+    changes: list[PackageChange] = []
+    summary_lines: list[str] = []
+    in_summary = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("="):
+            continue
+        key = stripped.lower()
+        if key in _DNF_SECTIONS:
+            action = _DNF_SECTIONS[key]
+            in_summary = False
+            continue
+        if key.startswith("transaction summary"):
+            in_summary = True
+            action = None
+            continue
+        if in_summary:
+            summary_lines.append(stripped)
+            continue
+        if action is None or key.startswith("package "):
+            continue
+        match = _DNF_LINE.match(stripped)
+        if match is None:
+            continue
+        changes.append(
+            PackageChange(
+                name=match.group("name"),
+                action=action,
+                current_version=None,
+                target_version=None if action == "remove" else match.group("version"),
+            )
+        )
+    summary = " ".join(summary_lines) or None
+    if not changes and summary is None:
+        return [], summary, "Package simulation summary could not be read"
+    lowered = (summary or "").lower()
+    if "remove" in lowered and any(item.action == "remove" for item in changes):
+        return changes, summary, "Package simulation would remove one or more packages"
+    return changes, summary, None
 
 
 def parse_apt_simulation(text: str) -> tuple[list[PackageChange], str | None]:

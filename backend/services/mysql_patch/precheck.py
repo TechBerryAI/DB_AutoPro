@@ -11,6 +11,9 @@ from typing import Protocol
 
 from backend.services.mysql_patch.command_runner import (
     CMD_DF,
+    CMD_DF_DNF,
+    CMD_DNF_CHECK,
+    CMD_DNF_LOCKS,
     CMD_DPKG_AUDIT,
     CMD_ID,
     CMD_LOCKS,
@@ -29,6 +32,7 @@ from backend.services.mysql_patch.models import (
     DiscoveryCheck,
     EnvironmentReport,
     JobOutcome,
+    PackageManagerKind,
     PatchJobSnapshot,
     PrecheckReport,
 )
@@ -71,6 +75,13 @@ class LocalBackupReadiness:
                 BackupReadinessState.MISSING,
                 "No backup path was provided",
             )
+        from backend.services.mysql_patch.remote_backup import is_remote_linux_path
+
+        if is_remote_linux_path(str(backup_path)):
+            return (
+                BackupReadinessState.UNREADABLE,
+                "A remote Linux path is not opened as a Windows file. Use Browse Remote Backups.",
+            )
         from backend.services.backup_service import BackupService
 
         try:
@@ -85,6 +96,23 @@ class LocalBackupReadiness:
             "Backup file passed the existing readability check. "
             "This does not prove the backup can be restored.",
         )
+
+
+class PreparedBackupReadiness:
+    """Reuse a remote check that already ran. It does not open a local file."""
+
+    def __init__(self, path: str, state: BackupReadinessState, summary: str) -> None:
+        self.path = path
+        self.state = state
+        self.summary = summary
+
+    def assess(self, backup_path: str | None) -> tuple[BackupReadinessState, str]:
+        if str(backup_path or "").strip() != self.path:
+            return (
+                BackupReadinessState.UNREADABLE,
+                "The remote backup selection changed before this check finished",
+            )
+        return self.state, self.summary
 
 
 class UnavailableJobHistory:
@@ -108,6 +136,10 @@ class PrecheckService:
         self._backups = backups or LocalBackupReadiness()
         self._jobs = jobs
         self._jobs_available = jobs is not None
+
+    def use_backup_assessor(self, backups: BackupAssessor) -> None:
+        """Switch between the Windows file check and a finished remote check."""
+        self._backups = backups
 
     def precheck(
         self,
@@ -221,30 +253,33 @@ class PrecheckService:
                     )
                 )
 
-            disk = self._run(runner, report, CMD_DF)
+            disk_command, lock_command, audit_command, disk_summary, lock_summary, audit_summary = (
+                _safety_commands(discovery)
+            )
+            disk = self._run(runner, report, disk_command)
             disk_problem = _disk_problem(disk)
             checks.append(
                 DiscoveryCheck(
                     code="disk",
                     status=CheckStatus.FAIL if disk_problem else CheckStatus.PASS,
-                    summary=disk_problem or "Filesystems for /, /var, and the APT cache have at least 1 GiB free",
+                    summary=disk_problem or disk_summary,
                 )
             )
 
-            locks = self._run(runner, report, CMD_LOCKS)
+            locks = self._run(runner, report, lock_command)
             lock_problem = _lock_problem(locks)
             checks.append(
                 DiscoveryCheck(
                     code="locks",
                     status=CheckStatus.FAIL if lock_problem else CheckStatus.PASS,
-                    summary=lock_problem or "APT and dpkg locks are free",
+                    summary=lock_problem or lock_summary,
                 )
             )
 
-            audit = self._run(runner, report, CMD_DPKG_AUDIT)
+            audit = self._run(runner, report, audit_command)
             pending = audit.stdout.strip()
             if audit.exit_code != 0 or pending:
-                detail = redact_text(pending.splitlines()[0]) if pending else "dpkg audit failed"
+                detail = redact_text(pending.splitlines()[0]) if pending else "package check failed"
                 checks.append(
                     DiscoveryCheck(
                         code="pending_packages",
@@ -257,7 +292,7 @@ class PrecheckService:
                     DiscoveryCheck(
                         code="pending_packages",
                         status=CheckStatus.PASS,
-                        summary="dpkg audit reported no unfinished package work",
+                        summary=audit_summary,
                     )
                 )
         except MysqlPatchSafetyError as exc:
@@ -284,10 +319,7 @@ class PrecheckService:
                 DiscoveryCheck(
                     code="maintenance_window",
                     status=CheckStatus.WARNING,
-                    summary=(
-                        "A MySQL package update on Ubuntu commonly restarts the database service. "
-                        "Confirm a maintenance window before any later execution."
-                    ),
+                    summary=_maintenance_window(discovery),
                 )
             )
             return
@@ -400,6 +432,38 @@ class PrecheckService:
         if len(result.stdout) >= MAX_OUTPUT_CHARS or len(result.stderr) >= MAX_OUTPUT_CHARS:
             raise MysqlPatchSafetyError("Remote command output exceeded the size limit")
         return result
+
+
+def _safety_commands(discovery: EnvironmentReport) -> tuple[str, str, str, str, str, str]:
+    if discovery.package_manager == PackageManagerKind.DNF:
+        return (
+            CMD_DF_DNF,
+            CMD_DNF_LOCKS,
+            CMD_DNF_CHECK,
+            "Filesystems for /, /var, and the DNF cache have at least 1 GiB free",
+            "DNF and RPM locks are free",
+            "DNF reported no unfinished package work",
+        )
+    return (
+        CMD_DF,
+        CMD_LOCKS,
+        CMD_DPKG_AUDIT,
+        "Filesystems for /, /var, and the APT cache have at least 1 GiB free",
+        "APT and dpkg locks are free",
+        "dpkg audit reported no unfinished package work",
+    )
+
+
+def _maintenance_window(discovery: EnvironmentReport) -> str:
+    if discovery.package_manager == PackageManagerKind.DNF:
+        return (
+            "A MySQL package update on CentOS commonly restarts the database service. "
+            "Confirm a maintenance window before any later execution."
+        )
+    return (
+        "A MySQL package update on Ubuntu commonly restarts the database service. "
+        "Confirm a maintenance window before any later execution."
+    )
 
 
 def _disk_problem(result: CommandResult) -> str | None:

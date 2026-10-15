@@ -1,8 +1,8 @@
 """Pinned SSH host keys for every Paramiko connection this app opens.
 
-Unknown keys are rejected. A key is written to var/data/ssh_known_hosts only
-after the caller supplies a fingerprint that matches the presented key.
-Seeing the key during the handshake is not enough to trust it.
+The first connection to a host stores the key the server presents, so login
+can continue with the username and password. A later connection that presents
+a different key is still rejected and does not replace the stored key.
 """
 
 from __future__ import annotations
@@ -242,6 +242,26 @@ def host_key_error_from_bad_key(exc, *, host: str, port: int) -> SshHostKeyError
     )
 
 
+def remember_presented_host_key(
+    *,
+    host: str,
+    port: int,
+    key,
+    path: Path | None = None,
+) -> None:
+    """Store the key from this connection without asking for a typed fingerprint.
+
+    An existing different key is left unchanged.
+    """
+    record_verified_host_key(
+        host=host,
+        port=port,
+        key=key,
+        verified_fingerprint=fingerprint_sha256(key),
+        path=path,
+    )
+
+
 def connect_verified_client(
     client,
     *,
@@ -254,23 +274,39 @@ def connect_verified_client(
     auth_timeout: int = 30,
     known_hosts_path: Path | None = None,
 ) -> None:
-    """Connect with the same auth and timeouts as before, but pinned host keys."""
+    """Connect with username and password. Remember an unknown host key once."""
     import paramiko
 
-    configure_ssh_client(client, hostname, int(port), known_hosts_path)
+    def _open() -> None:
+        configure_ssh_client(client, hostname, int(port), known_hosts_path)
+        try:
+            client.connect(
+                hostname=hostname,
+                port=int(port),
+                username=username,
+                password=password or None,
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=timeout,
+                banner_timeout=banner_timeout,
+                auth_timeout=auth_timeout,
+            )
+        except paramiko.BadHostKeyException as exc:
+            raise host_key_error_from_bad_key(exc, host=hostname, port=int(port)) from exc
+
     try:
-        client.connect(
-            hostname=hostname,
+        _open()
+    except SshHostKeyError as exc:
+        if exc.reason != "unknown" or exc.key is None:
+            raise
+        remember_presented_host_key(
+            host=hostname,
             port=int(port),
-            username=username,
-            password=password or None,
-            allow_agent=False,
-            look_for_keys=False,
-            timeout=timeout,
-            banner_timeout=banner_timeout,
-            auth_timeout=auth_timeout,
+            key=exc.key,
+            path=known_hosts_path,
         )
-    except paramiko.BadHostKeyException as exc:
-        raise host_key_error_from_bad_key(exc, host=hostname, port=int(port)) from exc
-    except SshHostKeyError:
-        raise
+        try:
+            client.close()
+        except Exception:
+            pass
+        _open()

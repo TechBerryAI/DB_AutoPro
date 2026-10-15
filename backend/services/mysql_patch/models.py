@@ -23,12 +23,14 @@ class CheckStatus(str, Enum):
 
 class PackageManagerKind(str, Enum):
     APT = "apt"
+    DNF = "dnf"
     UNKNOWN = "unknown"
 
 
 class PackageOrigin(str, Enum):
     UBUNTU_ARCHIVE = "ubuntu_archive"
     ORACLE_MYSQL_APT = "oracle_mysql_apt"
+    CENTOS_REPOSITORIES = "centos_repositories"
     MIXED = "mixed"
     UNKNOWN = "unknown"
     NOT_INSTALLED = "not_installed"
@@ -132,6 +134,9 @@ class PatchPlan(BaseModel):
     upgrade_kind: UpgradeKind
     repository_origin: PackageOrigin
     repository_uris: list[str] = Field(default_factory=list)
+    package_manager: PackageManagerKind = PackageManagerKind.APT
+    host_identity: str = ""
+    package_nevras: list[str] = Field(default_factory=list)
     packages: list[PackageChange] = Field(default_factory=list)
     precheck_findings: list[DiscoveryCheck] = Field(default_factory=list)
     backup_state: BackupReadinessState = BackupReadinessState.MISSING
@@ -191,6 +196,8 @@ class EnvironmentReport(BaseModel):
     candidate_upstream_version: str | None = None
     repository_origin: PackageOrigin = PackageOrigin.UNKNOWN
     repository_uris: list[str] = Field(default_factory=list)
+    host_identity: str = ""
+    package_nevras: list[str] = Field(default_factory=list)
     service_name: str | None = None
     service_state: str | None = None
     upgrade_kind: UpgradeKind = UpgradeKind.UNKNOWN
@@ -233,6 +240,8 @@ class PackagePreviewReport(BaseModel):
     checks: list[DiscoveryCheck] = Field(default_factory=list)
     commands_run: list[str] = Field(default_factory=list)
     output_excerpt: str | None = None
+    transaction_summary: str | None = None
+    simulation_only: bool = False
 
 
 class VerificationReport(BaseModel):

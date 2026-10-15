@@ -9,9 +9,11 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
+from typing import Protocol
 from datetime import datetime, timezone
 
 from backend.services.mysql_patch.command_runner import CommandRunner
+from backend.services.mysql_patch.errors import MysqlPatchSafetyError
 from backend.services.mysql_patch.models import (
     ExecutionReport,
     ExecutionStage,
@@ -20,6 +22,21 @@ from backend.services.mysql_patch.models import (
 )
 from backend.services.mysql_patch.plan_service import PlanService
 from backend.services.mysql_patch.redaction import redact_text
+
+class PackageInstaller(Protocol):
+    """Future guarded installation. This phase does not call it."""
+
+    def install_approved(self, runner: CommandRunner, plan: PatchPlan) -> ExecutionReport:
+        """Install one already revalidated plan. Not available in this phase."""
+
+
+class DisabledPackageInstaller:
+    """Refuses installation so a later phase must replace this object deliberately."""
+
+    def install_approved(self, runner: CommandRunner, plan: PatchPlan) -> ExecutionReport:
+        del runner, plan
+        raise MysqlPatchSafetyError("Package installation is not enabled")
+
 
 StageCallback = Callable[[ExecutionStage, str], None]
 
@@ -50,9 +67,11 @@ class PatchExecutor:
         self,
         plans: PlanService | None = None,
         guard: ServerJobGuard | None = None,
+        installer: PackageInstaller | None = None,
     ) -> None:
         self._plans = plans or PlanService()
         self._guard = guard or ServerJobGuard()
+        self._installer = installer or DisabledPackageInstaller()
 
     def execute(
         self,
@@ -206,5 +225,11 @@ def _install_was_sent(commands: list[str]) -> bool:
         if "apt-get install" in lowered or "apt-get upgrade" in lowered or "apt install" in lowered:
             return True
         if lowered.startswith("apt-get ") and " -s " not in f" {lowered} " and "install" in lowered:
+            return True
+        if "dnf install" in lowered or "dnf upgrade -y" in lowered or "dnf update -y" in lowered:
+            return True
+        if "dnf upgrade" in lowered and "--assumeno" not in lowered:
+            return True
+        if "rpm -u" in lowered or "rpm -i" in lowered or "yum " in lowered:
             return True
     return False

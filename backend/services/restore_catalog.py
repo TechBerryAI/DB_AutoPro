@@ -21,7 +21,11 @@ from backend.services.ssh_client import ssh_options_from_connection
 _METHOD_LABELS: dict[BackupMethod, str] = {
     BackupMethod.MONGORESTORE: "mongorestore (logical BSON import)",
     BackupMethod.PG_DUMP: "psql (SQL import)",
+    BackupMethod.PG_BASEBACKUP: "pg_basebackup (physical cluster restore)",
     BackupMethod.MYSQLDUMP: "mysql (SQL import)",
+    BackupMethod.MYSQL_PHYSICAL: "MySQL physical restore",
+    BackupMethod.MSSQL_BACKUP: "RESTORE DATABASE (native .bak file)",
+    BackupMethod.ORACLE_IMPDP: "impdp (Data Pump logical import)",
 }
 
 
@@ -32,7 +36,11 @@ def restore_method_label(method: BackupMethod) -> str:
 _RESTORE_METHODS: dict[tuple[DatabaseType, BackupCategory], list[BackupMethod]] = {
     (DatabaseType.MONGODB, BackupCategory.LOGICAL): [BackupMethod.MONGORESTORE],
     (DatabaseType.POSTGRESQL, BackupCategory.LOGICAL): [BackupMethod.PG_DUMP],
+    (DatabaseType.POSTGRESQL, BackupCategory.PHYSICAL): [BackupMethod.PG_BASEBACKUP],
     (DatabaseType.MYSQL, BackupCategory.LOGICAL): [BackupMethod.MYSQLDUMP],
+    (DatabaseType.MYSQL, BackupCategory.PHYSICAL): [BackupMethod.MYSQL_PHYSICAL],
+    (DatabaseType.MSSQL, BackupCategory.PHYSICAL): [BackupMethod.MSSQL_BACKUP],
+    (DatabaseType.ORACLE, BackupCategory.LOGICAL): [BackupMethod.ORACLE_IMPDP],
 }
 
 

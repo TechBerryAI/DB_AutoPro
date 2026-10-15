@@ -78,9 +78,21 @@ class PlanService:
             upgrade_kind=discovery.upgrade_kind.value,
             repository_origin=discovery.repository_origin.value,
             repository_uris=list(discovery.repository_uris),
+            package_manager=discovery.package_manager.value,
+            host_identity=discovery.host_identity,
+            package_nevras=list(discovery.package_nevras),
             packages=packages,
             backup_state=preview.precheck.backup_state.value,
         )
+        if discovery.package_manager.value == "dnf":
+            planned = (
+                "MySQL service is active after the package transaction",
+                "Installed MySQL server package version equals the approved target version",
+                "Run the approved read-only SQL checks when a database client is available",
+                "Do not treat a dnf exit code as success by itself",
+            )
+        else:
+            planned = list(PLANNED_VERIFICATION)
         return PatchPlan(
             plan_id=str(uuid.uuid4()),
             server_id=preview.server_id,
@@ -93,13 +105,16 @@ class PlanService:
             upgrade_kind=discovery.upgrade_kind,
             repository_origin=discovery.repository_origin,
             repository_uris=list(discovery.repository_uris),
+            package_manager=discovery.package_manager,
+            host_identity=discovery.host_identity,
+            package_nevras=list(discovery.package_nevras),
             packages=packages,
             precheck_findings=list(preview.precheck.checks),
             backup_state=preview.precheck.backup_state,
             recovery_proven=False,
             service_interruption_expected=preview.precheck.service_interruption_expected,
             required_privileges=_privileges(preview),
-            planned_verification=list(PLANNED_VERIFICATION),
+            planned_verification=list(planned),
             high_risk=bool(reasons),
             high_risk_reasons=reasons,
             plan_digest=_digest(material),
@@ -226,6 +241,9 @@ def _material_from_plan(plan: PatchPlan) -> dict:
         upgrade_kind=plan.upgrade_kind.value,
         repository_origin=plan.repository_origin.value,
         repository_uris=list(plan.repository_uris),
+        package_manager=plan.package_manager.value,
+        host_identity=plan.host_identity,
+        package_nevras=list(plan.package_nevras),
         packages=plan.packages,
         backup_state=plan.backup_state.value,
     )
@@ -242,6 +260,9 @@ def _material(
     upgrade_kind: str,
     repository_origin: str,
     repository_uris: list[str],
+    package_manager: str,
+    host_identity: str,
+    package_nevras: list[str],
     packages: list[PackageChange],
     backup_state: str,
 ) -> dict:
@@ -249,6 +270,9 @@ def _material(
         "backup_state": backup_state,
         "current_upstream_version": current_upstream_version,
         "current_version": current_version,
+        "host_identity": host_identity,
+        "package_manager": package_manager,
+        "package_nevras": sorted(package_nevras),
         "packages": [
             {
                 "action": item.action,

@@ -26,7 +26,7 @@ _SCOPE_HINTS: dict[MongoRestoreScope, str] = {
     ),
     MongoRestoreScope.SINGLE_COLLECTION: (
         "Restores one collection into the database/collection names below "
-        "(created if they do not exist). Restore source must be a .bson file."
+        "(created if they do not exist). Restore source must be a .bson or .bson.gz file."
     ),
     MongoRestoreScope.ARCHIVE: (
         "Restores from a mongodump .archive or .archive.gz file. "
@@ -65,6 +65,37 @@ def _is_archive_file(path: Path) -> bool:
     return name.endswith(".archive") or name.endswith(".archive.gz") or (
         path.suffix == ".gz" and "archive" in path.stem.lower()
     )
+
+
+def _is_bson_file(path: Path) -> bool:
+    name = path.name.lower()
+    return name.endswith(".bson") or name.endswith(".bson.gz")
+
+
+def _is_gzip_name(path: Path) -> bool:
+    return path.name.lower().endswith(".gz")
+
+
+def _directory_has_gzip_dump(path: Path) -> bool:
+    """True when a mongodump folder contains gzip-compressed BSON or metadata."""
+    for candidate in path.rglob("*"):
+        if not candidate.is_file():
+            continue
+        name = candidate.name.lower()
+        if name.endswith(".bson.gz") or name.endswith(".metadata.json.gz"):
+            return True
+    return False
+
+
+def _restore_wants_gzip(request: RestoreRequest, backup_path: Path, *, path_known: bool) -> bool:
+    """Honor an explicit gzip choice, then detect mongodump --gzip output."""
+    if request.gzip_archive:
+        return True
+    if _is_gzip_name(backup_path):
+        return True
+    if path_known and backup_path.is_dir() and _directory_has_gzip_dump(backup_path):
+        return True
+    return False
 
 
 def _is_remote_path(path: str) -> bool:
@@ -110,6 +141,8 @@ def plan_mongorestore(request: RestoreRequest, backup_path: Path) -> Mongorestor
         if path_known and not backup_path.is_dir():
             raise RestoreError("All-databases restore requires a backup folder path.")
         source = str(backup_path)
+        if _restore_wants_gzip(request, backup_path, path_known=path_known):
+            extra.append("--gzip")
 
     elif scope == MongoRestoreScope.SPECIFIC_DATABASE:
         if not db:
@@ -117,6 +150,8 @@ def plan_mongorestore(request: RestoreRequest, backup_path: Path) -> Mongorestor
         source = str(backup_path)
         if request.drop_existing:
             extra.append("--drop")
+        if _restore_wants_gzip(request, backup_path, path_known=path_known):
+            extra.append("--gzip")
 
     elif scope == MongoRestoreScope.SINGLE_COLLECTION:
         if not db:
@@ -124,21 +159,24 @@ def plan_mongorestore(request: RestoreRequest, backup_path: Path) -> Mongorestor
         if not coll:
             raise RestoreError("Collection name is required for single-collection restore.")
         if path_known and not backup_path.is_file():
-            raise RestoreError("Single-collection restore requires a .bson file path.")
-        if path_known and backup_path.suffix.lower() != ".bson":
-            raise RestoreError("Single-collection restore source must be a .bson file.")
+            raise RestoreError("Single-collection restore requires a .bson or .bson.gz file path.")
+        if path_known and not _is_bson_file(backup_path):
+            raise RestoreError(
+                "Single-collection restore source must be a .bson or .bson.gz file."
+            )
         source = str(backup_path)
         if request.drop_existing:
             extra.append("--drop")
+        if _restore_wants_gzip(request, backup_path, path_known=path_known):
+            extra.append("--gzip")
 
     elif scope == MongoRestoreScope.ARCHIVE:
         if path_known and not backup_path.is_file():
             raise RestoreError("Archive restore requires an .archive or .archive.gz file.")
         if path_known and not _is_archive_file(backup_path):
             raise RestoreError("Archive restore source must be a .archive or .archive.gz file.")
-        gzip = request.gzip_archive or backup_path.name.lower().endswith(".gz")
         extra.append(f"--archive={backup_path}")
-        if gzip:
+        if _restore_wants_gzip(request, backup_path, path_known=path_known):
             extra.append("--gzip")
         if db and request.drop_existing:
             extra.append("--drop")
