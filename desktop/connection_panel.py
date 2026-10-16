@@ -611,7 +611,7 @@ class ConnectionPanel(ctk.CTkFrame):
         )
         self.password_toggle_btn.grid(row=0, column=1, padx=(8, 0))
 
-        self._labeled_field(body, "Database / Service", row=4)
+        self._labeled_field(body, "Db name", row=4)
         self.database_entry = ctk.CTkEntry(body, height=ENTRY_HEIGHT, placeholder_text="Default per engine")
         self.database_entry.grid(row=4, column=1, sticky="ew", padx=(12, 0), pady=6)
 
@@ -620,14 +620,14 @@ class ConnectionPanel(ctk.CTkFrame):
             text="Auth database",
             font=ctk.CTkFont(size=12),
             text_color=self.theme.c("text_primary"),
-            width=130,
+            width=168,
             anchor="w",
         )
         self.auth_db_label.grid(row=5, column=0, sticky="w", pady=6)
         self.auth_database_entry = ctk.CTkEntry(
             body,
             height=ENTRY_HEIGHT,
-            placeholder_text="admin (where MongoDB user was created)",
+            placeholder_text="Leave blank to use admin",
         )
         self.auth_database_entry.grid(row=5, column=1, sticky="ew", padx=(12, 0), pady=6)
 
@@ -880,8 +880,8 @@ class ConnectionPanel(ctk.CTkFrame):
             self.auth_database_entry.grid()
             self.hint_label.configure(
                 text=(
-                    "MongoDB: Database / Service is the database to use (e.g. db1). "
-                    "Auth database is where the user was created — usually 'admin'."
+                    "MongoDB: Db name is the database to use (e.g. db1). "
+                    "Leave Auth database blank to authenticate against admin."
                 )
             )
         else:
@@ -1078,6 +1078,13 @@ class ConnectionPanel(ctk.CTkFrame):
             if not self.connect_btn.winfo_manager():
                 self.connect_btn.pack(side="left")
 
+    def _auth_database_value(self) -> str | None:
+        """Blank Auth database means authenticate against admin."""
+        raw = self.auth_database_entry.get().strip()
+        if not raw or raw.lower().startswith("leave blank"):
+            return None
+        return raw
+
     def _get_connection_name(self) -> str:
         return self.connection_name_entry.get().strip()
 
@@ -1097,7 +1104,7 @@ class ConnectionPanel(ctk.CTkFrame):
             password=self.password_entry.get(),
             database=database,
             saved_name=self._selected_saved,
-            auth_database=self.auth_database_entry.get().strip() or None,
+            auth_database=self._auth_database_value(),
             ssh_enabled=linux["ssh_enabled"],
             linux_username=linux["linux_username"],
             linux_password=linux["linux_password"],

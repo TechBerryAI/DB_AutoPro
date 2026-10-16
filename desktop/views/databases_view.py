@@ -8,6 +8,7 @@ from typing import Any
 import customtkinter as ctk
 
 from backend.models.schemas import DatabaseType
+from desktop.db_catalog import fetch_mongodb_database_overview
 from desktop.explorer.factory import get_explorer_provider
 from desktop.explorer.provider import (
     BackupInfo,
@@ -513,6 +514,22 @@ class DatabasesView(BaseView):
         for child in host.winfo_children():
             child.destroy()
 
+        if self.connection and self.connection.db_type == DatabaseType.MONGODB:
+            self._detail_host = ctk.CTkScrollableFrame(host, fg_color="transparent", height=280)
+            self._detail_host.pack(fill="both", expand=True, padx=8, pady=8)
+            self._show_loading()
+            token = database
+
+            def task() -> None:
+                try:
+                    overview = fetch_mongodb_database_overview(self.connection, database)
+                    self.after(0, lambda: self._render_mongo_overview(token, overview))
+                except Exception as exc:
+                    self.after(0, lambda: self._render_mongo_overview(token, error=str(exc)))
+
+            threading.Thread(target=task, daemon=True).start()
+            return
+
         if not self._provider or not self._provider.supports_object_explorer:
             ctk.CTkLabel(
                 host,
@@ -796,6 +813,58 @@ class DatabasesView(BaseView):
         self._selected_node = node
         self._render_tree(database)
         self._load_section(database, node)
+
+    def _render_mongo_overview(
+        self,
+        database: str,
+        overview: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._expanded_db != database or self._detail_host is None:
+            return
+        host = self._detail_host
+        for child in host.winfo_children():
+            child.destroy()
+        if error or not overview:
+            self._show_detail_error(error or "Could not load database details.")
+            return
+
+        stats = overview.get("stats") or {}
+        collections = overview.get("collections") or []
+        body = section_card(host, self.theme, "General Information")
+        kv_grid(
+            body,
+            self.theme,
+            [
+                ("Database Name", database),
+                ("Server Version", str(overview.get("version") or "—")),
+                ("Collections", str(stats.get("collections", len(collections)))),
+                ("Views", str(stats.get("views", 0))),
+                ("Documents", f"{int(stats.get('objects') or 0):,}"),
+                ("Indexes", str(stats.get("indexes", 0))),
+                ("Data Size", _format_byte_size(stats.get("dataSize"))),
+                ("Storage Size", _format_byte_size(stats.get("storageSize"))),
+                ("Index Size", _format_byte_size(stats.get("indexSize"))),
+                ("Average Document", _format_byte_size(stats.get("avgObjSize"))),
+            ],
+        )
+
+        table = section_card(host, self.theme, "Collections")
+        rows = [
+            [
+                str(row.get("name") or "—"),
+                f"{int(row.get('count') or 0):,}",
+                _format_byte_size(row.get("size")) if int(row.get("size") or 0) else "—",
+                str(row.get("indexes") or "—"),
+            ]
+            for row in collections
+        ]
+        simple_table(
+            table,
+            self.theme,
+            ["Collection", "Documents", "Data Size", "Indexes"],
+            rows or [["—", "0", "—", "—"]],
+        )
 
     def _show_detail_error(self, message: str) -> None:
         host = self._detail_host
@@ -1161,3 +1230,17 @@ class DatabasesView(BaseView):
             ["Object", "Size"],
             [[t["name"], t["size"]] for t in storage.top_objects] or [["—", "—"]],
         )
+
+
+def _format_byte_size(size_bytes: object) -> str:
+    try:
+        size = int(size_bytes or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if size >= 1024 ** 3:
+        return f"{size / (1024 ** 3):.1f} GB"
+    if size >= 1024 ** 2:
+        return f"{size / (1024 ** 2):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"

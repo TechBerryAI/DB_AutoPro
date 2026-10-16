@@ -17,14 +17,16 @@ class MongoDBConnector(BaseConnector):
 
     def _auth_source_candidates(self) -> list[str]:
         opts = self.config.extra_options or {}
-        explicit = opts.get("auth_source") or opts.get("authSource")
+        explicit = (opts.get("auth_source") or opts.get("authSource") or "").strip()
         if explicit:
-            return [str(explicit)]
+            return [explicit]
 
-        database = self.config.database or "admin"
-        candidates = [database]
-        if database != "admin":
-            candidates.append("admin")
+        # Auth database is optional. MongoDB users are usually created in admin,
+        # so try that before the database named in the form.
+        database = (self.config.database or "admin").strip() or "admin"
+        candidates = ["admin"]
+        if database not in candidates:
+            candidates.append(database)
         return candidates
 
     @staticmethod
@@ -80,7 +82,7 @@ class MongoDBConnector(BaseConnector):
             raise ConnectorError(
                 f"MongoDB authentication failed for user '{self.config.username}'. "
                 f"Tried authSource: {tried}. "
-                "Set the Auth database field to where this user was created (often 'admin')."
+                "Leave Auth database empty to use admin, or set it to the database where this user was created."
             ) from last_error
         raise ConnectorError("MongoDB connection failed")
 
