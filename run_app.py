@@ -104,7 +104,25 @@ def _selftest() -> int:
     return 1 if failures else 0
 
 
+def _reexec_project_venv() -> None:
+    """Run with the project venv when `python` is a different interpreter.
+
+    The desktop UI depends on packages installed in venv. Launching with the
+    system Python raises ModuleNotFoundError: customtkinter.
+    """
+    venv_python = APP_ROOT / "venv" / "Scripts" / "python.exe"
+    if not venv_python.is_file():
+        return
+    try:
+        if Path(sys.executable).resolve() == venv_python.resolve():
+            return
+    except OSError:
+        return
+    os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
 def main() -> None:
+    _reexec_project_venv()
     if str(APP_ROOT) not in sys.path:
         sys.path.insert(0, str(APP_ROOT))
 

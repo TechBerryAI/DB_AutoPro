@@ -105,6 +105,8 @@ SIDEBAR_MIN_WIDTH = 180
 SIDEBAR_MAX_WIDTH = 420
 SIDEBAR_SASH_WIDTH = 4
 NAV_ROW_HEIGHT = 30
+SAVED_NAV_ROW_HEIGHT = 30
+SAVED_NAV_VISIBLE_ROWS = 5
 NAV_GROUP_PADY = (4, 1)
 
 # Pages that need an active DB session. Observability stays offline-ready.
@@ -133,7 +135,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._servers_sub_buttons: dict[str, ctk.CTkButton] = {}
         self._servers_saved_buttons: dict[str, ctk.CTkButton] = {}
         self._servers_subnav_frame: ctk.CTkFrame | None = None
-        self._servers_saved_frame: ctk.CTkFrame | None = None
+        self._servers_saved_frame: ctk.CTkScrollableFrame | None = None
         self._servers_nav_expanded = False
         self._patch_nav_expanded = False
         self._patch_subnav_frame: ctk.CTkFrame | None = None
@@ -360,7 +362,16 @@ class DatabaseAutomationApp(ctk.CTk):
                     all_btn.pack(fill="x", pady=0, padx=6)
                     self._servers_sub_buttons["all"] = all_btn
 
-                    self._servers_saved_frame = ctk.CTkFrame(self._servers_subnav_frame, fg_color="transparent")
+                    sidebar_bg = self._t.sc("bg_sidebar") if self._t.is_light else self._t.c("bg_sidebar")
+                    self._servers_saved_frame = ctk.CTkScrollableFrame(
+                        self._servers_subnav_frame,
+                        fg_color=sidebar_bg,
+                        height=SAVED_NAV_VISIBLE_ROWS * SAVED_NAV_ROW_HEIGHT,
+                        corner_radius=0,
+                        border_width=0,
+                        scrollbar_button_color=self._t.c("sidebar_bg_hover"),
+                        scrollbar_button_hover_color=self._t.c("sidebar_border"),
+                    )
                     self._servers_saved_frame.pack(fill="x", padx=4, pady=(0, 2))
                     self._refresh_servers_saved_nav()
 
@@ -906,7 +917,7 @@ class DatabaseAutomationApp(ctk.CTk):
 
     def _apply_session_status(self, metrics: dict) -> None:
         self._session_poll_busy = False
-        if not self.connection:
+        if getattr(self, "_signing_out", False) or not self.connection:
             self.update_status_footer(idle=True)
             return
 
@@ -1230,10 +1241,11 @@ class DatabaseAutomationApp(ctk.CTk):
         )
 
     def _refresh_servers_saved_nav(self) -> None:
-        if self._servers_saved_frame is None:
+        body = self._saved_nav_body()
+        if body is None:
             return
 
-        for widget in self._servers_saved_frame.winfo_children():
+        for widget in body.winfo_children():
             widget.destroy()
         self._servers_saved_buttons.clear()
 
@@ -1252,12 +1264,13 @@ class DatabaseAutomationApp(ctk.CTk):
 
         if not servers:
             ctk.CTkLabel(
-                self._servers_saved_frame,
+                body,
                 text="No saved connections",
                 font=ctk.CTkFont(size=11),
                 text_color=t.sc("text_muted") if t.is_light else t.c("text_muted"),
                 anchor="w",
             ).pack(anchor="w", padx=18, pady=(2, 4))
+            self._fit_saved_nav_height(1)
             self._style_servers_subnav()
             return
 
@@ -1265,7 +1278,7 @@ class DatabaseAutomationApp(ctk.CTk):
             db_type = DatabaseType(server.db_type)
             meta = DB_ICON_META.get(db_type, {"abbrev": "DB"})
             btn = ctk.CTkButton(
-                self._servers_saved_frame,
+                body,
                 text=f"          {meta['abbrev']}  {server.name}",
                 anchor="w",
                 height=28,
@@ -1276,11 +1289,42 @@ class DatabaseAutomationApp(ctk.CTk):
                 font=ctk.CTkFont(size=11),
                 command=lambda name=server.name: self._navigate_saved_server(name),
             )
-            btn.pack(fill="x", pady=1, padx=12)
+            btn.pack(fill="x", pady=1, padx=8)
             self._servers_saved_buttons[server.name] = btn
 
+        self._fit_saved_nav_height(len(servers))
         self._apply_saved_list_visibility()
         self._style_servers_subnav()
+
+    def _saved_nav_body(self):
+        frame = self._servers_saved_frame
+        if frame is None:
+            return None
+        return getattr(frame, "_scrollable_frame", frame)
+
+    def _fit_saved_nav_height(self, row_count: int) -> None:
+        """Keep the saved-connection list short and scroll the rest."""
+        frame = self._servers_saved_frame
+        if frame is None or not hasattr(frame, "_scrollbar"):
+            return
+        rows = max(int(row_count), 1)
+        frame.configure(height=min(rows, SAVED_NAV_VISIBLE_ROWS) * SAVED_NAV_ROW_HEIGHT)
+        scrollbar = frame._scrollbar
+        sidebar_bg = self._t.sc("bg_sidebar") if self._t.is_light else self._t.c("bg_sidebar")
+        if rows > SAVED_NAV_VISIBLE_ROWS:
+            scrollbar.configure(
+                width=8,
+                button_color=self._t.c("sidebar_bg_hover"),
+                button_hover_color=self._t.c("sidebar_border"),
+                fg_color=sidebar_bg,
+            )
+        else:
+            scrollbar.configure(
+                width=0,
+                button_color=sidebar_bg,
+                button_hover_color=sidebar_bg,
+                fg_color=sidebar_bg,
+            )
 
     def _style_servers_subnav(self) -> None:
         t = self._t
@@ -1549,8 +1593,24 @@ class DatabaseAutomationApp(ctk.CTk):
         super().destroy()
 
     def _do_sign_out(self) -> None:
-        close_ssh_tunnel()
+        """Hide immediately. Destroying this window inside the button click redraws the open page first."""
+        if getattr(self, "_signing_out", False):
+            return
+        self._signing_out = True
         self.disconnect_requested = True
+        self._stop_session_status_poll()
+        try:
+            self.attributes("-alpha", 0)
+        except Exception:
+            pass
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+        self.after(1, self._finish_sign_out)
+
+    def _finish_sign_out(self) -> None:
+        close_ssh_tunnel()
         self.destroy()
 
     def _toggle_theme(self) -> None:
@@ -1596,6 +1656,15 @@ class DatabaseAutomationApp(ctk.CTk):
                     )
                 except Exception:
                     self._nav_host.configure(fg_color=sidebar_bg)
+            if self._servers_saved_frame is not None:
+                try:
+                    self._servers_saved_frame.configure(
+                        fg_color=sidebar_bg,
+                        scrollbar_button_color=t.c("sidebar_bg_hover"),
+                        scrollbar_button_hover_color=t.c("sidebar_border"),
+                    )
+                except Exception:
+                    pass
             self.content.configure(fg_color=t.c("bg_content"))
             self.view_container.configure(fg_color=t.c("bg_content"))
 

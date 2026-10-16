@@ -308,6 +308,74 @@ def _list_mongodb_databases(connector) -> list[dict[str, str]]:
         return []
 
 
+def fetch_mongodb_database_size_bytes(connection: ConnectionResult, database_name: str) -> int:
+    """On-disk size of one MongoDB database, matching the Databases page."""
+    if connection.db_type != DatabaseType.MONGODB or not database_name.strip():
+        return 0
+    info = connection.to_connection_info()
+    connector = get_connector_from_info(connection.db_type, info)
+    client = connector._get_client()
+    try:
+        target = database_name.strip()
+        for db_info in client.list_databases():
+            if db_info.get("name") == target:
+                return int(db_info.get("sizeOnDisk") or 0)
+        return 0
+    finally:
+        client.close()
+
+
+def fetch_mongodb_database_overview(
+    connection: ConnectionResult, database_name: str
+) -> dict[str, Any]:
+    """dbStats plus per-collection counts for the Databases page."""
+    if connection.db_type != DatabaseType.MONGODB:
+        raise ValueError("A MongoDB connection is required.")
+    name = database_name.strip()
+    if not name:
+        raise ValueError("Database name is required.")
+
+    info = connection.to_connection_info()
+    connector = get_connector_from_info(connection.db_type, info)
+    client = connector._get_client()
+    try:
+        db = client[name]
+        stats = db.command("dbStats")
+        version = ""
+        try:
+            version = str(client.server_info().get("version") or "")
+        except Exception:
+            version = ""
+        collections: list[dict[str, Any]] = []
+        try:
+            for doc in db.aggregate([{"$collStats": {"storageStats": {}, "count": {}}}]):
+                storage = doc.get("storageStats") or {}
+                count_doc = doc.get("count") or {}
+                ns = str(doc.get("ns") or "")
+                coll_name = ns.split(".", 1)[1] if "." in ns else ns
+                collections.append(
+                    {
+                        "name": coll_name or "—",
+                        "count": int(count_doc.get("count") or storage.get("count") or 0),
+                        "size": int(storage.get("size") or storage.get("storageSize") or 0),
+                        "indexes": int(storage.get("nindexes") or 0),
+                    }
+                )
+        except Exception:
+            for coll_name in sorted(db.list_collection_names()):
+                try:
+                    count = int(db[coll_name].estimated_document_count())
+                except Exception:
+                    count = 0
+                collections.append(
+                    {"name": coll_name, "count": count, "size": 0, "indexes": 0}
+                )
+        collections.sort(key=lambda row: (-int(row["size"]), str(row["name"]).lower()))
+        return {"stats": stats, "collections": collections, "version": version}
+    finally:
+        client.close()
+
+
 def fetch_mongodb_collections(
     connection: ConnectionResult, database_name: str
 ) -> list[dict[str, Any]]:

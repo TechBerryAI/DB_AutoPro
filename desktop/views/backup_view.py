@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+import time
+from pathlib import Path
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -28,6 +30,7 @@ from backend.services.backup_service import BackupService
 from desktop.connection_store import SavedServer, load_saved_servers, upsert_server
 from desktop.db_catalog import (
     fetch_mongodb_collections,
+    fetch_mongodb_database_size_bytes,
     fetch_mysql_tables,
     fetch_postgresql_schemas,
     fetch_postgresql_tables,
@@ -76,6 +79,16 @@ MYSQL_FORMAT_LABELS: list[tuple[str, MySQLDumpFormat]] = [
 ]
 MYSQL_FORMAT_LABEL_TO_VALUE = {label: value for label, value in MYSQL_FORMAT_LABELS}
 
+ALL_DATABASES_LABEL = "All databases"
+SELECT_DATABASE_LABEL = "Select a database"
+_IGNORED_DATABASE_VALUES = {
+    "",
+    "CTkComboBox",
+    ALL_DATABASES_LABEL,
+    SELECT_DATABASE_LABEL,
+    "Loading databases...",
+}
+
 
 class BackupView(BaseView):
     """Backup operations with logical / physical segregation."""
@@ -93,6 +106,7 @@ class BackupView(BaseView):
         self._other_connected_host = ""
         self._cached_other_ssh: dict | None = None
         self._mongodb_collections: list[dict] = []
+        self._mongo_size_bytes = 0
         self._collection_rows: list[ctk.CTkFrame] = []
         self._selected_collection_name: str | None = None
         self._scope_selected_targets: list[str] = []
@@ -243,6 +257,48 @@ class BackupView(BaseView):
 
     def _is_mongodb_session(self) -> bool:
         return self._active_db_type() == DatabaseType.MONGODB
+
+    def _database_hint_text(self) -> str:
+        db_type = self._active_db_type()
+        if db_type == DatabaseType.MONGODB:
+            return "mongodump: choose All databases for a full server backup, or one database name."
+        if db_type == DatabaseType.POSTGRESQL:
+            return "pg_dump backs up the selected PostgreSQL database."
+        if db_type == DatabaseType.MYSQL:
+            return "mysqldump backs up the selected MySQL database."
+        if db_type == DatabaseType.MSSQL:
+            return "BACKUP DATABASE writes a native .bak of the selected SQL Server database."
+        if db_type == DatabaseType.ORACLE:
+            return "expdp exports the selected Oracle database."
+        return "Select the database this backup command should use."
+
+    def _initial_database_value(self) -> str:
+        if self.connection and (self.connection.database or "").strip():
+            return self.connection.database.strip()
+        if self.connection and self.connection.db_type == DatabaseType.MONGODB:
+            return ALL_DATABASES_LABEL
+        return SELECT_DATABASE_LABEL
+
+    def on_connection_changed(self) -> None:
+        """Switch the backup command and database list to the server just connected."""
+        if not hasattr(self, "database"):
+            return
+        active = self.get_active_db_type()
+        self.db_type.configure(state="normal")
+        self.db_type.set(active.value)
+        if self.connection:
+            self.db_type.configure(state="disabled")
+            self.connection_value.configure(text=self.connection.name)
+        else:
+            self.connection_value.configure(text="default")
+        initial = self._initial_database_value()
+        self.database.configure(values=[initial])
+        self.database.set(initial)
+        self.database_hint.configure(text=self._database_hint_text())
+        self._mongodb_collections = []
+        self._mongo_size_bytes = 0
+        self._refresh_methods()
+        self._populate_database_dropdown()
 
     def _merged_ssh_settings(self) -> dict[str, str | int | bool]:
         """SSH settings from the active connection, with saved-profile fallback."""
@@ -764,7 +820,8 @@ class BackupView(BaseView):
 
         ctk.CTkLabel(form, text="Connection:").grid(row=1, column=0, padx=16, pady=10, sticky="w")
         conn_label = self.connection.name if self.connection else "default"
-        ctk.CTkLabel(form, text=conn_label).grid(row=1, column=1, padx=16, pady=10, sticky="w")
+        self.connection_value = ctk.CTkLabel(form, text=conn_label)
+        self.connection_value.grid(row=1, column=1, padx=16, pady=10, sticky="w")
 
         self.database_label = ctk.CTkLabel(form, text="Database:")
         self.database_label.grid(row=2, column=0, padx=16, pady=10, sticky="nw")
@@ -772,18 +829,18 @@ class BackupView(BaseView):
         db_col.grid(row=2, column=1, padx=16, pady=10, sticky="ew")
         db_col.grid_columnconfigure(0, weight=1)
 
+        initial_db = self._initial_database_value()
         self.database = ctk.CTkComboBox(
             db_col,
-            values=[],
+            values=[initial_db],
             command=self._on_database_changed,
         )
-        if self.connection and self.get_active_db_type() != DatabaseType.MONGODB:
-            self.database.set(self.connection.database or "")
+        self.database.set(initial_db)
         self.database.pack(fill="x")
 
         self.database_hint = ctk.CTkLabel(
             db_col,
-            text="MongoDB: leave empty for a full server backup (all databases). Type a name to backup one database only.",
+            text=self._database_hint_text(),
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             justify="left",
@@ -976,6 +1033,17 @@ class BackupView(BaseView):
         )
         self.collection_scope_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        self.collection_size_label = ctk.CTkLabel(
+            self.collections_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color=self.theme.c("text_secondary"),
+            anchor="w",
+            justify="left",
+            wraplength=640,
+        )
+        self.collection_size_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         ctk.CTkLabel(
             self.collections_frame,
             text=(
@@ -987,7 +1055,7 @@ class BackupView(BaseView):
             justify="left",
             anchor="w",
             wraplength=560,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.destination_frame = ctk.CTkFrame(form, fg_color="transparent")
         self.destination_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
@@ -2154,17 +2222,30 @@ class BackupView(BaseView):
 
     def _set_database_values(self, names: list[str]) -> None:
         current = self.database.get().strip()
-        self.database.configure(values=names)
-        if current and current in names:
+        if self._is_mongodb_session():
+            values = [ALL_DATABASES_LABEL, *names]
+        else:
+            values = names or [SELECT_DATABASE_LABEL]
+        self.database.configure(values=values)
+        if current and current not in _IGNORED_DATABASE_VALUES and current in values:
             self.database.set(current)
-        elif names and not current:
-            if self.connection and self.connection.database and self.connection.database in names:
-                self.database.set(self.connection.database)
-            else:
-                self.database.set(names[0])
+            return
+        connected = (self.connection.database or "").strip() if self.connection else ""
+        if connected and connected in values:
+            self.database.set(connected)
+        elif self._is_mongodb_session():
+            self.database.set(ALL_DATABASES_LABEL)
+        elif names:
+            self.database.set(names[0])
+        else:
+            self.database.set(SELECT_DATABASE_LABEL)
+        self._update_command_preview()
 
     def _backup_database_name(self) -> str | None:
-        return self.database.get().strip() or None
+        value = self.database.get().strip()
+        if value in _IGNORED_DATABASE_VALUES:
+            return None
+        return value
 
     def _on_collection_changed(self, value: str | None = None) -> None:
         selected = value if value is not None else self.collection_combo.get()
@@ -2197,6 +2278,30 @@ class BackupView(BaseView):
                 text=f"Scope: all collections in {db}",
                 text_color=self.theme.c("primary"),
             )
+        self._update_backup_size_note()
+
+    def _update_backup_size_note(self) -> None:
+        label = getattr(self, "collection_size_label", None)
+        if label is None:
+            return
+        if self._selected_collection() or not self._is_mongodb_session():
+            label.configure(text="")
+            return
+        count = len(getattr(self, "_mongodb_collections", []) or [])
+        size_bytes = int(getattr(self, "_mongo_size_bytes", 0) or 0)
+        if count <= 0 and size_bytes <= 0:
+            label.configure(text="Load collections to see how large this full backup is.")
+            return
+        size_text = _format_byte_size(size_bytes) if size_bytes else "size unknown"
+        noun = "collection" if count == 1 else "collections"
+        copy_note = ""
+        if self._selected_destination() == "Local Server" and self._ssh_available():
+            copy_note = " mongodump runs on the Linux server, then the full dump is copied to this PC."
+        elif self._selected_destination() == "Linux Server":
+            copy_note = " The dump stays on the Linux server."
+        label.configure(
+            text=f"Full backup is about {size_text} across {count} {noun}.{copy_note}"
+        )
 
     def _clear_collection_rows(self) -> None:
         for row in self._collection_rows:
@@ -2311,8 +2416,14 @@ class BackupView(BaseView):
     def _add_collection_row(self, name: str, count: int) -> None:
         self._make_collection_row(key=name, title=name, subtitle=f"{count:,} docs")
 
-    def _populate_collections(self, collections: list[dict], error: str | None = None) -> None:
+    def _populate_collections(
+        self,
+        collections: list[dict],
+        error: str | None = None,
+        size_bytes: int = 0,
+    ) -> None:
         self._mongodb_collections = collections
+        self._mongo_size_bytes = int(size_bytes or 0)
         self.collection_combo.configure(state="normal")
         self._clear_collection_rows()
 
@@ -2330,7 +2441,8 @@ class BackupView(BaseView):
             self._select_collection(None)
             return
 
-        self._make_collection_row(key="", title="All collections", subtitle="Full database")
+        size_text = _format_byte_size(self._mongo_size_bytes) if self._mongo_size_bytes else "Full database"
+        self._make_collection_row(key="", title="All collections", subtitle=size_text)
         for item in collections:
             self._add_collection_row(item["name"], int(item.get("count", 0) or 0))
 
@@ -2358,7 +2470,8 @@ class BackupView(BaseView):
         def task():
             try:
                 collections = fetch_mongodb_collections(self.connection, db_name)
-                self.after(0, lambda: self._populate_collections(collections))
+                size_bytes = fetch_mongodb_database_size_bytes(self.connection, db_name)
+                self.after(0, lambda c=collections, n=size_bytes: self._populate_collections(c, size_bytes=n))
             except Exception as exc:
                 self.after(0, lambda: self._populate_collections([], str(exc)))
 
@@ -2408,6 +2521,7 @@ class BackupView(BaseView):
             )
 
         self._update_ssh_status_label()
+        self._update_backup_size_note()
 
         if self._is_connected_server_backup():
             self._ensure_remote_path_default()
@@ -2439,8 +2553,9 @@ class BackupView(BaseView):
                     text="Enter SSH credentials and click Connect & Browse."
                 )
 
+        self.database_hint.configure(text=self._database_hint_text())
+        self.database_hint.pack(anchor="w", pady=(6, 0))
         if is_mongo:
-            self.database_hint.pack(anchor="w", pady=(6, 0))
             self.mongo_options_frame.grid()
             self.mongo_folder_label.grid()
             self.backup_folder_entry.grid()
@@ -2454,7 +2569,6 @@ class BackupView(BaseView):
                 self.collections_frame.grid_remove()
         else:
             self.collections_frame.grid_remove()
-            self.database_hint.pack_forget()
             self.mongo_options_frame.grid_remove()
             self.mongo_folder_label.grid_remove()
             self.backup_folder_entry.grid_remove()
@@ -2616,6 +2730,8 @@ class BackupView(BaseView):
         )
 
     def _update_command_preview(self) -> None:
+        if not hasattr(self, "command_preview"):
+            return
         try:
             request = self._build_request()
             preview = describe_backup_command(request)
@@ -2681,6 +2797,7 @@ class BackupView(BaseView):
             return
 
         cached_other_ssh = dict(self._cached_other_ssh) if self._cached_other_ssh else None
+        started = time.perf_counter()
 
         def task():
             try:
@@ -2722,7 +2839,12 @@ class BackupView(BaseView):
                     self.status_label.configure(text="Backup completed")
 
                 self.after(0, show_success)
-                self.log(f"Backup completed: {result.output_path}")
+                elapsed = time.perf_counter() - started
+                size_bytes = _path_size_bytes(result.output_path)
+                size_text = _format_byte_size(size_bytes) if size_bytes else "size not measured"
+                self.log(
+                    f"Backup completed: {result.output_path} — {size_text} in {_format_duration(elapsed)}"
+                )
             except Exception as exc:
                 message = str(exc)
 
@@ -2787,3 +2909,31 @@ class BackupView(BaseView):
             self.results.insert(
                 "end", f"{b['name']}  —  {size_text}\n  {b['path']}\n\n"
             )
+
+
+def _format_byte_size(size_bytes: int) -> str:
+    size = int(size_bytes or 0)
+    if size >= 1024 ** 3:
+        return f"{size / (1024 ** 3):.1f} GB"
+    if size >= 1024 ** 2:
+        return f"{size / (1024 ** 2):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} bytes"
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _path_size_bytes(path: str) -> int:
+    target = Path(path)
+    if not target.exists():
+        return 0
+    if target.is_file():
+        return target.stat().st_size
+    return sum(item.stat().st_size for item in target.rglob("*") if item.is_file())
