@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from backend.services.mysql_patch.command_runner import (
     CMD_APT_GET,
     CMD_DF_DNF,
@@ -18,6 +20,7 @@ from backend.services.mysql_patch.command_runner import (
     CMD_OS_RELEASE,
     CMD_RPM_SERVER,
     CMD_SERVICE_MYSQLD,
+    CMD_SUDO_CHECK,
     dnf_history_info_command,
     dnf_upgrade_assumeno_command,
     is_allowed_command,
@@ -573,6 +576,9 @@ def test_history_output_truncation_does_not_establish_provenance():
 
     assert "truncated" in (report.stop_reason or "")
     assert report.v1_patch_eligible is False
+    assert report.environment_supported is True
+    assert report.transport_error is None
+    assert report.repository_origin == PackageOrigin.UNKNOWN
 
 
 def test_dnf5_history_table_reads_appstream_and_ignores_system():
@@ -599,9 +605,261 @@ def test_dnf5_history_table_reads_appstream_and_ignores_system():
     _runner, report = _discover(responses)
 
     assert is_allowed_command(CMD_DNF_HISTORY_LIST)
-    assert CMD_DNF_HISTORY_LIST.startswith("sudo -n ")
+    assert "sudo" not in CMD_DNF_HISTORY_LIST
+    assert "sudo" not in dnf_history_info_command(5)
     assert is_allowed_command(dnf_history_info_command(5))
     assert is_allowed_command("sudo -n dnf history info 5; reboot") is False
+    assert is_allowed_command("sudo -n dnf --assumeno history info 5") is False
     assert report.repository_origin == PackageOrigin.CENTOS_REPOSITORIES
     assert report.mysql_upstream_version == "8.4.11"
     assert report.stop_reason == "No newer MySQL package is available from the CentOS repositories"
+
+
+def test_unprivileged_history_read_does_not_use_sudo():
+    runner, report = _discover(_responses())
+    history_commands = [command for command in runner.calls if " history " in f" {command} "]
+
+    assert history_commands
+    assert CMD_DNF_HISTORY_LIST == "dnf history list"
+    assert dnf_history_info_command(5) == "dnf history info 5"
+    assert "--contains-pkgs" not in CMD_DNF_HISTORY_LIST
+    assert "--assumeno" not in CMD_DNF_HISTORY_LIST
+    assert all(is_allowed_command(command) for command in history_commands)
+    assert all("sudo" not in command for command in history_commands)
+    assert report.repository_origin == PackageOrigin.CENTOS_REPOSITORIES
+    assert "password is required" not in (report.stop_reason or "")
+
+
+def test_server_history_table_identifies_appstream_without_package_filters():
+    evr = "8.4.11-1.el10"
+    responses = _responses(installed=evr, candidate=evr)
+    responses[CMD_RPM_SERVER] = (
+        0,
+        "".join(
+            f"{name}\t{name}-{evr}.{arch}\t{evr}\n"
+            for name, arch in (
+                ("mysql8.4-server", "x86_64"),
+                ("mysql8.4", "x86_64"),
+                ("mysql8.4-common", "x86_64"),
+                ("mysql8.4-errmsg", "noarch"),
+            )
+        ),
+        "",
+    )
+    responses[CMD_DNF_HISTORY_LIST] = (
+        0,
+        "ID | Command line | Date and time | Action(s) | Altered\n"
+        "5 | upgrade mysql8.4* | 2026-10-14 12:16 | Upgrade | 4\n"
+        "4 | install mysql8.4-server -y | 2026-07-30 15:20 | Install | 8 EE\n"
+        "3 | install git -y | 2026-07-30 15:15 | Install | 5\n",
+        "",
+    )
+    lines = ["Transaction ID : 5", "Command Line : upgrade mysql8.4*", "Packages Altered:"]
+    for name, arch in (
+        ("mysql8.4", "x86_64"),
+        ("mysql8.4-common", "x86_64"),
+        ("mysql8.4-errmsg", "noarch"),
+        ("mysql8.4-server", "x86_64"),
+    ):
+        lines.append(f"  Upgrade  {name}-{evr}.{arch}  @appstream")
+        lines.append(f"  Upgraded {name}-8.4.9-1.el10.{arch}  @@System")
+    responses[dnf_history_info_command(5)] = (0, "\n".join(lines) + "\n", "")
+    responses[dnf_history_info_command(4)] = (0, "Transaction ID : 4\nPackages Altered:\n", "")
+    responses[dnf_history_info_command(3)] = (0, "Transaction ID : 3\nPackages Altered:\n  Install  git-2.45.x86_64  @appstream\n", "")
+    _runner, report = _discover(responses)
+
+    assert report.repository_origin == PackageOrigin.CENTOS_REPOSITORIES
+    assert report.environment_supported is True
+    assert "git" not in (report.stop_reason or "")
+
+
+def test_history_usage_error_keeps_centos_checks_available():
+    responses = _responses()
+    responses[CMD_DNF_HISTORY_LIST] = (
+        2,
+        "",
+        "usage: dnf history [-c [config file]] [-q] [-v] [--version]\n",
+    )
+    runner = FakeRunner(responses)
+    discovery = EnvironmentDiscoveryService().discover(runner, server_id="centos-01")
+    report = PrecheckService(
+        backups=_Backups(
+            BackupReadinessState.READABLE_UNVERIFIED,
+            "Backup file passed the existing readability check. This does not prove the backup can be restored.",
+        ),
+        jobs=_Jobs([]),
+    ).precheck(runner, server_id="centos-01", backup_path="C:/backup.sql")
+
+    assert CMD_DNF_HISTORY_LIST in runner.calls
+    assert "--contains-pkgs" not in " ".join(runner.calls)
+    assert discovery.environment_supported is True
+    assert discovery.repository_origin == PackageOrigin.UNKNOWN
+    assert "exit code 2" in (discovery.stop_reason or "")
+    assert "usage: dnf history" in (discovery.stop_reason or "")
+    assert report.ready_for_plan is False
+    assert not any(
+        item.status.value == "skipped" and "not supported" in item.summary
+        for item in report.checks
+        if item.code in {"sudo", "disk", "locks", "pending_packages"}
+    )
+    assert any(item.code == "disk" and item.status.value != "skipped" for item in report.checks)
+
+
+def test_large_unrelated_history_transaction_is_not_downloaded():
+    listing, _info = _history(INSTALLED)
+    responses = _responses()
+    responses[CMD_DNF_HISTORY_LIST] = (
+        0,
+        listing + "1 | install -y gcc make perl | 2026-07-30 14:25 | Install | 1259 >E\n",
+        "",
+    )
+    runner, report = _discover(responses)
+
+    assert dnf_history_info_command(1) not in runner.calls
+    assert dnf_history_info_command(5) in runner.calls
+    assert report.repository_origin == PackageOrigin.CENTOS_REPOSITORIES
+    assert report.environment_supported is True
+
+
+def test_history_stdout_limit_keeps_centos_supported():
+    from backend.services.mysql_patch.command_runner import MAX_OUTPUT_CHARS
+
+    responses = _responses()
+    responses[dnf_history_info_command(5)] = (0, "P" * MAX_OUTPUT_CHARS, "warning only\n")
+    _runner, report = _discover(responses)
+
+    assert report.transport_error is None
+    assert report.environment_supported is True
+    assert report.repository_origin == PackageOrigin.UNKNOWN
+    assert report.v1_patch_eligible is False
+    assert "truncated" in (report.stop_reason or "")
+
+
+def test_history_stderr_limit_is_not_treated_as_provenance():
+    from backend.services.mysql_patch.command_runner import MAX_OUTPUT_CHARS
+
+    responses = _responses()
+    responses[CMD_DNF_HISTORY_LIST] = (0, "ID | Command line | Date and time | Action(s) | Altered\n", "E" * MAX_OUTPUT_CHARS)
+    _runner, report = _discover(responses)
+
+    assert report.transport_error is None
+    assert report.environment_supported is True
+    assert report.repository_origin != PackageOrigin.CENTOS_REPOSITORIES
+    assert "truncated" in (report.stop_reason or "")
+
+
+def test_transaction_cap_does_not_invent_provenance():
+    lines = [
+        "ID | Command line | Date and time | Action(s) | Altered",
+    ]
+    lines.extend(
+        f"{tx_id} | upgrade | 2026-10-14 10:00 | Upgrade | 4" for tx_id in range(11, 0, -1)
+    )
+    responses = _responses()
+    responses[CMD_DNF_HISTORY_LIST] = (0, "\n".join(lines) + "\n", "")
+    for tx_id in range(11, 1, -1):
+        responses[dnf_history_info_command(tx_id)] = (0, f"Transaction ID : {tx_id}\nPackages altered:\n", "")
+    supplied, info = _history(INSTALLED)
+    del supplied
+    responses[dnf_history_info_command(1)] = (0, info, "")
+    runner, report = _discover(responses)
+
+    assert dnf_history_info_command(1) not in runner.calls
+    assert dnf_history_info_command(11) in runner.calls
+    assert report.repository_origin == PackageOrigin.UNKNOWN
+    assert report.environment_supported is True
+    assert "did not examine every transaction" in (report.stop_reason or "")
+    assert "does not identify the repository" in (report.stop_reason or "")
+
+
+def test_ssh_runner_reports_which_history_stream_exceeded_the_limit(monkeypatch):
+    from backend.services.mysql_patch.command_runner import MAX_OUTPUT_CHARS, SshCommandRunner
+    from backend.services.mysql_patch.errors import OutputLimitError
+
+    def fake_ssh(**kwargs: object) -> tuple[int, str, str]:
+        command = str(kwargs["command"])
+        if command == "dnf history info 1":
+            return 0, "x" * (MAX_OUTPUT_CHARS + 1), ""
+        if command == "dnf history list":
+            return 0, "", "e" * (MAX_OUTPUT_CHARS + 1)
+        raise AssertionError(command)
+
+    monkeypatch.setattr("backend.services.ssh_client.run_ssh_command", fake_ssh)
+    runner = SshCommandRunner(host="10.0.0.8", port=22, username="user", password="secret-value")
+
+    with pytest.raises(OutputLimitError) as stdout_limit:
+        runner.run("dnf history info 1")
+    with pytest.raises(OutputLimitError) as stderr_limit:
+        runner.run(CMD_DNF_HISTORY_LIST)
+
+    assert stdout_limit.value.category == "dnf history"
+    assert stdout_limit.value.stream == "stdout"
+    assert stderr_limit.value.category == "dnf history"
+    assert stderr_limit.value.stream == "stderr"
+    assert "secret-value" not in str(stdout_limit.value)
+    assert "x" * 20 not in str(stdout_limit.value)
+
+
+def test_current_centos_package_is_not_a_precheck_failure():
+    responses = _responses(installed=INSTALLED, candidate=INSTALLED)
+    responses[CMD_ID] = (0, "1000\n", "")
+    responses[CMD_SUDO_CHECK] = (1, "", "sudo: a password is required")
+    runner = FakeRunner(responses)
+    report = PrecheckService(
+        backups=_Backups(
+            BackupReadinessState.READABLE_UNVERIFIED,
+            "Backup file passed the existing readability check. This does not prove the backup can be restored.",
+        ),
+        jobs=_Jobs([]),
+    ).precheck(runner, server_id="centos-01", backup_path="C:/backup.sql")
+
+    candidate = next(item for item in report.checks if item.code == "candidate")
+    assert candidate.status.value == "warning"
+    assert candidate.summary == "No newer MySQL package is available from the CentOS repositories"
+    assert report.discovery.repository_origin == PackageOrigin.CENTOS_REPOSITORIES
+    assert report.precheck_passed is True
+    assert report.ready_for_plan is False
+    assert next(item for item in report.checks if item.code == "sudo").status.value == "warning"
+
+
+def test_uncertain_repository_still_fails_the_candidate_check():
+    responses = _responses(installed=INSTALLED, candidate=INSTALLED)
+    responses[CMD_DNF_REPOQUERY] = (1, "", "Cache-only enabled but no cache\n")
+    runner = FakeRunner(responses)
+    report = PrecheckService(
+        backups=_Backups(
+            BackupReadinessState.READABLE_UNVERIFIED,
+            "Backup file passed the existing readability check. This does not prove the backup can be restored.",
+        ),
+        jobs=_Jobs([]),
+    ).precheck(runner, server_id="centos-01", backup_path="C:/backup.sql")
+
+    assert report.discovery.repository_origin == PackageOrigin.UNKNOWN
+    assert report.precheck_passed is False
+    assert any(item.status.value == "fail" for item in report.checks)
+    assert report.ready_for_plan is False
+
+
+def test_passwordless_sudo_is_explicit_for_a_read_only_precheck():
+    responses = _responses()
+    responses[CMD_ID] = (0, "1000\n", "")
+    responses[CMD_SUDO_CHECK] = (1, "", "sudo: a password is required")
+    runner = FakeRunner(responses)
+    report = PrecheckService(
+        backups=_Backups(
+            BackupReadinessState.READABLE_UNVERIFIED,
+            "Backup file passed the existing readability check. This does not prove the backup can be restored.",
+        ),
+        jobs=_Jobs([]),
+    ).precheck(runner, server_id="centos-01", backup_path="/home/user/db_autopro_backups/employees_pre_patch.sql")
+
+    history_commands = [command for command in runner.calls if " history " in f" {command} "]
+    sudo = next(item for item in report.checks if item.code == "sudo")
+    assert history_commands
+    assert all("sudo" not in command for command in history_commands)
+    assert CMD_SUDO_CHECK in runner.calls
+    assert sudo.status.value == "warning"
+    assert "Passwordless sudo is not available" in sudo.summary
+    assert "password is required" in sudo.summary
+    assert CMD_DF_DNF in runner.calls
+    assert "DNF history" not in (report.stop_reason or "")

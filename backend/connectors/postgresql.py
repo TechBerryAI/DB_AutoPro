@@ -41,12 +41,14 @@ class PostgreSQLConnector(BaseConnector):
             from psycopg2.extras import RealDictCursor
 
             timeout = (self.config.extra_options or {}).get("connect_timeout", 5)
+            requested = (self.config.ssl_mode or "").strip().lower()
             ssl_modes: list[str] = []
-            if self.config.ssl_mode:
-                ssl_modes.append(self.config.ssl_mode)
-            for mode in ("prefer", "require", "allow", "disable"):
-                if mode not in ssl_modes:
-                    ssl_modes.append(mode)
+            if requested:
+                ssl_modes.append(requested)
+                if requested == "prefer":
+                    ssl_modes.append("require")
+            else:
+                ssl_modes.extend(("prefer", "require", "allow", "disable"))
 
             tried: set[str] = set()
             last_error: Exception | None = None
@@ -119,6 +121,11 @@ class PostgreSQLConnector(BaseConnector):
                 return []
         finally:
             conn.close()
+
+    def open_connection(self) -> Any:
+        """Open one PostgreSQL connection. The caller closes it."""
+        conn, _factory = self._connect()
+        return conn
 
     def execute_script(self, script: str) -> None:
         conn, _ = self._connect()

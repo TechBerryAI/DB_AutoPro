@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from backend.services.mysql_patch.models import MysqlPatchAuditRecord
+from backend.services.mysql_patch.models import MysqlPatchAuditRecord, PackageOrigin, UpgradeKind
 from desktop.app import (
     CONNECTION_REQUIRED_KEYS,
     NAV_GROUPS,
@@ -13,8 +13,17 @@ from desktop.app import (
     PATCH_SUBNAV,
     mysql_software_patch_visible,
 )
+from backend.services.mysql_patch.precheck import verified_no_update
 from desktop.mysql_patch_export import export_patch_csv, export_patch_pdf
-from desktop.mysql_patch_flow import apply_allowed, approve_allowed, plan_allowed, precheck_allowed, refresh_allowed
+from desktop.mysql_patch_flow import (
+    apply_allowed,
+    approve_allowed,
+    plan_allowed,
+    precheck_allowed,
+    preview_status_text,
+    refresh_allowed,
+    version_status_text,
+)
 
 
 def test_mysql_patch_page_is_in_operations_and_does_not_require_a_db_session():
@@ -57,6 +66,68 @@ def test_other_actions_follow_the_same_gates():
     assert plan_allowed(preview_accepted=True, busy=False) is True
     assert approve_allowed(plan_ready=True, already_approved=False, busy=False) is True
     assert approve_allowed(plan_ready=True, already_approved=True, busy=False) is False
+
+
+def _discovery(**overrides):
+    base = dict(
+        mysql_server_version="8.4.11-1.el10",
+        candidate_version="8.4.11-1.el10",
+        upgrade_kind=UpgradeKind.NONE,
+        repository_origin=PackageOrigin.CENTOS_REPOSITORIES,
+        patch_available=False,
+        v1_patch_eligible=False,
+        stop_reason="No newer MySQL package is available from the CentOS repositories",
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_no_update_state_blocks_plan_approval_and_apply():
+    discovery = _discovery()
+    approval = SimpleNamespace(high_risk_confirmed=True, plan_digest="abc")
+
+    assert verified_no_update(discovery) is True
+    assert version_status_text(discovery) == (
+        "No update available. Installed 8.4.11-1.el10 matches the repository candidate."
+    )
+    assert preview_status_text(discovery) == "No update available. A patch plan is not created."
+    assert refresh_allowed(precheck_ready=True, busy=False, update_available=False) is False
+    assert plan_allowed(preview_accepted=True, busy=False, update_available=False) is False
+    assert approve_allowed(plan_ready=True, already_approved=False, busy=False, update_available=False) is False
+    assert apply_allowed(
+        precheck_ready=True,
+        preview_accepted=True,
+        approval=approval,
+        busy=False,
+        update_available=False,
+    ) is False
+
+
+def test_available_update_keeps_the_candidate_actions():
+    discovery = _discovery(
+        candidate_version="8.4.12-1.el10",
+        upgrade_kind=UpgradeKind.MAINTENANCE,
+        patch_available=True,
+        v1_patch_eligible=True,
+        stop_reason=None,
+    )
+
+    assert verified_no_update(discovery) is False
+    assert "Candidate 8.4.12-1.el10" in version_status_text(discovery)
+    assert refresh_allowed(precheck_ready=True, busy=False, update_available=True) is True
+    assert plan_allowed(preview_accepted=True, busy=False, update_available=True) is True
+
+
+def test_repository_query_failure_is_not_a_no_update_state():
+    discovery = _discovery(
+        repository_origin=PackageOrigin.UNKNOWN,
+        candidate_version=None,
+        stop_reason="DNF repository metadata is unavailable. The installed MySQL package was still detected.",
+    )
+
+    assert verified_no_update(discovery) is False
+    assert "No update available" not in version_status_text(discovery)
+    assert refresh_allowed(precheck_ready=False, busy=False, update_available=False) is False
 
 
 def test_patch_report_export_omits_secrets(tmp_path):

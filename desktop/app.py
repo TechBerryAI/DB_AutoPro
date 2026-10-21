@@ -82,19 +82,24 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
     ),
 ]
 
-# Software patch pages live under the Patching row. SQL script patching stays the parent page.
+# MySQL package patching lives under the Patching row. SQL script patching stays the parent page.
 PATCH_SUBNAV: list[tuple[str, str, type]] = [
     ("mysql_patch", "MySQL Patch Management", MysqlPatchView),
 ]
 
 
-def mysql_software_patch_visible(connection) -> bool:
-    """MySQL software patching is offered only for a connected MySQL server."""
+def _connected_db_type(connection) -> str:
     if connection is None:
-        return False
+        return ""
     db_type = getattr(connection, "db_type", None)
     value = getattr(db_type, "value", db_type)
-    return str(value or "").strip().lower() == "mysql"
+    return str(value or "").strip().lower()
+
+
+def mysql_software_patch_visible(connection) -> bool:
+    """MySQL software patching is offered only for a connected MySQL server."""
+    return _connected_db_type(connection) == "mysql"
+
 
 NAV_ITEMS: list[tuple[str, str, type]] = [
     (key, label, cls) for _, items in NAV_GROUPS for key, label, cls in items
@@ -1096,7 +1101,8 @@ class DatabaseAutomationApp(ctk.CTk):
     def _style_patch_subnav(self) -> None:
         t = self._t
         mysql_ready = mysql_software_patch_visible(self.connection)
-        show = mysql_ready and self._patch_nav_expanded and not self._sidebar_collapsed
+        patch_ready = mysql_ready
+        show = patch_ready and self._patch_nav_expanded and not self._sidebar_collapsed
         frame = self._patch_subnav_frame
         if frame is not None:
             if show:
@@ -1110,13 +1116,14 @@ class DatabaseAutomationApp(ctk.CTk):
                 frame.pack_forget()
         parent = self.nav_buttons.get("patching")
         if parent is not None:
-            if mysql_ready:
+            if patch_ready:
                 arrow = "▾" if show else "▸"
                 parent.configure(text=f"  {arrow}  Patching")
             else:
                 parent.configure(text="  Patching")
+        child_ready = {"mysql_patch": mysql_ready}
         for child_key, btn in self._patch_sub_buttons.items():
-            if child_key == "mysql_patch" and not mysql_ready:
+            if not child_ready.get(child_key, False):
                 if btn.winfo_manager():
                     btn.pack_forget()
                 continue
@@ -1465,7 +1472,7 @@ class DatabaseAutomationApp(ctk.CTk):
                             kwargs["saved_server"] = restore
                         if extra.get("new_connection"):
                             kwargs["new_connection"] = True
-                    elif view_cls is MysqlPatchView:
+                    elif view_cls in {MysqlPatchView, PatchView}:
                         kwargs["employee"] = self.employee
                     elif view_cls is LogsView:
                         kwargs["log_store"] = self.log_store

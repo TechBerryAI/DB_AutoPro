@@ -33,8 +33,10 @@ from backend.services.mysql_patch.models import (
     EnvironmentReport,
     JobOutcome,
     PackageManagerKind,
+    PackageOrigin,
     PatchJobSnapshot,
     PrecheckReport,
+    UpgradeKind,
 )
 from backend.services.mysql_patch.redaction import redact_text
 
@@ -240,18 +242,18 @@ class PrecheckService:
                     checks.append(
                         DiscoveryCheck(
                             code="sudo",
-                            status=CheckStatus.FAIL,
+                            status=CheckStatus.WARNING,
                             summary=f"Passwordless sudo is not available ({detail})",
                         )
                     )
-                    return
-                checks.append(
-                    DiscoveryCheck(
-                        code="sudo",
-                        status=CheckStatus.PASS,
-                        summary="Passwordless sudo is available",
+                else:
+                    checks.append(
+                        DiscoveryCheck(
+                            code="sudo",
+                            status=CheckStatus.PASS,
+                            summary="Passwordless sudo is available",
+                        )
                     )
-                )
 
             disk_command, lock_command, audit_command, disk_summary, lock_summary, audit_summary = (
                 _safety_commands(discovery)
@@ -320,6 +322,15 @@ class PrecheckService:
                     code="maintenance_window",
                     status=CheckStatus.WARNING,
                     summary=_maintenance_window(discovery),
+                )
+            )
+            return
+        if verified_no_update(discovery):
+            checks.append(
+                DiscoveryCheck(
+                    code="candidate",
+                    status=CheckStatus.WARNING,
+                    summary=discovery.stop_reason or "No newer MySQL package is available",
                 )
             )
             return
@@ -432,6 +443,18 @@ class PrecheckService:
         if len(result.stdout) >= MAX_OUTPUT_CHARS or len(result.stderr) >= MAX_OUTPUT_CHARS:
             raise MysqlPatchSafetyError("Remote command output exceeded the size limit")
         return result
+
+
+def verified_no_update(discovery: EnvironmentReport) -> bool:
+    """True only after a successful candidate query found no newer approved package."""
+    if discovery.upgrade_kind != UpgradeKind.NONE or not discovery.candidate_version:
+        return False
+    if discovery.repository_origin not in {
+        PackageOrigin.CENTOS_REPOSITORIES,
+        PackageOrigin.UBUNTU_ARCHIVE,
+    }:
+        return False
+    return (discovery.stop_reason or "").startswith("No newer MySQL package is available")
 
 
 def _safety_commands(discovery: EnvironmentReport) -> tuple[str, str, str, str, str, str]:

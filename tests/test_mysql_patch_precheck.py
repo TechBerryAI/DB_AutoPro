@@ -137,18 +137,19 @@ def test_ssh_failure_fails_closed():
     assert report.stop_reason == "timed out"
 
 
-def test_missing_sudo_fails():
+def test_missing_sudo_is_reported_without_blocking_read_only_checks():
     responses = _ready_responses()
     responses[CMD_ID] = (0, "1000\n", "")
     responses[CMD_SUDO_CHECK] = (1, "", "password=secret a password is required")
     runner, report = _run(responses)
 
     sudo = next(item for item in report.checks if item.code == "sudo")
-    assert sudo.status.value == "fail"
+    assert sudo.status.value == "warning"
+    assert "Passwordless sudo is not available" in sudo.summary
     assert "secret" not in sudo.summary
     assert "[REDACTED]" in sudo.summary
-    assert report.ready_for_plan is False
-    assert CMD_DF not in runner.calls
+    assert CMD_DF in runner.calls
+    assert report.ready_for_plan is True
 
 
 def test_low_disk_fails():
@@ -220,9 +221,11 @@ def test_no_patch_available_is_not_ready():
     )
     _, report = _run(responses)
 
+    candidate = next(item for item in report.checks if item.code == "candidate")
     assert report.discovery.v1_patch_eligible is False
     assert report.ready_for_plan is False
-    assert any(item.code == "candidate" and item.status.value == "fail" for item in report.checks)
+    assert candidate.status.value == "warning"
+    assert candidate.summary.startswith("No newer MySQL package is available")
 
 
 def test_inactive_mysql_service_fails():

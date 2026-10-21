@@ -12,22 +12,55 @@ from backend.services.patch_service import PatchService
 from desktop.ops_widgets import page_header
 from desktop.theme import ThemeManager, themed_scrollable_frame
 from desktop.views.base_view import BaseView
+from desktop.views.postgres_patch_view import PostgresPatchView, _postgres_connected
+
+
+def uses_postgres_patch_workflow(connection) -> bool:
+    """The Patching page uses the PostgreSQL review workflow only for a PostgreSQL session."""
+    return _postgres_connected(connection)
 
 
 class PatchView(BaseView):
-    """SQL patch execution and history."""
+    """SQL patch execution and history. PostgreSQL sessions use the reviewed administration workflow."""
 
     def __init__(self, master, theme: ThemeManager, log_callback=None, **kwargs) -> None:
         super().__init__(master, theme, log_callback, **kwargs)
         self.service = PatchService()
-        self._build_ui()
+        self._postgres_page = None
+        self._build()
 
     def refresh(self, *, force: bool = False) -> None:
         """Re-sync patching page with the active connection."""
-        del force
+        if self._postgres_page is not None:
+            self._postgres_page.refresh(force=force)
+            return
         self.log("Patching page refreshed")
 
-    def _build_ui(self) -> None:
+    def on_connection_changed(self) -> None:
+        self._build()
+
+    def _clear(self) -> None:
+        self._postgres_page = None
+        for child in list(self.winfo_children()):
+            child.destroy()
+
+    def _build(self) -> None:
+        self._clear()
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        if uses_postgres_patch_workflow(self.connection):
+            self._postgres_page = PostgresPatchView(
+                self,
+                self.theme,
+                log_callback=self.log_callback,
+                connection=self.connection,
+                employee=self.employee,
+            )
+            self._postgres_page.grid(row=0, column=0, sticky="nsew")
+            return
+        self._build_generic()
+
+    def _build_generic(self) -> None:
         # Same shell as Backup / Restore: page fills the content column.
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)

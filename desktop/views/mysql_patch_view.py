@@ -37,7 +37,9 @@ from desktop.mysql_patch_flow import (
     approve_allowed,
     plan_allowed,
     precheck_allowed,
+    preview_status_text,
     refresh_allowed,
+    version_status_text,
 )
 from desktop.ops_widgets import page_header
 from desktop.theme import ThemeManager, themed_scrollable_frame
@@ -393,6 +395,10 @@ class MysqlPatchView(BaseView):
     def _sync_buttons(self) -> None:
         server_selected = self._selected_server() is not None
         backup = self.backup_path.get()
+        discovery = None if self._precheck is None else self._precheck.discovery
+        update_available = bool(
+            discovery is not None and discovery.patch_available and discovery.v1_patch_eligible
+        )
         precheck_ready = bool(self._precheck and self._precheck.ready_for_plan)
         preview_accepted = bool(self._preview and self._preview.accepted)
         plan_ready = self._plan is not None
@@ -407,11 +413,24 @@ class MysqlPatchView(BaseView):
             )
             else "disabled"
         )
-        self.refresh_button.configure(state="normal" if refresh_allowed(precheck_ready=precheck_ready, busy=self._busy) else "disabled")
-        self.plan_button.configure(state="normal" if plan_allowed(preview_accepted=preview_accepted, busy=self._busy) else "disabled")
+        self.refresh_button.configure(
+            state="normal"
+            if refresh_allowed(precheck_ready=precheck_ready, busy=self._busy, update_available=update_available)
+            else "disabled"
+        )
+        self.plan_button.configure(
+            state="normal"
+            if plan_allowed(preview_accepted=preview_accepted, busy=self._busy, update_available=update_available)
+            else "disabled"
+        )
         self.approve_button.configure(
             state="normal"
-            if approve_allowed(plan_ready=plan_ready, already_approved=approved, busy=self._busy)
+            if approve_allowed(
+                plan_ready=plan_ready,
+                already_approved=approved,
+                busy=self._busy,
+                update_available=update_available,
+            )
             else "disabled"
         )
         self.apply_button.configure(
@@ -421,6 +440,7 @@ class MysqlPatchView(BaseView):
                 preview_accepted=preview_accepted,
                 approval=None if self._plan is None else self._plan.approval,
                 busy=self._busy,
+                update_available=update_available,
             )
             else "disabled"
         )
@@ -462,12 +482,7 @@ class MysqlPatchView(BaseView):
                 f"Repository: {discovery.repository_origin.value}"
             )
         )
-        self.version_label.configure(
-            text=(
-                f"Current {discovery.mysql_server_version or '-'}  |  "
-                f"Candidate {discovery.candidate_version or '-'}"
-            )
-        )
+        self.version_label.configure(text=version_status_text(discovery))
         self._write(self.precheck_box, _checks_text(report.checks, report.stop_reason))
         self.risk_label.configure(
             text=(
@@ -475,7 +490,7 @@ class MysqlPatchView(BaseView):
                 f"Service interruption expected: {'yes' if report.service_interruption_expected else 'no'}."
             )
         )
-        self._write(self.preview_box, "Run Refresh Patch Information after prechecks pass.")
+        self._write(self.preview_box, preview_status_text(discovery))
         self.log("MySQL patch prechecks finished")
 
     def _start_preview(self) -> None:
