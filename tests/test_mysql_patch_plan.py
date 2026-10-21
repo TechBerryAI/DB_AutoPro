@@ -8,6 +8,7 @@ import pytest
 
 from backend.services.mysql_patch.command_runner import apt_policy_command, apt_simulate_command
 from backend.services.mysql_patch.errors import MysqlPatchSafetyError
+from backend.services.mysql_patch.models import UpgradeKind
 from backend.services.mysql_patch.plan_service import PlanService
 from backend.services.mysql_patch.preview import PackagePreviewService
 from tests.test_mysql_patch_discovery import CANDIDATE, INSTALLED, FakeRunner, _policy
@@ -114,6 +115,24 @@ def test_rejected_preview_cannot_become_a_plan():
 
     with pytest.raises(MysqlPatchSafetyError):
         PlanService().create_from_preview(preview)
+
+
+def test_no_newer_package_cannot_become_a_plan_or_approval():
+    _runner, preview = _accepted()
+    discovery = preview.precheck.discovery
+    original_kind = discovery.upgrade_kind
+    discovery.upgrade_kind = UpgradeKind.NONE
+    discovery.patch_available = False
+
+    with pytest.raises(MysqlPatchSafetyError, match="No newer MySQL package is available"):
+        PlanService().create_from_preview(preview)
+
+    discovery.upgrade_kind = original_kind
+    discovery.patch_available = True
+    plan = PlanService().create_from_preview(preview)
+    plan.upgrade_kind = UpgradeKind.NONE
+    with pytest.raises(MysqlPatchSafetyError, match="No newer MySQL package is available"):
+        PlanService().approve(plan, approved_by="alex", high_risk_confirmed=True)
 
 
 def test_approval_requires_a_person_and_high_risk_confirmation():

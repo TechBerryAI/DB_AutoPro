@@ -10,12 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes import auth, backup, fdw, migration, monitoring, patch, restore
 from backend.core.config import get_settings
 from backend.core.logging import setup_logging
+from backend.services.pg_mysql_migration.operation_store import MigrationOperationStore
 from backend.services.scheduler_service import SchedulerService
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    MigrationOperationStore().reconcile_interrupted()
     scheduler = SchedulerService()
     scheduler.start()
     yield

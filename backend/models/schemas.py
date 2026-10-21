@@ -251,6 +251,17 @@ class MigrationRequest(BaseModel):
     target_profile: str = "default"
     schema_only: bool = False
     tables: list[str] = Field(default_factory=list)
+    scope: str = ""
+    strategy: str = ""
+    source_database: str = ""
+    target_database: str = ""
+    confirm_plan: bool = False
+    confirm_replace: bool = False
+    accept_unproven_backup: bool = False
+    confirm_retry: bool = False
+    client_request_id: str = ""
+    batch_size: int = 1000
+    statement_timeout_ms: int = 0
 
 
 class OperationResult(BaseModel):
@@ -271,6 +282,19 @@ class PatchHistoryEntry(BaseModel):
     status: OperationStatus
     executed_by: str
     rollback_available: bool = False
+    finished_at: datetime | None = None
+    target_database: str = ""
+    target_host: str = ""
+    checksum_sha256: str = ""
+    duration_seconds: float | None = None
+    error: str = ""
+    verification_status: str = ""
+    verification_summary: str = ""
+    confirmed_by: str = ""
+    apply_result: str = ""
+    patch_name: str = ""
+    system_identifier: str = ""
+    database_oid: str = ""
 
 
 class HealthCheckResult(BaseModel):

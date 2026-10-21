@@ -32,6 +32,7 @@ from backend.services.mysql_patch.command_runner import (
     CommandRunner,
     dnf_history_info_command,
 )
+from backend.services.mysql_patch.errors import OutputLimitError
 from backend.services.mysql_patch.models import (
     CheckStatus,
     DiscoveryCheck,
@@ -52,6 +53,7 @@ _CENTOS_REPO_IDS = {"appstream", "baseos", "extras-common"}
 _SUPPLYING_ACTIONS = {"install", "upgrade", "reinstall"}
 _PREVIOUS_ACTIONS = {"upgraded", "removed", "obsoleted", "obsolete", "downgraded"}
 _MAX_HISTORY_TRANSACTIONS = 10
+_MAX_HISTORY_PACKAGES = 64
 _HISTORY_ACTIONS = _SUPPLYING_ACTIONS | _PREVIOUS_ACTIONS | {"downgrade"}
 _NOT_INSTALLED = re.compile(r"package (\S+) is not installed", re.IGNORECASE)
 _SERVER_PACKAGE = "mysql8.4-server"
@@ -177,8 +179,7 @@ class CentosMysqlDnfAdapter:
         if history_problem == "abort":
             return report
         if history_problem:
-            report.repository_origin = PackageOrigin.UNKNOWN
-            return self._fail(report, "repository", history_problem)
+            return self._provenance_failure(report, history_problem)
         if origin != PackageOrigin.CENTOS_REPOSITORIES:
             report.repository_origin = PackageOrigin.UNKNOWN
             return self._fail(
@@ -299,7 +300,7 @@ class CentosMysqlDnfAdapter:
             return "abort"
         if listed.exit_code != 0:
             return _history_read_failure("list", listed)
-        transaction_ids = parse_history_ids(listed.stdout)[:_MAX_HISTORY_TRANSACTIONS]
+        transaction_ids, incomplete = select_history_ids(listed.stdout)
         details: list[str] = []
         for transaction_id in transaction_ids:
             command = dnf_history_info_command(transaction_id)
@@ -309,7 +310,15 @@ class CentosMysqlDnfAdapter:
             if info.exit_code != 0:
                 return _history_read_failure(f"info {transaction_id}", info)
             details.append(info.stdout)
-        return provenance_problem(nevras, repoinfo, "\n".join(details))
+        problem = provenance_problem(nevras, repoinfo, "\n".join(details))
+        if problem and incomplete:
+            return (
+                "DNF history did not examine every transaction. "
+                f"Only {_MAX_HISTORY_TRANSACTIONS} small transactions are read, "
+                f"and transactions that alter more than {_MAX_HISTORY_PACKAGES} packages are skipped. "
+                f"{problem}"
+            )
+        return problem
 
     def _run(self, runner: CommandRunner, report: EnvironmentReport, command: str) -> CommandResult | None:
         lowered = command.lower()
@@ -319,6 +328,9 @@ class CentosMysqlDnfAdapter:
         report.commands_run.append(command)
         try:
             result = runner.run(command, timeout=20)
+        except OutputLimitError as exc:
+            self._provenance_failure(report, str(exc))
+            return None
         except Exception as exc:
             message = redact_text(str(exc)) or "Remote command failed"
             report.transport_error = message
@@ -329,9 +341,8 @@ class CentosMysqlDnfAdapter:
             return None
         if len(result.stdout) >= MAX_OUTPUT_CHARS or len(result.stderr) >= MAX_OUTPUT_CHARS:
             if " history " in f" {command} ":
-                self._fail(
+                self._provenance_failure(
                     report,
-                    "repository",
                     "DNF history output was truncated before provenance could be read",
                 )
             else:
@@ -346,6 +357,22 @@ class CentosMysqlDnfAdapter:
         report.patch_available = False
         report.stop_reason = summary
         report.checks.append(DiscoveryCheck(code=code, status=CheckStatus.FAIL, summary=summary))
+        return report
+
+    def _provenance_failure(self, report: EnvironmentReport, summary: str) -> EnvironmentReport:
+        """Record a provenance failure without hiding an already identified CentOS host."""
+        report.repository_origin = PackageOrigin.UNKNOWN
+        report.v1_patch_eligible = False
+        report.patch_available = False
+        report.stop_reason = summary
+        report.environment_supported = (
+            report.package_manager == PackageManagerKind.DNF
+            and (report.os_id or "").lower() == "centos"
+            and report.os_version == "10"
+        )
+        report.checks.append(
+            DiscoveryCheck(code="repository", status=CheckStatus.FAIL, summary=summary)
+        )
         return report
 
 
@@ -459,12 +486,34 @@ def parse_repoinfo(text: str) -> list[dict[str, object]]:
 
 def parse_history_ids(text: str) -> list[int]:
     """Return transaction ids from DNF4 pipe tables and DNF5 space-separated lists."""
-    ids: list[int] = []
+    return [tx_id for tx_id, _line, _altered in _history_rows(text)]
+
+
+def select_history_ids(text: str) -> tuple[list[int], bool]:
+    """Choose a bounded set of history transactions. Large transactions are not read."""
+    selected: list[int] = []
+    incomplete = False
+    for tx_id, line, altered in _history_rows(text):
+        if altered is not None and altered > _MAX_HISTORY_PACKAGES:
+            incomplete = True
+            continue
+        if len(selected) >= _MAX_HISTORY_TRANSACTIONS:
+            incomplete = True
+            continue
+        selected.append(tx_id)
+    return selected, incomplete
+
+
+def _history_rows(text: str) -> list[tuple[int, str, int | None]]:
+    rows: list[tuple[int, str, int | None]] = []
     for line in text.splitlines():
         match = re.match(r"\s*(\d+)\s*(?:\||\s+\S)", line)
-        if match:
-            ids.append(int(match.group(1)))
-    return ids
+        if not match:
+            continue
+        numbers = [int(item) for item in re.findall(r"\d+", line)]
+        altered = numbers[-1] if len(numbers) > 1 else None
+        rows.append((int(match.group(1)), line, altered))
+    return rows
 
 
 def _history_fields(line: str) -> tuple[str, str, str] | None:

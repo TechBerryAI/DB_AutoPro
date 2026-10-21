@@ -12,7 +12,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from backend.services.mysql_patch.errors import MysqlPatchSafetyError
+from backend.services.mysql_patch.errors import MysqlPatchSafetyError, OutputLimitError
 
 MAX_OUTPUT_CHARS = 64_000
 
@@ -39,10 +39,7 @@ CMD_DNF_REPOQUERY = (
     "--qf '%{name} %{evr}\\n' mysql8.4-server"
 )
 CMD_DNF_REPOINFO = "dnf --cacheonly --assumeno repoinfo --enabled"
-CMD_DNF_HISTORY_LIST = (
-    "sudo -n dnf --cacheonly --assumeno history list "
-    "--contains-pkgs=mysql8.4,mysql8.4-common,mysql8.4-errmsg,mysql8.4-server"
-)
+CMD_DNF_HISTORY_LIST = "dnf history list"
 CMD_DNF_CHECK = "dnf --cacheonly --assumeno check"
 CMD_MACHINE_ID = "cat /etc/machine-id"
 CMD_DNF_LOCKS = (
@@ -100,9 +97,18 @@ _SIMULATE = re.compile(
     r"([0-9][A-Za-z0-9.+:~-]*)$"
 )
 _DNF_SIMULATE = re.compile(re.escape(CMD_DNF_UPGRADE_ASSUMENO))
-_DNF_HISTORY_INFO = re.compile(
-    r"^sudo -n dnf --cacheonly --assumeno history info [1-9][0-9]{0,8}$"
-)
+_DNF_HISTORY_INFO = re.compile(r"^dnf history info [1-9][0-9]{0,8}$")
+
+
+def command_output_category(command: str) -> str:
+    """Name the command family for a size-limit diagnostic. The command text is not included."""
+    if " history " in f" {command} ":
+        return "dnf history"
+    if command.startswith("dnf "):
+        return "dnf"
+    if "os-release" in command:
+        return "os-release"
+    return "remote command"
 
 
 def apt_policy_command(package: str) -> str:
@@ -118,7 +124,7 @@ def dnf_history_info_command(transaction_id: int) -> str:
         raise MysqlPatchSafetyError("DNF history transaction id is not valid")
     if transaction_id < 1 or transaction_id > 999_999_999:
         raise MysqlPatchSafetyError("DNF history transaction id is not valid")
-    command = f"sudo -n dnf --cacheonly --assumeno history info {transaction_id}"
+    command = f"dnf history info {transaction_id}"
     if _DNF_HISTORY_INFO.fullmatch(command) is None:
         raise MysqlPatchSafetyError("DNF history command failed its own safety check")
     return command
@@ -249,6 +255,12 @@ class SshCommandRunner:
             timeout=timeout,
         )
         if len(stdout) > MAX_OUTPUT_CHARS or len(stderr) > MAX_OUTPUT_CHARS:
-            raise MysqlPatchSafetyError("Remote command output exceeded the size limit")
+            if len(stdout) > MAX_OUTPUT_CHARS and len(stderr) > MAX_OUTPUT_CHARS:
+                stream = "stdout and stderr"
+            elif len(stderr) > MAX_OUTPUT_CHARS:
+                stream = "stderr"
+            else:
+                stream = "stdout"
+            raise OutputLimitError(category=command_output_category(command), stream=stream)
         self.host_key_verified = True
         return CommandResult(exit_code=code, stdout=stdout, stderr=stderr)

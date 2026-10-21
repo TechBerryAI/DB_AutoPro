@@ -36,6 +36,10 @@ class MigrationError(DatabaseAutomationError):
     """Raised when migration operations fail."""
 
 
+class MigrationRejected(MigrationError):
+    """The request was rejected before a connector or a destructive statement."""
+
+
 class FDWError(DatabaseAutomationError):
     """Raised when FDW management operations fail."""
 

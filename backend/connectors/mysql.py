@@ -99,6 +99,16 @@ class MySQLConnector(BaseConnector):
         finally:
             conn.close()
 
+    def open_connection(self) -> Any:
+        """Open one MySQL connection with autocommit off. The caller closes it."""
+        connection = self._connect()
+        try:
+            connection.autocommit = False
+        except Exception:
+            connection.close()
+            raise
+        return connection
+
     def get_version(self) -> str:
         rows = self.execute_query("SELECT VERSION() AS version")
         return rows[0]["version"] if rows else "unknown"

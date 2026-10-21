@@ -22,6 +22,7 @@ from backend.services.mysql_patch.models import (
     PackagePreviewReport,
     PatchPlan,
     PlanRevalidation,
+    UpgradeKind,
 )
 from backend.services.mysql_patch.preview import PackagePreviewService
 
@@ -55,6 +56,8 @@ class PlanService:
         if not preview.accepted or not preview.precheck.ready_for_plan:
             raise MysqlPatchSafetyError(preview.stop_reason or "Preview was not accepted")
         discovery = preview.precheck.discovery
+        if discovery.upgrade_kind == UpgradeKind.NONE or not discovery.patch_available:
+            raise MysqlPatchSafetyError("No newer MySQL package is available")
         if not discovery.mysql_server_version or not discovery.candidate_version:
             raise MysqlPatchSafetyError("Preview is missing MySQL versions")
         if not discovery.mysql_upstream_version or not discovery.candidate_upstream_version:
@@ -134,6 +137,8 @@ class PlanService:
             raise MysqlPatchSafetyError("Approver name is required")
         if len(approver) > 80:
             raise MysqlPatchSafetyError("Approver name is too long")
+        if plan.upgrade_kind == UpgradeKind.NONE:
+            raise MysqlPatchSafetyError("No newer MySQL package is available")
         if plan.approval is not None:
             raise MysqlPatchSafetyError("Plan is already approved. Create a new plan to review again")
         if _digest(_material_from_plan(plan)) != plan.plan_digest:
