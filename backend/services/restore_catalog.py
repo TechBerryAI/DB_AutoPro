@@ -14,7 +14,11 @@ from backend.models.schemas import (
     RestoreTargetType,
 )
 from backend.services.mongo_restore import format_mongorestore_preview, plan_mongorestore
-from backend.services.mongo_tools import resolve_local_mongo_tool
+from backend.services.mongo_tools import (
+    is_placeholder_remote_mongo_path,
+    resolve_local_mongo_tool,
+    sibling_mongo_tool_path,
+)
 from backend.services.ssh_client import ssh_options_from_connection
 
 
@@ -126,11 +130,14 @@ def describe_restore_command(request: RestoreRequest) -> str:
     if request.db_type != DatabaseType.MONGODB:
         return f"Restore from {backup_dir} into {request.db_type.value}"
 
-    mongorestore = (
-        request.remote_binary_path
-        or opts.get("mongorestore_path")
-        or "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongorestore"
+    mongorestore = sibling_mongo_tool_path(
+        request.remote_binary_path or opts.get("mongorestore_path"),
+        "mongorestore",
     )
+    if not mongorestore:
+        mongorestore = sibling_mongo_tool_path(opts.get("mongodump_path"), "mongorestore")
+    if not mongorestore or is_placeholder_remote_mongo_path(mongorestore):
+        mongorestore = "mongorestore"
 
     try:
         plan = plan_mongorestore(request, Path(request.backup_path))

@@ -107,6 +107,7 @@ class BackupView(BaseView):
         self._cached_other_ssh: dict | None = None
         self._mongodb_collections: list[dict] = []
         self._mongo_size_bytes = 0
+        self._other_ssh_password_visible = False
         self._collection_rows: list[ctk.CTkFrame] = []
         self._selected_collection_name: str | None = None
         self._scope_selected_targets: list[str] = []
@@ -346,6 +347,13 @@ class BackupView(BaseView):
             settings.get("ssh_enabled")
             and settings.get("linux_username")
             and settings.get("ssh_host")
+        )
+
+    def _toggle_other_ssh_password_visibility(self) -> None:
+        self._other_ssh_password_visible = not self._other_ssh_password_visible
+        self.other_ssh_password.configure(show="" if self._other_ssh_password_visible else "*")
+        self.other_ssh_password_toggle.configure(
+            text="🙈" if self._other_ssh_password_visible else "👁"
         )
 
     def _other_ssh_ready(self) -> bool:
@@ -1264,11 +1272,27 @@ class BackupView(BaseView):
         self.other_ssh_user.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
 
         ctk.CTkLabel(self.other_frame, text="SSH password:").grid(row=3, column=0, sticky="w", pady=6)
+        other_pw_row = ctk.CTkFrame(self.other_frame, fg_color="transparent")
+        other_pw_row.grid(row=3, column=1, padx=(12, 0), pady=6, sticky="ew")
+        other_pw_row.grid_columnconfigure(0, weight=1)
         self.other_ssh_password = ctk.CTkEntry(
-            self.other_frame, placeholder_text="password", show="*"
+            other_pw_row, placeholder_text="password", show="*"
         )
-        self.other_ssh_password.grid(row=3, column=1, padx=(12, 0), pady=6, sticky="ew")
+        self.other_ssh_password.grid(row=0, column=0, sticky="ew")
         self.other_ssh_password.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
+        self.other_ssh_password_toggle = ctk.CTkButton(
+            other_pw_row,
+            text="👁",
+            width=40,
+            fg_color=self.theme.c("bg_elevated"),
+            hover_color=self.theme.c("bg_card_hover"),
+            text_color=self.theme.c("text_primary"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+            font=ctk.CTkFont(size=16),
+            command=self._toggle_other_ssh_password_visibility,
+        )
+        self.other_ssh_password_toggle.grid(row=0, column=1, padx=(8, 0))
 
         other_connect_row = ctk.CTkFrame(self.other_frame, fg_color="transparent")
         other_connect_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 6))
@@ -2541,6 +2565,7 @@ class BackupView(BaseView):
             (self.other_ssh_port, other_remote),
             (self.other_ssh_user, other_remote),
             (self.other_ssh_password, other_remote),
+            (self.other_ssh_password_toggle, other_remote),
         ):
             widget.configure(state="normal" if enabled else "disabled")
 

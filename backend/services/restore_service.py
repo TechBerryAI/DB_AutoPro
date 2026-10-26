@@ -26,7 +26,11 @@ from backend.models.schemas import (
 )
 from backend.services.backup_service import BackupService
 from backend.services.mongo_restore import MongorestorePlan, plan_mongorestore
-from backend.services.mongo_tools import resolve_local_mongo_tool
+from backend.services.mongo_tools import (
+    is_placeholder_remote_mongo_path,
+    resolve_local_mongo_tool,
+    sibling_mongo_tool_path,
+)
 from backend.services.pg_tools import is_pg_custom_dump, resolve_local_pg_tool
 
 logger = get_logger("services.restore")
@@ -129,10 +133,11 @@ class RestoreService:
         try:
             request = self._prepare_restore_request(request, progress_callback)
             backup_path = Path(request.backup_path)
-            if not backup_path.exists() and not _is_remote_path(request.backup_path):
+            remote_backup = _is_remote_path(request.backup_path)
+            if not remote_backup and not backup_path.exists():
                 raise RestoreError(f"Backup not found: {request.backup_path}")
 
-            if request.validate_backup and backup_path.exists():
+            if request.validate_backup and not remote_backup and backup_path.exists():
                 if progress_callback:
                     progress_callback(0.1, "Validating backup...")
                 self._validate_backup_path(backup_path)
@@ -140,7 +145,7 @@ class RestoreService:
             if progress_callback:
                 progress_callback(0.3, "Starting restore...")
 
-            if backup_path.exists():
+            if not remote_backup and backup_path.exists():
                 restore_path = self._decompress_if_needed(backup_path)
             else:
                 restore_path = backup_path
@@ -602,9 +607,12 @@ class RestoreService:
         plan = self._mongorestore_plan(request, backup_path)
         opts = conn.extra_options or {}
         auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
-        preferred = request.remote_binary_path or opts.get("mongorestore_path")
-        if not preferred and opts.get("mongodump_path"):
-            preferred = str(opts["mongodump_path"]).replace("mongodump", "mongorestore")
+        preferred = sibling_mongo_tool_path(
+            request.remote_binary_path or opts.get("mongorestore_path"),
+            "mongorestore",
+        )
+        if not preferred:
+            preferred = sibling_mongo_tool_path(opts.get("mongodump_path"), "mongorestore")
         try:
             mongorestore_bin = resolve_local_mongo_tool("mongorestore", preferred)
         except FileNotFoundError as exc:
@@ -646,9 +654,14 @@ class RestoreService:
 
         plan = self._mongorestore_plan(request, backup_path)
 
-        preferred = request.remote_binary_path or ssh.get("mongorestore_path")
-        if not preferred and ssh.get("mongodump_path"):
-            preferred = str(ssh["mongodump_path"]).replace("mongodump", "mongorestore")
+        preferred = sibling_mongo_tool_path(
+            request.remote_binary_path or ssh.get("mongorestore_path"),
+            "mongorestore",
+        )
+        if not preferred:
+            preferred = sibling_mongo_tool_path(ssh.get("mongodump_path"), "mongorestore")
+        if is_placeholder_remote_mongo_path(preferred):
+            preferred = None
 
         if progress_callback:
             progress_callback(0.2, "Locating mongorestore on Linux server...")
