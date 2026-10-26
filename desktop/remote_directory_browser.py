@@ -106,12 +106,17 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
             self.load_directory(path.strip())
 
     def load_directory(self, path: str) -> None:
+        if not self.winfo_exists():
+            return
         self._current_path = path.rstrip("/") or "/"
-        self.path_entry.configure(state="normal")
-        self.path_entry.delete(0, "end")
-        self.path_entry.insert(0, self._current_path)
-        self.status_label.configure(text=f"Connecting to list {self._current_path}...")
-        self._clear_list()
+        try:
+            self.path_entry.configure(state="normal")
+            self.path_entry.delete(0, "end")
+            self.path_entry.insert(0, self._current_path)
+            self.status_label.configure(text=f"Connecting to list {self._current_path}...")
+            self._clear_list()
+        except Exception:
+            return
 
         def task() -> None:
             error_msg: str | None = None
@@ -134,6 +139,8 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
                 # which would leave the UI stuck on "Loading..." forever.
                 error_msg = str(exc) or exc.__class__.__name__
 
+            if not self.winfo_exists():
+                return
             self.after(0, lambda e=entries, err=error_msg: self._show_entries(e, err))
 
         threading.Thread(target=task, daemon=True).start()
@@ -158,6 +165,8 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
             child.destroy()
 
     def _show_entries(self, entries: list[dict], error: str | None) -> None:
+        if not self.winfo_exists():
+            return
         self._entries = entries
         self._clear_list()
         if error:
@@ -226,18 +235,36 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
             row.configure(fg_color="transparent")
 
     def _on_row_click(self, entry: dict) -> None:
-        self._selected_path = entry["path"]
-        self._selected_entry_path = entry["path"]
-        self._apply_row_selection()
-        self.status_label.configure(text=f"Selected: {self._selected_path}")
-        if self._on_selection_changed:
-            self._on_selection_changed(self._selected_path)
+        path = str(entry.get("path") or "")
+        if not path:
+            return
+        self._selected_path = path
+        self._selected_entry_path = path
+        try:
+            self._apply_row_selection()
+            self.status_label.configure(text=f"Selected: {self._selected_path}")
+        except Exception:
+            return
+        # Defer so Tk is not still inside the row Button-1 handler when
+        # Restore updates the path field / preview. Destroying widgets during
+        # that click closes the whole CustomTkinter window on Windows.
+        self.after(1, lambda p=path: self._emit_selection(p))
+
+    def _emit_selection(self, path: str) -> None:
+        if not self.winfo_exists() or not self._on_selection_changed:
+            return
+        try:
+            self._on_selection_changed(path)
+        except Exception:
+            pass
 
     def _on_row_double_click(self, entry: dict) -> None:
-        if entry["is_dir"]:
-            self.load_directory(entry["path"])
-        else:
-            self._on_row_click(entry)
+        if entry.get("is_dir"):
+            path = str(entry.get("path") or "")
+            if path:
+                self.after(1, lambda p=path: self.load_directory(p) if self.winfo_exists() else None)
+            return
+        self._on_row_click(entry)
 
     def _go_up(self) -> None:
         parent = self._current_path.rstrip("/")
@@ -257,13 +284,14 @@ class RemoteDirectoryBrowser(ctk.CTkFrame):
 
     def _select_current_folder(self) -> None:
         self._selected_path = self._current_path
-        self.status_label.configure(text=f"Selected folder: {self._selected_path}")
-        if self._on_selection_changed:
-            self._on_selection_changed(self._selected_path)
+        try:
+            self.status_label.configure(text=f"Selected folder: {self._selected_path}")
+        except Exception:
+            pass
+        self._emit_selection(self._selected_path)
 
     def _select_highlighted(self) -> None:
         if not self._selected_path:
             self.status_label.configure(text="Click a file or folder first.")
             return
-        if self._on_selection_changed:
-            self._on_selection_changed(self._selected_path)
+        self._emit_selection(self._selected_path)

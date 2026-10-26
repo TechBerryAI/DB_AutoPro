@@ -471,49 +471,70 @@ def build_mongorestore_remote_command(
     return cmd
 
 
-def resolve_remote_mongorestore_path(ssh: dict[str, Any], preferred_path: str | None = None) -> str:
-    """Locate a working mongorestore binary on the Linux server over SSH."""
-    if preferred_path and preferred_path.strip():
-        preferred = preferred_path.strip()
-        if "mongodump" in preferred:
-            preferred = preferred.replace("mongodump", "mongorestore")
-        candidates = [preferred]
-    else:
-        candidates = []
+def _first_remote_binary_path(stdout: str) -> str | None:
+    for line in stdout.splitlines():
+        path = line.strip()
+        if path.startswith("/") and " " not in path:
+            return path
+    return None
 
-    default_glob = "/mnt/mongodb-database-tools-*/bin/mongorestore"
-    if default_glob not in candidates:
-        candidates.append(default_glob)
+
+def resolve_remote_mongorestore_path(ssh: dict[str, Any], preferred_path: str | None = None) -> str:
+    """Locate a working mongorestore binary on the Linux server over SSH.
+
+    The configured path is tried first when it is a real install. The old
+    /mnt/...100.17.0 default is ignored so discovery can find tools installed
+    under a home directory, /opt, /usr, or another prefix.
+    """
+    from backend.services.mongo_tools import (
+        is_placeholder_remote_mongo_path,
+        sibling_mongo_tool_path,
+    )
 
     kwargs = _ssh_kwargs(ssh)
+    candidates: list[str] = []
+    preferred = sibling_mongo_tool_path(preferred_path, "mongorestore")
+    if preferred:
+        candidates.append(preferred)
+
     for candidate in candidates:
-        if "*" in candidate:
-            cmd = f"ls -1 {candidate} 2>/dev/null | head -n 1"
-        else:
-            cmd = f"test -x {shlex.quote(candidate)} && echo {shlex.quote(candidate)}"
+        cmd = f"test -x {shlex.quote(candidate)} && echo {shlex.quote(candidate)}"
         exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=30, **kwargs)
         if exit_code != 0:
             continue
-        for line in stdout.splitlines():
-            path = line.strip()
-            if path:
-                return path
+        found = _first_remote_binary_path(stdout)
+        if found:
+            return found
 
     discovery_cmds = (
         "command -v mongorestore 2>/dev/null",
-        "ls -1 /mnt/mongodb-database-tools-*/bin/mongorestore 2>/dev/null | head -n 1",
-        "find /mnt /usr /opt -maxdepth 6 -name mongorestore -type f -perm -111 2>/dev/null | head -n 1",
+        (
+            "ls -1 "
+            "$HOME/mongodb-database-tools-*/bin/mongorestore "
+            "$HOME/*/mongodb-database-tools-*/bin/mongorestore "
+            "$HOME/*/*/mongodb-database-tools-*/bin/mongorestore "
+            "/mnt/mongodb-database-tools-*/bin/mongorestore "
+            "/opt/mongodb-database-tools-*/bin/mongorestore "
+            "/usr/bin/mongorestore /usr/local/bin/mongorestore "
+            "2>/dev/null | head -n 1"
+        ),
+        (
+            "find $HOME /home /riya /opt /usr /usr/local /mnt /srv /data "
+            "-maxdepth 8 -name mongorestore -type f -perm -111 "
+            "2>/dev/null | head -n 1"
+        ),
     )
     for cmd in discovery_cmds:
-        exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=45, **kwargs)
+        exit_code, stdout, _stderr = run_ssh_command(command=cmd, timeout=60, **kwargs)
         if exit_code != 0:
             continue
-        for line in stdout.splitlines():
-            path = line.strip()
-            if path:
-                return path
+        found = _first_remote_binary_path(stdout)
+        if found:
+            return found
 
-    tried = preferred_path or "(not set)"
+    tried = (preferred_path or "").strip() or "(not set)"
+    if is_placeholder_remote_mongo_path(tried):
+        tried = "(auto-detect; previous /mnt Database Tools default is not used)"
     raise RuntimeError(
         "mongorestore was not found on the Linux server.\n"
         f"Tried path: {tried}\n"

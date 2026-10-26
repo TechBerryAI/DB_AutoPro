@@ -50,6 +50,7 @@ class RestoreView(BaseView):
         self._other_ssh_connected = False
         self._other_connected_host = ""
         self._cached_other_ssh: dict | None = None
+        self._other_ssh_password_visible = False
         self._build_ui()
         self._init_restore_defaults()
         self._sync_mongo_fields()
@@ -80,11 +81,16 @@ class RestoreView(BaseView):
         if saved and saved.remote_backup_dir:
             self._remote_backup_root = saved.remote_backup_dir
         if self._is_mongodb_session():
-            if saved and saved.mongodump_path:
+            from backend.services.mongo_tools import sibling_mongo_tool_path
+
+            saved_path = sibling_mongo_tool_path(
+                saved.mongodump_path if saved else None,
+                "mongorestore",
+            )
+            current = self.remote_binary.get().strip()
+            if saved_path and not current:
                 self.remote_binary.delete(0, "end")
-                self.remote_binary.insert(0, saved.mongodump_path.replace("mongodump", "mongorestore"))
-            elif not self.remote_binary.get().strip():
-                self.remote_binary.insert(0, "/mnt/mongodb-database-tools-ubuntu2204-x86_64-100.17.0/bin/mongorestore")
+                self.remote_binary.insert(0, saved_path)
         self._sync_source_fields()
 
     def _ssh_options(self) -> dict:
@@ -93,6 +99,13 @@ class RestoreView(BaseView):
 
         conn = resolve_connection(self.get_active_profile())
         return ssh_options_from_connection(conn)
+
+    def _toggle_other_ssh_password_visibility(self) -> None:
+        self._other_ssh_password_visible = not self._other_ssh_password_visible
+        self.other_ssh_password.configure(show="" if self._other_ssh_password_visible else "*")
+        self.other_ssh_password_toggle.configure(
+            text="🙈" if self._other_ssh_password_visible else "👁"
+        )
 
     def _other_ssh_ready(self) -> bool:
         return bool(
@@ -142,9 +155,16 @@ class RestoreView(BaseView):
         self._verify_ssh_dict(ssh or self._read_other_ssh_fields())
 
     def _on_connected_path_selected(self, path: str) -> None:
-        self.connected_source_entry.delete(0, "end")
-        self.connected_source_entry.insert(0, path)
-        self._update_command_preview()
+        try:
+            state = str(self.connected_source_entry.cget("state") or "normal")
+            self.connected_source_entry.configure(state="normal")
+            self.connected_source_entry.delete(0, "end")
+            self.connected_source_entry.insert(0, path)
+            if state == "disabled":
+                self.connected_source_entry.configure(state="disabled")
+            self._update_command_preview()
+        except Exception:
+            pass
 
     def _on_other_path_selected(self, path: str) -> None:
         self.other_source_entry.delete(0, "end")
@@ -559,9 +579,25 @@ class RestoreView(BaseView):
         self.other_ssh_user.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
 
         ctk.CTkLabel(self.other_frame, text="SSH password:").grid(row=3, column=0, sticky="w", pady=6)
-        self.other_ssh_password = ctk.CTkEntry(self.other_frame, placeholder_text="password", show="*")
-        self.other_ssh_password.grid(row=3, column=1, padx=(12, 0), pady=6, sticky="ew")
+        other_pw_row = ctk.CTkFrame(self.other_frame, fg_color="transparent")
+        other_pw_row.grid(row=3, column=1, padx=(12, 0), pady=6, sticky="ew")
+        other_pw_row.grid_columnconfigure(0, weight=1)
+        self.other_ssh_password = ctk.CTkEntry(other_pw_row, placeholder_text="password", show="*")
+        self.other_ssh_password.grid(row=0, column=0, sticky="ew")
         self.other_ssh_password.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
+        self.other_ssh_password_toggle = ctk.CTkButton(
+            other_pw_row,
+            text="👁",
+            width=40,
+            fg_color=self.theme.c("bg_elevated"),
+            hover_color=self.theme.c("bg_card_hover"),
+            text_color=self.theme.c("text_primary"),
+            border_width=1,
+            border_color=self.theme.c("border"),
+            font=ctk.CTkFont(size=16),
+            command=self._toggle_other_ssh_password_visibility,
+        )
+        self.other_ssh_password_toggle.grid(row=0, column=1, padx=(8, 0))
 
         connect_row = ctk.CTkFrame(self.other_frame, fg_color="transparent")
         connect_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 6))
@@ -683,9 +719,21 @@ class RestoreView(BaseView):
         ctk.CTkLabel(self.remote_binary_frame, text="Mongorestore binary:").grid(
             row=0, column=0, sticky="w", pady=6
         )
-        self.remote_binary = ctk.CTkEntry(self.remote_binary_frame)
+        self.remote_binary = ctk.CTkEntry(
+            self.remote_binary_frame,
+            placeholder_text="Leave blank to auto-detect on the Linux server",
+        )
         self.remote_binary.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
         self.remote_binary.bind("<KeyRelease>", lambda _e: self._update_command_preview())
+        ctk.CTkLabel(
+            self.remote_binary_frame,
+            text="Leave blank unless mongorestore is outside PATH and not under a usual install folder.",
+            font=ctk.CTkFont(size=11),
+            text_color=self.theme.c("text_muted"),
+            justify="left",
+            anchor="w",
+            wraplength=520,
+        ).grid(row=1, column=1, padx=(12, 0), sticky="w")
 
         self.gzip_var = ctk.BooleanVar(value=False)
         self.gzip_cb = ctk.CTkCheckBox(
@@ -1114,6 +1162,7 @@ class RestoreView(BaseView):
             (self.other_ssh_port, other_remote),
             (self.other_ssh_user, other_remote),
             (self.other_ssh_password, other_remote),
+            (self.other_ssh_password_toggle, other_remote),
         ):
             widget.configure(state="normal" if enabled else "disabled")
 
@@ -1287,9 +1336,11 @@ class RestoreView(BaseView):
             else:
                 request = self._build_request()
                 preview = describe_restore_command(request)
-        except ValueError as exc:
+        except Exception as exc:
             preview = str(exc)
 
+        if not hasattr(self, "command_preview"):
+            return
         self.command_preview.configure(state="normal")
         self.command_preview.delete("1.0", "end")
         self.command_preview.insert("1.0", preview)

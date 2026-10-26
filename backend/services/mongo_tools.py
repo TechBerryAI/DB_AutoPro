@@ -7,6 +7,41 @@ import shutil
 import sys
 from pathlib import Path
 
+# Legacy default shipped in early Backup / Restore forms. It is not present on
+# current Linux hosts, so treat it as unset and discover mongorestore instead.
+_PLACEHOLDER_MONGO_TOOLS_MARKERS = (
+    "mongodb-database-tools-ubuntu2204-x86_64-100.17.0",
+)
+
+
+def is_placeholder_remote_mongo_path(path: str | None) -> bool:
+    """True when the path is empty or the old /mnt Database Tools default."""
+    text = (path or "").strip().replace("\\", "/")
+    if not text:
+        return True
+    return any(marker in text for marker in _PLACEHOLDER_MONGO_TOOLS_MARKERS)
+
+
+def sibling_mongo_tool_path(path: str | None, tool: str) -> str | None:
+    """Swap mongodump ↔ mongorestore in a configured binary path.
+
+    Remote Linux paths stay POSIX even when this app is running on Windows.
+    """
+    text = (path or "").strip().replace("\\", "/")
+    if not text or is_placeholder_remote_mongo_path(text):
+        return None
+    # Path() on Windows would turn /riya/... into \\riya\\...; keep the original
+    # slashes and only rewrite the final component.
+    name = text.rsplit("/", 1)[-1]
+    parent = text[: -len(name)].rstrip("/") if name else text.rstrip("/")
+    if tool in name:
+        return text
+    if "mongodump" in name:
+        return f"{parent}/{name.replace('mongodump', tool)}" if parent else name.replace("mongodump", tool)
+    if "mongorestore" in name:
+        return f"{parent}/{name.replace('mongorestore', tool)}" if parent else name.replace("mongorestore", tool)
+    return f"{parent}/{tool}" if parent else tool
+
 
 def resolve_local_mongo_tool(
     tool: str,

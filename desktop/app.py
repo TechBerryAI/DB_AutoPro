@@ -47,7 +47,7 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
     (
         "Overview",
         [
-            ("dashboard", "Dashboard", DashboardView),
+    ("dashboard", "Dashboard", DashboardView),
         ],
     ),
     (
@@ -60,9 +60,9 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
     (
         "Operations",
         [
-            ("backup", "Backup", BackupView),
-            ("restore", "Restore", RestoreView),
-            ("migration", "Migration", MigrationView),
+    ("backup", "Backup", BackupView),
+    ("restore", "Restore", RestoreView),
+    ("migration", "Migration", MigrationView),
             ("patching", "Patching", PatchView),
         ],
     ),
@@ -77,7 +77,7 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
     (
         "Settings",
         [
-            ("settings", "Settings", SettingsView),
+    ("settings", "Settings", SettingsView),
         ],
     ),
 ]

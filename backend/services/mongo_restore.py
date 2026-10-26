@@ -106,7 +106,24 @@ def _is_remote_path(path: str) -> bool:
 
 
 def _path_available(path: Path) -> bool:
-    return path.exists() or _is_remote_path(str(path))
+    # Check remote first. Path.exists() on a Linux path like /riya freezes
+    # the Windows UI (Not Responding) while it looks for a network share.
+    if _is_remote_path(str(path)):
+        return True
+    return path.exists()
+
+
+def _local_path_known(path: Path) -> bool:
+    if _is_remote_path(str(path)):
+        return False
+    return path.exists()
+
+
+def _source_path_text(request: RestoreRequest, backup_path: Path) -> str:
+    raw = (request.backup_path or str(backup_path)).replace("\\", "/")
+    if _is_remote_path(raw):
+        return raw
+    return str(backup_path)
 
 
 @dataclass
@@ -135,19 +152,19 @@ def plan_mongorestore(request: RestoreRequest, backup_path: Path) -> Mongorestor
     if not _path_available(backup_path):
         raise RestoreError(f"Backup not found: {backup_path}")
 
-    path_known = backup_path.exists()
+    path_known = _local_path_known(backup_path)
 
     if scope == MongoRestoreScope.ALL_DATABASES:
         if path_known and not backup_path.is_dir():
             raise RestoreError("All-databases restore requires a backup folder path.")
-        source = str(backup_path)
+        source = _source_path_text(request, backup_path)
         if _restore_wants_gzip(request, backup_path, path_known=path_known):
             extra.append("--gzip")
 
     elif scope == MongoRestoreScope.SPECIFIC_DATABASE:
         if not db:
             raise RestoreError("Database name is required for specific-database restore.")
-        source = str(backup_path)
+        source = _source_path_text(request, backup_path)
         if request.drop_existing:
             extra.append("--drop")
         if _restore_wants_gzip(request, backup_path, path_known=path_known):
@@ -164,7 +181,7 @@ def plan_mongorestore(request: RestoreRequest, backup_path: Path) -> Mongorestor
             raise RestoreError(
                 "Single-collection restore source must be a .bson or .bson.gz file."
             )
-        source = str(backup_path)
+        source = _source_path_text(request, backup_path)
         if request.drop_existing:
             extra.append("--drop")
         if _restore_wants_gzip(request, backup_path, path_known=path_known):
@@ -175,7 +192,7 @@ def plan_mongorestore(request: RestoreRequest, backup_path: Path) -> Mongorestor
             raise RestoreError("Archive restore requires an .archive or .archive.gz file.")
         if path_known and not _is_archive_file(backup_path):
             raise RestoreError("Archive restore source must be a .archive or .archive.gz file.")
-        extra.append(f"--archive={backup_path}")
+        extra.append(f"--archive={_source_path_text(request, backup_path)}")
         if _restore_wants_gzip(request, backup_path, path_known=path_known):
             extra.append("--gzip")
         if db and request.drop_existing:
