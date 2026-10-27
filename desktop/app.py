@@ -189,6 +189,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self.configure(fg_color=self._t.c("bg_app"))
         schedule_window_icon(self)
         self.minsize(1024, 680)
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self._maximize_window()
 
         self._build_layout()
@@ -1594,6 +1595,20 @@ class DatabaseAutomationApp(ctk.CTk):
             destructive=True,
             on_confirm=self._do_sign_out,
         )
+
+    def _on_window_close(self) -> None:
+        """Title-bar Close (X) shuts the app down. Sign Out still returns to login."""
+        if getattr(self, "_shutting_down", False):
+            return
+        self._shutting_down = True
+        self.disconnect_requested = False
+        self._stop_session_status_poll()
+        close_ssh_tunnel()
+        try:
+            self.quit()
+        except Exception:
+            pass
+        self.destroy()
 
     def destroy(self) -> None:
         prepare_ctk_shutdown(self)

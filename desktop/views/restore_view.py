@@ -563,7 +563,7 @@ class RestoreView(BaseView):
         self.other_frame.grid(row=10, column=0, columnspan=2, padx=16, pady=10, sticky="ew")
         self.other_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.other_frame, text="SSH host:").grid(row=0, column=0, sticky="w", pady=6)
+        ctk.CTkLabel(self.other_frame, text="Linux host:").grid(row=0, column=0, sticky="w", pady=6)
         self.other_ssh_host = ctk.CTkEntry(self.other_frame, placeholder_text="e.g. 192.168.1.50")
         self.other_ssh_host.grid(row=0, column=1, padx=(12, 0), pady=6, sticky="ew")
         self.other_ssh_host.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
@@ -573,12 +573,14 @@ class RestoreView(BaseView):
         self.other_ssh_port.insert(0, "22")
         self.other_ssh_port.grid(row=1, column=1, padx=(12, 0), pady=6, sticky="ew")
 
-        ctk.CTkLabel(self.other_frame, text="SSH username:").grid(row=2, column=0, sticky="w", pady=6)
-        self.other_ssh_user = ctk.CTkEntry(self.other_frame, placeholder_text="linux user")
+        ctk.CTkLabel(self.other_frame, text="Linux username:").grid(row=2, column=0, sticky="w", pady=6)
+        self.other_ssh_user = ctk.CTkEntry(
+            self.other_frame, placeholder_text="e.g. ubuntu, root, techadmin"
+        )
         self.other_ssh_user.grid(row=2, column=1, padx=(12, 0), pady=6, sticky="ew")
         self.other_ssh_user.bind("<KeyRelease>", lambda _e: self._on_other_ssh_changed())
 
-        ctk.CTkLabel(self.other_frame, text="SSH password:").grid(row=3, column=0, sticky="w", pady=6)
+        ctk.CTkLabel(self.other_frame, text="Linux password:").grid(row=3, column=0, sticky="w", pady=6)
         other_pw_row = ctk.CTkFrame(self.other_frame, fg_color="transparent")
         other_pw_row.grid(row=3, column=1, padx=(12, 0), pady=6, sticky="ew")
         other_pw_row.grid_columnconfigure(0, weight=1)
