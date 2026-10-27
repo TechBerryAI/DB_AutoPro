@@ -559,6 +559,10 @@ class AuthDialog(ctk.CTk):
 
     def _on_close(self) -> None:
         self.session = None
+        try:
+            self.quit()
+        except Exception:
+            pass
         self.destroy()
 
     @staticmethod
