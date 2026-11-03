@@ -28,12 +28,23 @@ class _Server:
 
 def test_only_implemented_pairs_are_registered():
     pairs = {(item.source, item.target) for item in implemented_pairs()}
-    assert pairs == {("postgresql", "postgresql"), ("postgresql", "mysql")}
-    assert source_types() == ("postgresql",)
-    assert target_types_for("postgresql") == ("postgresql", "mysql")
-    assert target_types_for("mysql") == ()
-    assert SOURCE_TYPES == ("postgresql",)
-    assert TARGET_TYPES == ("postgresql", "mysql")
+    assert ("postgresql", "postgresql") in pairs
+    assert ("postgresql", "mysql") in pairs
+    assert ("postgresql", "mssql") in pairs
+    assert ("postgresql", "oracle") in pairs
+    assert ("postgresql", "mongodb") in pairs
+    assert ("mysql", "postgresql") in pairs
+    assert ("mssql", "postgresql") in pairs
+    assert ("oracle", "postgresql") in pairs
+    assert ("mongodb", "postgresql") in pairs
+    assert source_types()[0] == "postgresql"
+    assert SOURCE_TYPES == source_types()
+    assert "mysql" in source_types() and "mongodb" in source_types() and "mssql" in source_types() and "oracle" in source_types()
+    assert target_types_for("postgresql") == ("postgresql", "mysql", "mssql", "oracle", "mongodb")
+    assert target_types_for("mysql") == ("postgresql",)
+    assert target_types_for("mongodb") == ("postgresql",)
+    assert target_types_for("oracle") == ("postgresql",)
+    assert TARGET_TYPES == ("postgresql", "mysql", "mssql", "oracle", "mongodb")
 
 
 def test_pair_capability_reports_limitations():
@@ -46,21 +57,33 @@ def test_pair_capability_reports_limitations():
     assert mysql.views is False
     assert mysql.programmable_objects is False
     assert "MySQL DDL commits immediately" in mysql.summary()
-    assert pair_capability("mysql", "postgresql") is None
-    assert pair_capability("mongodb", "postgresql") is None
+    inbound = pair_capability("mysql", "postgresql")
+    mongo = pair_capability("mongodb", "postgresql")
+    mssql = pair_capability("postgresql", "mssql")
+    oracle = pair_capability("postgresql", "oracle")
+    assert inbound is not None and inbound.engine == "mysql_to_postgresql"
+    assert mongo is not None and "JSONB" in mongo.summary()
+    assert mssql is not None and mssql.engine == "postgresql_to_mssql"
+    assert oracle is not None and oracle.engine == "postgresql_to_oracle"
+    outbound_mongo = pair_capability("postgresql", "mongodb")
+    assert outbound_mongo is not None and outbound_mongo.engine == "postgresql_to_mongodb"
 
 
 def test_unsupported_pairs_are_blocked_with_an_explanation():
-    mysql_source = unsupported_pair_reason("mysql", "postgresql")
+    mysql_source = unsupported_pair_reason("mysql", "oracle")
     mongo = unsupported_pair_reason("mongodb", "mongodb")
     redis = unsupported_pair_reason("redis", "postgresql")
     oracle = unsupported_pair_reason("oracle", "mssql")
     assert mysql_source and "not implemented" in mysql_source
     assert "No schema or data was copied." in mysql_source
+    assert unsupported_pair_reason("mysql", "postgresql") is None
     assert mongo and "MongoDB" in mongo and "not treated as a relational" in mongo
     assert redis and "Redis keys are not mapped" in redis
     assert oracle and "oracle-to-mssql" in oracle
     assert unsupported_migration_reason("postgresql", "mysql") is None
+    assert unsupported_migration_reason("postgresql", "mssql") is None
+    assert unsupported_migration_reason("postgresql", "oracle") is None
+    assert unsupported_migration_reason("postgresql", "mongodb") is None
     assert "postgresql to mysql" in pair_summary("postgresql", "mysql").lower()
     assert "not implemented" in pair_summary("sqlite", "postgresql")
 
@@ -158,11 +181,22 @@ def test_destination_copy_is_named_from_the_source_and_not_a_saved_default():
     assert destination_copy_name("sales-app", "mysql") == "sales_app"
     assert destination_copy_name("mysql", "mysql") == "mysql_copy"
     assert destination_copy_name("postgres", "postgresql") == "postgres"
+    assert destination_copy_name("sales-app", "mssql") == "sales_app"
+    assert destination_copy_name("master", "mssql") == "master_copy"
     assert destination_name_error("employees", "mysql") is None
+    assert destination_name_error("app_copy", "mssql") is None
+    assert destination_name_error("master", "mssql") is not None
+    assert destination_name_error("orclpdb1", "oracle") is None
+    assert destination_copy_name("sales-app", "mongodb") == "sales_app"
+    assert destination_copy_name("admin", "mongodb") == "admin_copy"
+    assert destination_name_error("shop_copy", "mongodb") is None
+    assert destination_name_error("admin", "mongodb") is not None
     assert destination_name_error("sys", "mysql") is not None
     assert destination_name_error("", "mysql") is not None
     assert server_probe_database("mysql") == ""
     assert server_probe_database("postgresql") == "postgres"
+    assert server_probe_database("mssql") == "master"
+    assert server_probe_database("mongodb") == ""
     assert destination_identity_error("postgres", "", dest_exists=False) is None
     assert destination_identity_error("postgres", "employees", dest_exists=True, discovered=["employees"]) is not None
     assert destination_identity_error("postgres", "", dest_exists=True, discovered=["postgres", "app"]) is None

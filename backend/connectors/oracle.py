@@ -102,6 +102,10 @@ class OracleConnector(BaseConnector):
         finally:
             conn.close()
 
+    def open_connection(self) -> Any:
+        """Open one Oracle connection. The caller closes it."""
+        return self._connect()
+
     def execute_script(self, script: str) -> None:
         conn = self._connect()
         try:

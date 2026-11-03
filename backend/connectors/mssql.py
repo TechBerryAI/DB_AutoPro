@@ -69,6 +69,10 @@ class MSSQLConnector(BaseConnector):
         finally:
             conn.close()
 
+    def open_connection(self) -> Any:
+        """Open one SQL Server connection. The caller closes it."""
+        return self._connect()
+
     def get_version(self) -> str:
         rows = self.execute_query("SELECT @@VERSION AS version")
         return rows[0]["version"] if rows else "unknown"

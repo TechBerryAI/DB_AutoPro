@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from backend.services.mysql_patch.redaction import redact_text
@@ -101,8 +102,17 @@ def assess_pg_mysql(
         return _stop(report, "target_identity", target_error)
     target_version = str(target_rows.get("version") or "")
     comment = str(target_rows.get("version_comment") or "")
-    if "postgresql" in target_version.lower() or "mysql" not in comment.lower() and "mariadb" not in comment.lower():
-        return _stop(report, "target_type", "The target connection is not MySQL or MariaDB. No schema or data was copied.")
+    comment_text = comment.lower()
+    mysql_family = any(name in comment_text for name in ("mysql", "mariadb", "percona", "source distribution")) or bool(
+        re.match(r"\d+\.\d+", target_version.strip())
+    )
+    if "postgresql" in target_version.lower() or not mysql_family:
+        return _stop(
+            report,
+            "target_type",
+            "The target connection is not MySQL or MariaDB "
+            f"(server version {target_version!r}, comment {comment!r}). No schema or data was copied.",
+        )
     report.target_version = target_version
     observed_database = str(target_rows.get("database_name") or "")
     wanted = (expected_database or "").strip()
@@ -199,7 +209,18 @@ def assess_pg_mysql(
     elif report.conflicts and strategy == STRATEGY_REPLACE and not confirm_replace:
         return _stop(report, "conflicts", "Replacing existing MySQL tables requires explicit confirmation. Nothing was dropped.")
     elif report.conflicts and strategy == STRATEGY_SKIP:
-        report.checks.append(Check("conflicts", "warning", "Existing MySQL tables will be left unchanged: " + ", ".join(report.conflicts)))
+        message = "Existing MySQL tables will be left unchanged: " + ", ".join(report.conflicts) + "."
+        if scope != SCOPE_SCHEMA:
+            counts = {name: _target_count(target_query, name) for name in report.conflicts}
+            incomplete = [f"{name} ({'unreadable' if count is None else f'{count} rows'})" for name, count in counts.items() if not count]
+            if incomplete:
+                message += (
+                    " No rows will be copied into these tables because they already exist: "
+                    + ", ".join(incomplete)
+                    + ". They may be left over from an earlier attempt. Choose 'Replace existing tables' "
+                    "and confirm the replacement to copy the data."
+                )
+        report.checks.append(Check("conflicts", "warning", message))
     elif report.conflicts:
         report.checks.append(Check("conflicts", "warning", "Existing MySQL tables will be dropped and recreated because that was explicitly confirmed: " + ", ".join(report.conflicts)))
     else:
@@ -295,7 +316,12 @@ def _inventory(source_query) -> tuple[list[str], list[str]]:
         "-- db_autopro_inventory\n"
         "SELECT c.relkind AS object_kind, c.relname AS object_name FROM pg_class c "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm', 'f', 'p', 'S') ORDER BY 2",
+        "WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm', 'f', 'p', 'S') "
+        # A serial or identity sequence is owned by its column. It is replaced by AUTO_INCREMENT,
+        # which the conversions check reports, so only standalone sequences are listed here.
+        "AND NOT (c.relkind = 'S' AND EXISTS (SELECT 1 FROM pg_depend d "
+        "WHERE d.objid = c.oid AND d.classid = 'pg_class'::regclass "
+        "AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i'))) ORDER BY 2",
         "relations",
     ):
         kind = _RELKINDS.get(str(row.get("object_kind")), "relation")
@@ -334,7 +360,10 @@ def _inventory(source_query) -> tuple[list[str], list[str]]:
         "-- db_autopro_inventory\n"
         "SELECT t.typname AS object_name, t.typtype AS object_kind FROM pg_type t "
         "JOIN pg_namespace n ON n.oid = t.typnamespace "
-        "WHERE n.nspname = 'public' AND t.typtype IN ('e', 'd', 'c') ORDER BY 1",
+        "WHERE n.nspname = 'public' AND t.typtype IN ('e', 'd', 'c') "
+        # Every table has a row type of the same name. Only standalone composite types are listed.
+        "AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_class tc "
+        "WHERE tc.oid = t.typrelid AND tc.relkind = 'c')) ORDER BY 1",
         "types",
     ):
         kind = _TYPES.get(str(row.get("object_kind")), "type")

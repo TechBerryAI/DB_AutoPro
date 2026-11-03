@@ -83,6 +83,8 @@ def build_pg_mysql_plan(
     lines.append("Engine: PostgreSQL to MySQL. Rows are inserted with parameterized statements, not PostgreSQL COPY.")
     if not precheck.ready:
         lines.append("The migration is blocked. Nothing will be copied.")
+        if precheck.stop_reason:
+            lines.append(f"Blocked because: {precheck.stop_reason}")
     else:
         lines.append(f"Scope: {scope}. Conflict strategy: {strategy}. Batch size: {batch_size}.")
         if precheck.dest_will_create:

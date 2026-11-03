@@ -1010,8 +1010,17 @@ def _mysql_full_via_ssh(
         f"{scope_flags} --single-transaction --routines --triggers {result_file}".strip(),
         f"{scope_flags} --single-transaction {result_file}".strip(),
     ]
+    # Same login over TCP, then over the local socket (root@localhost can differ from a
+    # remote-host login), then, for a Linux root login, MySQL socket auth without a password.
+    auth_variants = [
+        auth,
+        f"MYSQL_PWD={shlex.quote(password)} mysqldump -u {shlex.quote(user)}",
+    ]
+    if str(ssh.get("username") or "").strip() == "root" and user == "root":
+        auth_variants.append("mysqldump -u root")
     candidates = [
-        f"{auth} {flags} {db_q} {table_args}".strip()
+        f"{variant} {flags} {db_q} {table_args}".strip()
+        for variant in auth_variants
         for flags in flag_sets
     ]
 
@@ -1042,7 +1051,15 @@ def _mysql_full_via_ssh(
         _best_effort_remove_remote(ssh, remote_path)
 
     if not ok:
-        raise BackupError(f"Remote mysqldump failed: {last_err}")
+        hint = ""
+        if "1045" in last_err or "access denied" in last_err.lower():
+            hint = (
+                f"\nMySQL rejected the login for '{user}' on the server. Check that this user's MySQL "
+                "password is correct for logins from the server itself (user@localhost can have a "
+                "different password than user@'%'), or use a MySQL user that works on the server, "
+                "or sign in to Linux as root so socket login can be used."
+            )
+        raise BackupError(f"Remote mysqldump failed: {last_err}{hint}")
 
     if keep_on_server:
         if progress_callback:

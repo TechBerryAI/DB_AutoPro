@@ -14,8 +14,12 @@ from backend.services.migration_framework.destination import (
     server_probe_database,
 )
 from backend.services.migration_framework.registry import (
+    MONGODB,
+    MSSQL,
     MYSQL,
+    ORACLE,
     POSTGRESQL,
+    _norm,
     pair_capability,
     source_types,
     target_types_for,
@@ -26,9 +30,30 @@ from backend.services.pg_migration.precheck import STRATEGY_REPLACE
 
 SOURCE_TYPES = source_types()
 TARGET_TYPES = target_types_for(POSTGRESQL)
+SOURCE_TYPE_PLACEHOLDER = "(connect a server first)"
+
+
+def session_source_type(live: Any) -> str | None:
+    """Return the connected engine when it is a registered migration source."""
+    if live is None:
+        return None
+    kind = _norm(_db_type_value(getattr(live, "db_type", "")))
+    if kind in SOURCE_TYPES:
+        return kind
+    return None
+
+
+def session_source_types(live: Any) -> tuple[str, ...]:
+    """Source types shown on the Migration page: the live session only."""
+    kind = session_source_type(live)
+    return (kind,) if kind else ()
+
+
 METHOD_TYPED = "Enter server details"
 METHOD_SAVED = "Use a saved server"
+METHOD_SESSION = "Current session"
 CONNECTION_METHODS = (METHOD_TYPED, METHOD_SAVED)
+SOURCE_CONNECTION_METHODS = (METHOD_SESSION, METHOD_TYPED)
 MIN_BATCH_SIZE = 1
 MAX_BATCH_SIZE = 100000
 
@@ -79,6 +104,15 @@ def servers_for_type(servers: list[Any], db_type: str) -> list[Any]:
     return servers_matching_type(servers, db_type)
 
 
+def is_listed_database_name(value: str) -> bool:
+    """True when a dropdown value is a real database name, not a status placeholder."""
+    text = (value or "").strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    return not lowered.startswith(("test ", "loading ", "connect ", "("))
+
+
 def saved_server_choices(servers: list[Any]) -> list[str]:
     labels = [server_choice_label(server) for server in servers]
     return labels or ["(none)"]
@@ -94,7 +128,8 @@ def find_saved_server(servers: list[Any], choice: str) -> Any | None:
 
 
 def default_listen_port(db_type: str) -> int:
-    return 3306 if str(db_type or "").strip().lower() == MYSQL else 5432
+    kind = str(db_type or "").strip().lower()
+    return {MYSQL: 3306, MSSQL: 1433, MONGODB: 27017, ORACLE: 1521}.get(kind, 5432)
 
 
 def secret_entry_show(visible: bool) -> str:
@@ -137,6 +172,7 @@ def manual_endpoint(
     linux_password: str = "",
     ssh_host: str = "",
     ssh_port: int = 22,
+    auth_database: str = "",
 ):
     """Build a one-off connection. It is not written to saved_servers.json."""
     from desktop.connection_store import SavedServer
@@ -159,6 +195,7 @@ def manual_endpoint(
         username=username.strip(),
         password=password,
         database="",
+        auth_database=(auth_database or "").strip(),
         ssh_enabled=bool(ssh_enabled),
         linux_username=linux_username.strip(),
         linux_password=linux_password,
@@ -389,11 +426,6 @@ def start_block_reason(
         return "Source and target are the same database instance. The migration was not started."
     if identity_error:
         return identity_error
-    if not configuration_current:
-        return (
-            "Source or target settings changed after the last successful test or preview. "
-            "Test both sides and preview the current plan again."
-        )
     if not source_tested:
         return "Test the source connection before validating or starting."
     if not target_tested:
@@ -402,6 +434,11 @@ def start_block_reason(
         return "Validate the migration before previewing or starting it."
     if not plan_current:
         return "Preview the migration plan and confirm it before starting."
+    if not configuration_current:
+        return (
+            "Source or target settings changed after the last successful test or preview. "
+            "Test both sides and preview the current plan again."
+        )
     if replace_needs_confirm and not replace_confirmed:
         return "Replacing existing target tables requires explicit confirmation. Nothing was dropped."
     if not confirmed:

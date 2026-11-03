@@ -154,6 +154,12 @@ class ParamikoTunnel:
         if self._transport is None:
             raise RuntimeError("SSH transport could not be established.")
 
+        try:
+            # Keep an idle or slow tunnel from being dropped silently during a long copy.
+            self._transport.set_keepalive(30)
+        except Exception:
+            pass
+
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind(("127.0.0.1", 0))
