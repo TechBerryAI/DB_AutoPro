@@ -101,9 +101,16 @@ def translate_default(default: object, *, mysql_type: str, auto_increment: bool)
         return None, None
     if text.lower() in {"true", "false"}:
         return ("1" if text.lower() == "true" else "0"), None
-    if text.lower() in {"now()", "current_timestamp"}:
-        if mysql_type.startswith(("DATETIME", "TIME", "DATE")):
-            return "CURRENT_TIMESTAMP", None
+    lowered = text.lower()
+    if lowered in {"now()", "current_timestamp", "current_timestamp()", "localtimestamp"}:
+        # MySQL requires the default precision to match the column precision.
+        if mysql_type.startswith("DATETIME"):
+            fsp = re.search(r"\((\d+)\)", mysql_type)
+            return (f"CURRENT_TIMESTAMP({fsp.group(1)})" if fsp else "CURRENT_TIMESTAMP"), None
+        return None, f"default {text} is not valid for {mysql_type}"
+    if lowered == "current_date":
+        if mysql_type == "DATE":
+            return "(CURRENT_DATE)", None
         return None, f"default {text} is not valid for {mysql_type}"
     numeric = _NUMERIC_DEFAULT.fullmatch(text)
     if numeric:
@@ -121,12 +128,20 @@ def adapt_value(value: object, mysql_type: str) -> object:
         return None
     if mysql_type == "TINYINT(1)" and isinstance(value, bool):
         return 1 if value else 0
+    if isinstance(value, (memoryview, bytearray)):
+        return bytes(value)
     if mysql_type == "JSON":
-        if isinstance(value, (dict, list)):
-            return json.dumps(value)
-        return str(value)
+        # psycopg2 parses json and jsonb, so a JSON string or number arrives as a Python str or number.
+        # Serializing every parsed value keeps those scalars valid JSON for MySQL.
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value).decode("utf-8")
+        return json.dumps(value)
     if mysql_type == "CHAR(36)" and isinstance(value, uuid.UUID):
         return str(value)
+    if mysql_type in {"FLOAT", "DOUBLE"} and isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        raise ValueError(f"MySQL {mysql_type} cannot store the PostgreSQL value {value}. No row was skipped or changed.")
+    if mysql_type.startswith("DECIMAL") and isinstance(value, Decimal) and not value.is_finite():
+        raise ValueError(f"MySQL {mysql_type} cannot store the PostgreSQL value {value}. No row was skipped or changed.")
     if mysql_type.startswith("DATETIME") and isinstance(value, dt.datetime) and value.tzinfo is not None:
         return value.astimezone(dt.timezone.utc).replace(tzinfo=None)
     if isinstance(value, Decimal):

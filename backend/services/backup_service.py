@@ -416,7 +416,7 @@ class BackupService:
             build_mongodump_remote_command,
             download_remote_directory,
             flatten_mongodump_output,
-            mongo_endpoint_from_connection,
+            resolve_remote_mongo_endpoint,
             remote_backup_folder_name,
             remove_remote_path,
             resolve_remote_mongodump_path,
@@ -438,7 +438,11 @@ class BackupService:
         opts = conn.extra_options or {}
         auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
         db = self._mongo_target_database(request)
-        mongo_host, mongo_port = mongo_endpoint_from_connection(conn)
+        try:
+            mongo_host, mongo_port = resolve_remote_mongo_endpoint(conn, ssh, prefer_loopback=True)
+        except RuntimeError as exc:
+            shutil.rmtree(dump_dir, ignore_errors=True)
+            raise BackupError(str(exc)) from exc
         remote_stage = f"/tmp/{remote_backup_folder_name(request.backup_folder_name, db or 'all')}"
 
         if progress_callback:
@@ -503,7 +507,7 @@ class BackupService:
         from backend.services.ssh_client import (
             build_mongodump_remote_command,
             flatten_remote_mongodump_output,
-            mongo_endpoint_from_connection,
+            resolve_remote_mongo_endpoint,
             remote_backup_folder_name,
             resolve_remote_mongodump_path,
             run_ssh_command,
@@ -535,7 +539,10 @@ class BackupService:
         opts = conn.extra_options or {}
         auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
         db = self._mongo_target_database(request)
-        mongo_host, mongo_port = mongo_endpoint_from_connection(conn)
+        try:
+            mongo_host, mongo_port = resolve_remote_mongo_endpoint(conn, ssh, prefer_loopback=True)
+        except RuntimeError as exc:
+            raise BackupError(str(exc)) from exc
 
         from backend.services.ssh_client import ensure_remote_backup_dir
 

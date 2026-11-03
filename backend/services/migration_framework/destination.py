@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import re
 
-from backend.services.migration_framework.registry import MYSQL, POSTGRESQL, _norm
+from backend.services.migration_framework.registry import MONGODB, MSSQL, MYSQL, ORACLE, POSTGRESQL, _norm
 from backend.services.pg_mysql_migration.mapping import quote_mysql
 
 _MYSQL_SAFE = re.compile(r"^[A-Za-z0-9_$]{1,64}$")
+_MSSQL_SAFE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_ORACLE_SERVICE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#.]{0,127}$")
+_MONGO_SAFE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _MYSQL_SYSTEM = {"information_schema", "mysql", "performance_schema", "sys"}
 _PG_SYSTEM = {"template0", "template1"}
+_MSSQL_SYSTEM = {"master", "tempdb", "model", "msdb"}
+_MONGO_SYSTEM = {"admin", "local", "config"}
 
 
 def destination_copy_name(source_database: str, target_type: str) -> str:
@@ -26,6 +31,26 @@ def destination_copy_name(source_database: str, target_type: str) -> str:
             cleaned = f"db_{cleaned}"
         cleaned = cleaned[:64]
         if cleaned.lower() in _MYSQL_SYSTEM:
+            cleaned = f"{cleaned}_copy"[:64]
+        return cleaned
+    if kind == MSSQL:
+        cleaned = re.sub(r"[^A-Za-z0-9_]", "_", name)
+        if not cleaned:
+            return ""
+        if cleaned[0].isdigit():
+            cleaned = f"db_{cleaned}"
+        cleaned = cleaned[:128]
+        if cleaned.lower() in _MSSQL_SYSTEM:
+            cleaned = f"{cleaned}_copy"[:128]
+        return cleaned
+    if kind == MONGODB:
+        cleaned = re.sub(r"[^A-Za-z0-9_]", "_", name)
+        if not cleaned:
+            return ""
+        if cleaned[0].isdigit():
+            cleaned = f"db_{cleaned}"
+        cleaned = cleaned[:64]
+        if cleaned.lower() in _MONGO_SYSTEM:
             cleaned = f"{cleaned}_copy"[:64]
         return cleaned
     return name
@@ -46,13 +71,37 @@ def destination_name_error(name: str, target_type: str) -> str | None:
             return f"{text} is a MySQL system database and cannot be the destination copy."
     if kind == POSTGRESQL and text.lower() in _PG_SYSTEM:
         return f"{text} is a PostgreSQL template database and cannot be the destination copy."
+    if kind == MSSQL:
+        if not _MSSQL_SAFE.match(text):
+            return (
+                "The SQL Server destination name may contain only letters, digits, and underscore, "
+                "and must start with a letter or underscore. No database was created."
+            )
+        if text.lower() in _MSSQL_SYSTEM:
+            return f"{text} is a SQL Server system database and cannot be the destination copy."
+    if kind == ORACLE and not _ORACLE_SERVICE.match(text):
+        return (
+            "Enter the Oracle service name. This migration writes into the connected schema "
+            "and does not create a PDB or service."
+        )
+    if kind == MONGODB:
+        if not _MONGO_SAFE.match(text):
+            return (
+                "The MongoDB destination name may contain only letters, digits, and underscore, "
+                "and must start with a letter or underscore. No database was created."
+            )
+        if text.lower() in _MONGO_SYSTEM:
+            return f"{text} is a MongoDB system database and cannot be the destination copy."
     return None
 
 
 def server_probe_database(db_type: str) -> str:
     """Catalog used only to reach the server. It is not the destination copy."""
-    if _norm(db_type) == MYSQL:
+    kind = _norm(db_type)
+    if kind in {MYSQL, MONGODB, ORACLE}:
         return ""
+    if kind == MSSQL:
+        return "master"
     return "postgres"
 
 
@@ -80,6 +129,33 @@ def create_mysql_destination(execute, name: str) -> str:
         f"CREATE DATABASE IF NOT EXISTS {quote_mysql(name)} "
         "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
     )
+    return name
+
+
+def quote_mssql(name: str) -> str:
+    if not isinstance(name, str) or not name or "\x00" in name:
+        raise ValueError("Invalid SQL Server identifier")
+    return "[" + name.replace("]", "]]") + "]"
+
+
+def mssql_destination_exists(query, name: str) -> bool:
+    wanted = (name or "").strip()
+    if not wanted:
+        return False
+    try:
+        rows = query("SELECT name FROM sys.databases WHERE name = '" + wanted.replace("'", "''") + "'")
+    except Exception:
+        return False
+    return bool(rows)
+
+
+def create_mssql_destination(execute, name: str) -> str:
+    """Create an empty SQL Server database. Does not copy users, files, views, or roles."""
+    error = destination_name_error(name, MSSQL)
+    if error:
+        raise ValueError(error)
+    escaped = name.replace("'", "''")
+    execute(f"IF DB_ID(N'{escaped}') IS NULL CREATE DATABASE {quote_mssql(name)}")
     return name
 
 

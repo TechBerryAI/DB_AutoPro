@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from backend.services.migration_framework.registry import MYSQL, POSTGRESQL, _norm
+from backend.services.migration_framework.registry import MONGODB, MSSQL, MYSQL, ORACLE, POSTGRESQL, _norm
 
 _MYSQL_SYSTEM = {"information_schema", "performance_schema", "mysql", "sys"}
 _PG_SYSTEM = {"template0", "template1"}
+_MSSQL_SYSTEM = {"master", "tempdb", "model", "msdb"}
+_MONGO_SYSTEM = {"admin", "local", "config"}
 
 
 def list_accessible_databases(db_type: str, query) -> list[str]:
@@ -24,6 +26,16 @@ def list_accessible_databases(db_type: str, query) -> list[str]:
         if kind == MYSQL:
             rows = query("SHOW DATABASES")
             return _names(rows, skip=_MYSQL_SYSTEM)
+        if kind == MSSQL:
+            rows = query(
+                "SELECT name FROM sys.databases WHERE name NOT IN ('master','tempdb','model','msdb') ORDER BY 1"
+            )
+            return _names(rows, skip=_MSSQL_SYSTEM)
+        if kind == ORACLE:
+            rows = query("SELECT sys_context('USERENV','CURRENT_SCHEMA') AS name FROM dual")
+            return _names(rows, skip=set())
+        if kind == MONGODB:
+            return []
     except Exception:
         return []
     return []

@@ -599,3 +599,190 @@ def test_replace_is_explicit_in_the_audit_and_backup_is_not_marked_proven(monkey
     assert details["restore_verified"] is False
     assert details["replace_confirmed"] is True
     assert "password" not in str(details)
+
+
+def test_datetime_defaults_match_column_precision_and_large_types_get_expression_defaults():
+    from backend.services.pg_mysql_migration.schema import create_table_sql
+
+    default_sql, error = translate_default("now()", mysql_type="DATETIME(6)", auto_increment=False)
+    assert default_sql == "CURRENT_TIMESTAMP(6)" and error is None
+    table = TableSpec(
+        "t",
+        columns=[
+            ColumnSpec("id", "INT", False, None, True),
+            ColumnSpec("note", "TEXT", True, "'a'", False),
+            ColumnSpec("doc", "JSON", True, "'{}'", False),
+        ],
+        primary_key=["id"],
+    )
+    sql = create_table_sql(table)
+    assert "`note` TEXT NULL DEFAULT ('a')" in sql
+    assert "`doc` JSON NULL DEFAULT ('{}')" in sql
+
+
+def test_adapt_value_handles_bytea_json_scalars_and_nan():
+    import pytest
+
+    assert adapt_value(memoryview(b"ab"), "BLOB") == b"ab"
+    assert adapt_value("abc", "JSON") == '"abc"'
+    assert adapt_value({"a": 1}, "JSON") == '{"a": 1}'
+    with pytest.raises(ValueError):
+        adapt_value(float("nan"), "DOUBLE")
+
+
+def test_rows_are_split_to_fit_the_packet_budget():
+    from backend.services.pg_mysql_migration.engine import _chunks_by_size
+
+    rows = [(i, "x" * 1000) for i in range(10)]
+    chunks = list(_chunks_by_size(rows, 3000))
+    assert sum(len(chunk) for chunk in chunks) == 10
+    assert len(chunks) > 1
+    assert list(_chunks_by_size([("x" * 10_000,)], 100)) == [[("x" * 10_000,)]]
+
+
+def test_wide_varchar_rows_are_mapped_to_text_and_text_keys_are_blocked():
+    from backend.services.pg_mysql_migration.schema import _check_keys, _fit_row_size
+
+    spec = TableSpec(
+        "wide",
+        columns=[ColumnSpec(f"c{i}", "VARCHAR(5000)", True, None, False) for i in range(5)],
+    )
+    _fit_row_size(spec)
+    assert not spec.blocked
+    assert any(column.mysql_type == "TEXT" for column in spec.columns)
+    keyed = TableSpec("k", columns=[ColumnSpec("code", "TEXT", False, None, False)], primary_key=["code"])
+    _check_keys(keyed)
+    assert "cannot index" in keyed.blocked
+
+
+def test_disk_full_retries_once_with_compression_and_commits_in_bounded_transactions():
+    class FullOnce(_Target):
+        def __init__(self):
+            super().__init__()
+            self.inserts = 0
+            self.failed = False
+
+        def executemany(self, sql, rows):
+            self.inserts += 1
+            if not self.failed and self.inserts == 3:
+                self.failed = True
+                self.batches = []
+                raise RuntimeError("1114 (HY000): The table 'orders' is full")
+            super().executemany(sql, rows)
+
+    from backend.services.pg_mysql_migration import engine as engine_module
+
+    target = FullOnce()
+    big = "x" * 40_000
+
+    def fetch(_table, _columns, _batch, _cancel):
+        for start in range(0, 10, 2):
+            yield [(start + 1, big), (start + 2, big)]
+
+    original = engine_module.COMMIT_BYTES
+    engine_module.COMMIT_BYTES = 100_000
+    try:
+        result = run_pg_mysql_migration(
+            [_orders()], [], scope=SCOPE_SCHEMA_AND_DATA, strategy=STRATEGY_SKIP, batch_size=2,
+            fetch_batches=fetch, target=target, count_source=lambda _name: 10,
+            cancel=threading.Event(), migration_id="mig-space",
+        )
+    finally:
+        engine_module.COMMIT_BYTES = original
+    creates = [sql for sql in target.statements if sql.startswith("CREATE TABLE")]
+    assert len(creates) == 2 and "ROW_FORMAT=COMPRESSED" in creates[1] and "ROW_FORMAT" not in creates[0]
+    assert any(sql.startswith("DROP TABLE IF EXISTS") for sql in target.statements)
+    assert any("PURGE BINARY LOGS" in sql for sql in target.statements)
+    assert any("sql_log_bin = 0" in sql for sql in target.statements)
+    assert target.commits > 2
+    assert result.status == "Completed and verified"
+    assert sum(len(batch) for batch in target.batches) == 10
+
+
+def test_disk_full_twice_reports_how_to_free_space():
+    class AlwaysFull(_Target):
+        def executemany(self, sql, rows):
+            raise RuntimeError("1114 (HY000): The table 'orders' is full")
+
+    result = run_pg_mysql_migration(
+        [_orders()], [], scope=SCOPE_SCHEMA_AND_DATA, strategy=STRATEGY_SKIP, batch_size=2,
+        fetch_batches=lambda *_args: iter([[(1, "a")]]), target=AlwaysFull(),
+        count_source=lambda _name: 1, cancel=threading.Event(), migration_id="mig-full",
+    )
+    assert result.status in {"Failed", "Partially completed"}
+    assert "disk space" in result.summary
+
+
+def test_text_tables_are_created_compressed_to_save_mysql_disk():
+    wide = TableSpec(
+        "blobbed",
+        columns=[
+            ColumnSpec("id", "INT", False, None, True),
+            ColumnSpec("body", "TEXT", True, None, False),
+        ],
+        primary_key=["id"],
+    )
+    target = _Target()
+    result = run_pg_mysql_migration(
+        [wide], [], scope=SCOPE_SCHEMA, strategy=STRATEGY_SKIP, batch_size=2,
+        fetch_batches=lambda *_args: iter(()), target=target, count_source=lambda _name: 0,
+        cancel=threading.Event(), migration_id="mig-compress",
+    )
+    assert result.status == "Completed and verified"
+    creates = [sql for sql in target.statements if sql.startswith("CREATE TABLE")]
+    assert creates and "ROW_FORMAT=COMPRESSED" in creates[0]
+
+
+def test_progress_reports_phases_and_row_counts_and_lock_timeouts_are_explained():
+    from backend.services.pg_mysql_migration import engine as engine_module
+
+    messages = []
+    target = _Target()
+
+    def fetch(_table, _columns, _batch, _cancel):
+        yield [(1, "a"), (2, "b")]
+
+    result = run_pg_mysql_migration(
+        [_orders()], [], scope=SCOPE_SCHEMA_AND_DATA, strategy=STRATEGY_SKIP, batch_size=2,
+        fetch_batches=fetch, target=target, count_source=lambda _name: 2,
+        cancel=threading.Event(), migration_id="mig-progress",
+        on_progress=lambda done, total, text: messages.append((done, total, text)),
+    )
+    assert result.status == "Completed and verified"
+    assert any("creating the MySQL table" in text for _d, _t, text in messages)
+    assert any("reading rows" in text for _d, _t, text in messages)
+    assert any("SET SESSION lock_wait_timeout" in sql for sql in target.statements)
+
+    class Locked(_Target):
+        def execute(self, sql, params=None):
+            if sql.startswith("DROP TABLE"):
+                raise RuntimeError("1205 (HY000): Lock wait timeout exceeded; try restarting transaction")
+            super().execute(sql, params)
+
+    failed = run_pg_mysql_migration(
+        [_orders()], ["orders"], scope=SCOPE_SCHEMA_AND_DATA, strategy=STRATEGY_REPLACE, batch_size=2,
+        fetch_batches=fetch, target=Locked(), count_source=lambda _name: 2,
+        cancel=threading.Event(), migration_id="mig-lock",
+    )
+    assert "PROCESSLIST" in failed.summary
+
+
+def test_lock_timeout_names_the_blocking_session_and_the_kill_command():
+    class Locked(_Target):
+        def execute(self, sql, params=None):
+            if sql.startswith("DROP TABLE"):
+                raise RuntimeError("1205 (HY000): Lock wait timeout exceeded; try restarting transaction")
+            super().execute(sql, params)
+
+        def query(self, sql, params=None):
+            if "metadata_locks" in sql:
+                return [{"id": 77, "user_name": "root", "host_name": "localhost", "command": "Sleep", "seconds": 5400,
+                         "statement_text": "select * from data_2gb", "lock_status": "GRANTED"}]
+            return super().query(sql, params)
+
+    result = run_pg_mysql_migration(
+        [_orders()], ["orders"], scope=SCOPE_SCHEMA_AND_DATA, strategy=STRATEGY_REPLACE, batch_size=2,
+        fetch_batches=lambda *_args: iter(()), target=Locked(), count_source=lambda _name: 0,
+        cancel=threading.Event(), migration_id="mig-holder",
+    )
+    assert "KILL 77;" in result.summary and "root@localhost" in result.summary and "5400s" in result.summary
