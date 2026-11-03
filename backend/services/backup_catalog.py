@@ -419,36 +419,44 @@ def describe_backup_command(request: BackupRequest) -> str:
                     f"ssh {ssh_user}@{ssh_host} → {remote_cmd}\n"
                     f"# Backup stays on Linux server under {remote_root}"
                 )
+            # Custom/tar/directory need a seekable file; only Plain SQL / dumpall can use stdout.
+            stream_stdout = (
+                request.method == BackupMethod.PG_DUMPALL
+                or resolve_pg_dump_format(request) == PgDumpFormat.PLAIN
+            )
             if request.method == BackupMethod.PG_DUMPALL:
+                out_flag = "-f -" if stream_stdout else "-f /tmp/<output.sql>"
                 if ssh_user in ("root", "postgres"):
-                    remote_cmd = "sudo -u postgres pg_dumpall -f /tmp/<output.sql>"
+                    remote_cmd = f"sudo -u postgres pg_dumpall {out_flag}"
                 else:
                     remote_cmd = (
-                        f"pg_dumpall -h {pg_host} -p {pg_port} -U {user} "
-                        f"-f /tmp/<output.sql>"
+                        f"pg_dumpall -h {pg_host} -p {pg_port} -U {user} {out_flag}"
                     )
             else:
                 db = request.database or conn.database
                 extra_args = build_pg_dump_extra_args(request)
+                out_flag = f"-f -" if stream_stdout else f"-f /tmp/{out_token}"
                 if ssh_user in ("root", "postgres"):
                     remote_cmd = (
                         f"sudo -u postgres pg_dump -d {db} "
-                        f"-f - {' '.join(extra_args)}"
+                        f"{out_flag} {' '.join(extra_args)}"
                     )
                 else:
                     remote_cmd = (
                         f"pg_dump -h {pg_host} -p {pg_port} -U {user} -d {db} "
-                        f"-f - {' '.join(extra_args)}"
+                        f"{out_flag} {' '.join(extra_args)}"
                     )
-            note = (
-                "# Streams pg_dump over SSH to this PC (no /tmp copy + download); "
-                f"saved under {local_hint}"
-            )
-            if (
-                request.method != BackupMethod.PG_DUMPALL
-                and resolve_pg_dump_format(request) == PgDumpFormat.PLAIN
-            ) or request.method == BackupMethod.PG_DUMPALL:
+            if stream_stdout:
+                note = (
+                    "# Streams pg_dump over SSH to this PC (no /tmp copy + download); "
+                    f"saved under {local_hint}"
+                )
                 note += "\n# Plain SQL: gzip on the wire for speed; file on this PC is still .sql"
+            else:
+                note = (
+                    f"# Writes to /tmp on the Linux server, then downloads to {local_hint} "
+                    "(custom/tar/directory cannot stream to stdout)"
+                )
             return f"ssh {ssh_user}@{ssh_host} → {remote_cmd}\n{note}"
         if request.method == BackupMethod.PG_DUMPALL:
             return f"pg_dumpall -h {host} -p {port} -U {user} -f <output.sql>{tunnel}"
