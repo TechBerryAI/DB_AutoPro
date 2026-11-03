@@ -319,6 +319,47 @@ def mongo_endpoint_from_connection(conn: Any) -> tuple[str, int]:
     return str(host), port
 
 
+def resolve_remote_mongo_endpoint(
+    conn: Any, ssh: dict[str, Any], *, prefer_loopback: bool = False
+) -> tuple[str, int]:
+    """MongoDB host/port as the Linux SSH server must dial it.
+
+    mongodump and mongorestore run on the SSH server. When that server is the MongoDB server, its own
+    LAN address can time out from the inside (firewall or bind address), so 127.0.0.1 is tried first.
+    Each candidate is tested from the SSH server before the tool runs, so an unreachable MongoDB gives a
+    clear message instead of a mongodump timeout.
+    """
+    host, port = mongo_endpoint_from_connection(conn)
+    ssh_host = str(ssh.get("ssh_host") or "").strip()
+    candidates: list[str] = []
+    if prefer_loopback and (host in ("127.0.0.1", "localhost") or (ssh_host and ssh_host == host)):
+        candidates.append("127.0.0.1")
+    if host not in candidates:
+        candidates.append(host)
+    kwargs = _ssh_kwargs(ssh)
+    failures: list[str] = []
+    for candidate in candidates:
+        probe = f"timeout 6 bash -c {shlex.quote(f'exec 3<>/dev/tcp/{candidate}/{port}')}"
+        try:
+            code, _out, _err = run_ssh_command(command=probe, timeout=30, **kwargs)
+        except Exception:
+            return host, port
+        if code == 0:
+            return candidate, port
+        if code == 127:
+            return host, port
+        failures.append(candidate)
+    shown_ssh = ssh_host or "the Linux server"
+    raise RuntimeError(
+        f"The Linux server {shown_ssh} cannot reach MongoDB at {' or '.join(f'{c}:{port}' for c in failures)}.\n"
+        "mongodump runs on that server, so it must be able to connect to MongoDB itself. Confirm that:\n"
+        "  1. mongod is running and listening on that port (ss -ltnp | grep " + str(port) + ").\n"
+        "  2. If the SSH server is a different machine from MongoDB, it can route to the MongoDB IP "
+        "(same subnet or an allowed route) and its firewall allows the port.\n"
+        "  3. Otherwise choose the MongoDB server itself as the SSH server for this backup."
+    )
+
+
 def remote_backup_folder_name(custom_name: str | None = None, db_name: str = "all") -> str:
     """Build a timestamped backup folder name, optionally using a custom prefix."""
     from datetime import datetime
@@ -638,13 +679,18 @@ def list_remote_directory(ssh: dict[str, Any], remote_path: str) -> list[dict[st
             name = attr.filename
             if name in (".", ".."):
                 continue
-            full_path = f"{path}/{name}"
+            full_path = f"{path.rstrip('/')}/{name}"
             is_dir = stat.S_ISDIR(attr.st_mode)
+            if stat.S_ISLNK(attr.st_mode):
+                try:
+                    is_dir = stat.S_ISDIR(sftp.stat(full_path).st_mode)
+                except OSError:
+                    is_dir = False
             entries.append({
                 "name": name,
                 "path": full_path,
                 "is_dir": is_dir,
-                "size": attr.st_size,
+                "size": 0 if is_dir else attr.st_size,
             })
         entries.sort(key=lambda item: (not item["is_dir"], item["name"].lower()))
         return entries

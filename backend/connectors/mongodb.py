@@ -21,13 +21,22 @@ class MongoDBConnector(BaseConnector):
         if explicit:
             return [explicit]
 
-        # Auth database is optional. MongoDB users are usually created in admin,
-        # so try that before the database named in the form.
-        database = (self.config.database or "admin").strip() or "admin"
-        candidates = ["admin"]
-        if database not in candidates:
-            candidates.append(database)
-        return candidates
+        # Auth database is optional. Try admin, the selected database, the username
+        # (common when the user was created in a matching database), then extra hints.
+        candidates: list[str] = []
+        hints = opts.get("auth_source_hints") or []
+        if isinstance(hints, str):
+            hints = [hints]
+        for item in (
+            "admin",
+            (self.config.database or "").strip(),
+            (self.config.username or "").strip(),
+            *list(hints),
+        ):
+            name = str(item or "").strip()
+            if name and name not in candidates:
+                candidates.append(name)
+        return candidates or ["admin"]
 
     @staticmethod
     def _is_auth_failure(exc: BaseException) -> bool:
@@ -64,14 +73,20 @@ class MongoDBConnector(BaseConnector):
 
         last_error: Exception | None = None
         for auth_source in self._auth_source_candidates():
+            client = None
             try:
                 client = MongoClient(
                     self._build_uri(auth_source),
-                    serverSelectionTimeoutMS=5000,
+                    serverSelectionTimeoutMS=8000,
                 )
                 client.admin.command("ping")
                 return client
             except Exception as exc:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
                 if self._is_auth_failure(exc):
                     last_error = exc
                     continue
@@ -82,7 +97,8 @@ class MongoDBConnector(BaseConnector):
             raise ConnectorError(
                 f"MongoDB authentication failed for user '{self.config.username}'. "
                 f"Tried authSource: {tried}. "
-                "Leave Auth database empty to use admin, or set it to the database where this user was created."
+                "Set Auth database to the database where this user was created "
+                f"(often '{self.config.username}' or admin)."
             ) from last_error
         raise ConnectorError("MongoDB connection failed")
 
@@ -116,6 +132,15 @@ class MongoDBConnector(BaseConnector):
         try:
             info = client.server_info()
             return info.get("version", "unknown")
+        finally:
+            client.close()
+
+    def list_database_names(self) -> list[str]:
+        """Return user databases. admin, local, and config are omitted."""
+        client = self._get_client()
+        try:
+            skip = {"admin", "local", "config"}
+            return [name for name in client.list_database_names() if name not in skip]
         finally:
             client.close()
 

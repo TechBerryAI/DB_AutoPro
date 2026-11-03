@@ -645,7 +645,7 @@ class RestoreService:
     ) -> None:
         from backend.services.ssh_client import (
             build_mongorestore_remote_command,
-            mongo_endpoint_from_connection,
+            resolve_remote_mongo_endpoint,
             remove_remote_path,
             resolve_remote_mongorestore_path,
             run_ssh_command,
@@ -672,7 +672,10 @@ class RestoreService:
 
         opts = conn.extra_options or {}
         auth_db = opts.get("auth_source") or opts.get("authSource") or "admin"
-        mongo_host, mongo_port = mongo_endpoint_from_connection(conn)
+        try:
+            mongo_host, mongo_port = resolve_remote_mongo_endpoint(conn, ssh)
+        except RuntimeError as exc:
+            raise RestoreError(str(exc)) from exc
 
         staging_dir: str | None = None
         remote_extra_args = list(plan.extra_flags)

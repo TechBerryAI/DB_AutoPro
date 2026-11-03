@@ -146,11 +146,11 @@ def test_unsupported_pair_is_rejected_before_a_connector(client, auth_headers):
     client.app.dependency_overrides[get_migration_service] = lambda: MigrationService(factory)
     response = client.post(
         "/api/v1/migrations/",
-        json=_body(source_type="mysql", target_type="postgresql", confirm_plan=True, confirm_replace=True, accept_unproven_backup=True),
+        json=_body(source_type="mysql", target_type="mongodb", confirm_plan=True, confirm_replace=True, accept_unproven_backup=True),
         headers=auth_headers,
     )
     assert response.status_code == 400
-    assert "mysql-to-postgresql" in response.text
+    assert "mysql-to-mongodb" in response.text
     assert "No schema or data was copied." in response.text
     assert opened == []
     client.app.dependency_overrides.clear()

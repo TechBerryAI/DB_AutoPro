@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from backend.services.pg_migration.precheck import quote_ident
@@ -44,11 +45,17 @@ def quote_pg_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def create_table_sql(table: TableSpec) -> str:
+def create_table_sql(table: TableSpec, *, compressed: bool = False) -> str:
     parts: list[str] = []
     for column in table.columns:
         null_sql = "NULL" if column.nullable else "NOT NULL"
-        default_sql = f" DEFAULT {column.default_sql}" if column.default_sql else ""
+        default_sql = ""
+        if column.default_sql:
+            expression = column.default_sql
+            # MySQL accepts a default on TEXT, BLOB, and JSON only as a parenthesized expression.
+            if _is_large_type(column.mysql_type) and not expression.startswith("("):
+                expression = f"({expression})"
+            default_sql = f" DEFAULT {expression}"
         auto_sql = " AUTO_INCREMENT" if column.auto_increment else ""
         parts.append(f"{quote_mysql(column.name)} {column.mysql_type} {null_sql}{default_sql}{auto_sql}")
     if table.primary_key:
@@ -61,7 +68,78 @@ def create_table_sql(table: TableSpec) -> str:
         f"CREATE TABLE {quote_mysql(table.name)} ("
         + ", ".join(parts)
         + ") ENGINE=InnoDB"
+        + (" ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8" if compressed else "")
     )
+
+
+def _is_large_type(mysql_type: str) -> bool:
+    return mysql_type.upper().split("(")[0] in {"TEXT", "BLOB", "JSON"}
+
+
+_FIXED_BYTES = {"SMALLINT": 2, "INT": 4, "BIGINT": 8, "FLOAT": 4, "DOUBLE": 8, "TINYINT": 1, "DATE": 3}
+
+
+def _column_bytes(mysql_type: str) -> int:
+    """Worst-case stored bytes for the MySQL row-size and index-size limits (utf8mb4 is 4 bytes per character)."""
+    kind = mysql_type.upper().split("(")[0]
+    size = re.search(r"\((\d+)", mysql_type)
+    if kind in {"TEXT", "BLOB", "JSON"}:
+        return 12
+    if kind == "VARCHAR":
+        return int(size.group(1)) * 4 + 2 if size else 2
+    if kind == "CHAR":
+        return int(size.group(1)) * 4 if size else 4
+    if kind in {"DATETIME", "TIME"}:
+        return 8
+    if kind == "DECIMAL":
+        return 32
+    return _FIXED_BYTES.get(kind, 8)
+
+
+MYSQL_ROW_LIMIT = 65535 - 512
+MYSQL_INDEX_LIMIT = 3072
+
+
+def _fit_row_size(spec: TableSpec) -> None:
+    """Map the widest VARCHAR columns to TEXT until the row fits MySQL's 65,535-byte row limit."""
+    def total() -> int:
+        return sum(_column_bytes(column.mysql_type) for column in spec.columns) + len(spec.columns) // 8 + 1
+
+    while total() > MYSQL_ROW_LIMIT:
+        candidates = [column for column in spec.columns if column.mysql_type.upper().startswith(("VARCHAR", "CHAR"))]
+        if not candidates:
+            spec.blocked = f"{spec.name} has a row wider than the MySQL row limit and no text column can be converted."
+            return
+        widest = max(candidates, key=lambda column: _column_bytes(column.mysql_type))
+        spec.conversions.append(
+            f"{spec.name}.{widest.name}: {widest.mysql_type} is mapped to TEXT because the combined row would exceed the MySQL row size limit."
+        )
+        widest.mysql_type = "TEXT"
+        widest.lossy = "mapped to TEXT for the MySQL row size limit"
+
+
+def _check_keys(spec: TableSpec) -> None:
+    """Block a table whose key columns MySQL cannot index, before anything is created."""
+    by_name = {column.name: column for column in spec.columns}
+    keys = [("primary key", tuple(spec.primary_key))]
+    keys += [(f"unique key {name}", columns) for name, columns in spec.uniques]
+    keys += [(f"index {name}", columns) for name, columns in spec.indexes]
+    for label, columns in keys:
+        used = 0
+        for name in columns:
+            column = by_name.get(name)
+            if column is None:
+                continue
+            if _is_large_type(column.mysql_type):
+                spec.blocked = (
+                    f"{spec.name}.{name} is part of {label}, but it maps to {column.mysql_type}, "
+                    "which MySQL cannot index without a prefix length."
+                )
+                return
+            used += _column_bytes(column.mysql_type)
+        if used > MYSQL_INDEX_LIMIT:
+            spec.blocked = f"{spec.name} {label} is {used} bytes, above the MySQL index limit of {MYSQL_INDEX_LIMIT} bytes."
+            return
 
 
 def create_index_sql(table: str, name: str, columns: tuple[str, ...]) -> str:
@@ -145,6 +223,14 @@ def load_table(source_query, name: str) -> TableSpec:
     spec.uniques = _grouped_keys(source_query, name, "UNIQUE")
     spec.indexes = _secondary_indexes(source_query, name, spec)
     spec.foreign_keys = _foreign_keys(source_query, name)
+    if spec.blocked:
+        return spec
+    _fit_row_size(spec)
+    if spec.blocked:
+        return spec
+    _check_keys(spec)
+    if spec.blocked:
+        return spec
     if any(column.auto_increment for column in spec.columns):
         spec.conversions.append(f"{name}: identity or serial column becomes AUTO_INCREMENT.")
     return spec

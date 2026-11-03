@@ -32,6 +32,8 @@ from desktop.pg_migration_flow import (
     replace_requires_confirmation,
     same_instance_reason,
     start_block_reason,
+    session_source_type,
+    session_source_types,
     target_identity_mismatch,
     unsupported_migration_reason,
 )
@@ -477,6 +479,26 @@ def test_array_column_is_reported_unsupported():
     assert statement is None
 
 
+def test_source_type_list_is_only_the_connected_engine():
+    from backend.models.schemas import DatabaseType
+
+    class _Live:
+        def __init__(self, db_type):
+            self.db_type = db_type
+
+    assert session_source_type(None) is None
+    assert session_source_types(None) == ()
+    assert session_source_type(_Live(DatabaseType.POSTGRESQL)) == "postgresql"
+    assert session_source_types(_Live(DatabaseType.POSTGRESQL)) == ("postgresql",)
+    assert session_source_types(_Live("mysql")) == ("mysql",)
+    assert session_source_types(_Live("mariadb")) == ("mysql",)
+    assert session_source_types(_Live("mssql")) == ("mssql",)
+    assert session_source_types(_Live("oracle")) == ("oracle",)
+    assert session_source_types(_Live("mongodb")) == ("mongodb",)
+    assert "mysql" not in session_source_types(_Live("postgresql"))
+    assert "postgresql" not in session_source_types(_Live("mysql"))
+
+
 def test_source_and_target_selection_are_independent():
     reason = start_block_reason(
         source_type="postgresql",
@@ -495,16 +517,64 @@ def test_source_and_target_selection_are_independent():
         confirmed=True,
         busy=False,
     ) is None
-    blocked = start_block_reason(
+    assert start_block_reason(
+        source_type="postgresql",
+        target_type="mssql",
+        precheck_ready=True,
+        plan_current=True,
+        confirmed=True,
+        busy=False,
+    ) is None
+    assert start_block_reason(
+        source_type="postgresql",
+        target_type="oracle",
+        precheck_ready=True,
+        plan_current=True,
+        confirmed=True,
+        busy=False,
+    ) is None
+    assert start_block_reason(
+        source_type="postgresql",
+        target_type="mongodb",
+        precheck_ready=True,
+        plan_current=True,
+        confirmed=True,
+        busy=False,
+    ) is None
+    assert start_block_reason(
         source_type="mysql",
         target_type="postgresql",
         precheck_ready=True,
         plan_current=True,
         confirmed=True,
         busy=False,
+    ) is None
+    assert start_block_reason(
+        source_type="mssql",
+        target_type="postgresql",
+        precheck_ready=True,
+        plan_current=True,
+        confirmed=True,
+        busy=False,
+    ) is None
+    assert start_block_reason(
+        source_type="mongodb",
+        target_type="postgresql",
+        precheck_ready=True,
+        plan_current=True,
+        confirmed=True,
+        busy=False,
+    ) is None
+    blocked = start_block_reason(
+        source_type="mysql",
+        target_type="mongodb",
+        precheck_ready=True,
+        plan_current=True,
+        confirmed=True,
+        busy=False,
     )
     assert blocked
-    assert "mysql-to-postgresql" in blocked
+    assert "mysql-to-mongodb" in blocked
     assert "not implemented" in blocked
     assert "No schema or data was copied." in blocked
     assert start_block_reason(
@@ -519,8 +589,15 @@ def test_source_and_target_selection_are_independent():
 
 def test_postgresql_to_mysql_api_does_not_open_a_connector(monkeypatch):
     assert unsupported_migration_reason("postgresql", "mysql") is None
+    assert unsupported_migration_reason("postgresql", "mssql") is None
+    assert unsupported_migration_reason("postgresql", "oracle") is None
+    assert unsupported_migration_reason("postgresql", "mongodb") is None
     assert unsupported_migration_reason("postgresql", "postgresql") is None
-    assert unsupported_migration_reason("mysql", "postgresql") is not None
+    assert unsupported_migration_reason("mysql", "postgresql") is None
+    assert unsupported_migration_reason("mssql", "postgresql") is None
+    assert unsupported_migration_reason("oracle", "postgresql") is None
+    assert unsupported_migration_reason("mongodb", "postgresql") is None
+    assert unsupported_migration_reason("mysql", "mongodb") is not None
 
     from backend.core.exceptions import MigrationError
     from backend.models.schemas import DatabaseType, MigrationRequest
@@ -627,6 +704,21 @@ def test_target_saved_servers_are_filtered_by_database_type():
     assert find_saved_server(servers, "mysql") is not None
 
 
+def test_listed_database_names_ignore_status_placeholders():
+    from desktop.pg_migration_flow import METHOD_SAVED, METHOD_SESSION, SOURCE_CONNECTION_METHODS, is_listed_database_name
+
+    assert METHOD_SESSION in SOURCE_CONNECTION_METHODS
+    assert METHOD_SAVED not in SOURCE_CONNECTION_METHODS
+
+    assert is_listed_database_name("postgres") is True
+    assert is_listed_database_name("app_db") is True
+    assert is_listed_database_name("Connect a PostgreSQL session to list databases") is False
+    assert is_listed_database_name("Loading databases ...") is False
+    assert is_listed_database_name("(none discovered)") is False
+    assert is_listed_database_name("Test Source to list databases") is False
+    assert is_listed_database_name("") is False
+
+
 def test_open_migration_endpoint_reuses_live_session_without_a_second_tunnel(monkeypatch):
     from backend.models.schemas import DatabaseType
     from desktop.connection import ConnectionResult
@@ -682,6 +774,9 @@ def test_typed_target_credentials_do_not_require_a_saved_server():
     from desktop.pg_migration_flow import secret_entry_show
 
     assert default_listen_port("mysql") == 3306
+    assert default_listen_port("mssql") == 1433
+    assert default_listen_port("mongodb") == 27017
+    assert default_listen_port("oracle") == 1521
     assert secret_entry_show(True) == ""
     assert secret_entry_show(False) == "*"
     assert typed_endpoint_error("", "3306", "root") == "Enter the server host."
@@ -704,6 +799,16 @@ def test_typed_target_credentials_do_not_require_a_saved_server():
     assert server.port == 3306
     assert server.ssh_host == "192.168.1.95"
     assert server.database == ""
+    mongo = manual_endpoint(
+        db_type="mongodb",
+        host="192.168.1.112",
+        port="27017",
+        username="denabank",
+        password="123",
+        auth_database="denabank",
+    )
+    assert mongo.auth_database == "denabank"
+    assert mongo.to_connection_result().auth_database == "denabank"
     details = describe_server_endpoint(server)
     assert "Typed connection" in details
     assert "192.168.1.95:3306" in details
