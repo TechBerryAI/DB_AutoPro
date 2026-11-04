@@ -1541,16 +1541,22 @@ class DatabaseAutomationApp(ctk.CTk):
             )
             if key == "servers":
                 servers_view = self.views[key]
-                if hasattr(servers_view, "set_servers_filter"):
-                    servers_view.set_servers_filter(self._servers_filter)
                 if extra.get("new_connection") and hasattr(servers_view, "start_new_connection"):
+                    # Apply engine filter first so New Connection uses Oracle/MySQL/etc.
+                    if hasattr(servers_view, "set_servers_filter"):
+                        servers_view.set_servers_filter(self._servers_filter)
                     servers_view.start_new_connection()
                 else:
                     saved = extra.get("saved_server")
                     if saved and hasattr(servers_view, "load_saved_server"):
+                        # Load the saved profile as-is. Do not wipe it with a blank
+                        # PostgreSQL/MySQL form from the previous Servers sub-nav filter.
                         servers_view.load_saved_server(saved)
-                    elif not saved and hasattr(servers_view, "refresh"):
-                        servers_view.refresh()
+                    else:
+                        if hasattr(servers_view, "set_servers_filter"):
+                            servers_view.set_servers_filter(self._servers_filter)
+                        elif hasattr(servers_view, "refresh"):
+                            servers_view.refresh()
             elif key == "logs":
                 logs_view = self.views[key]
                 if hasattr(logs_view, "apply_log_filter"):

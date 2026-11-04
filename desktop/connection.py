@@ -19,6 +19,25 @@ DB_DEFAULTS: dict[DatabaseType, dict[str, str | int]] = {
 }
 
 
+def coerce_db_type_for_port(declared: DatabaseType, port: int) -> DatabaseType:
+    """Fix common engine-tile mistakes when the port clearly belongs to another engine.
+
+    Historically the Servers form showed an Oracle hint for every non-Mongo engine,
+    so Connect often ran the PostgreSQL driver against Oracle port 1521.
+    """
+    if declared == DatabaseType.POSTGRESQL and port == 1521:
+        return DatabaseType.ORACLE
+    if declared == DatabaseType.ORACLE and port == 5432:
+        return DatabaseType.POSTGRESQL
+    if declared == DatabaseType.POSTGRESQL and port == 3306:
+        return DatabaseType.MYSQL
+    if declared == DatabaseType.POSTGRESQL and port in {27017, 27018}:
+        return DatabaseType.MONGODB
+    if declared == DatabaseType.POSTGRESQL and port == 1433:
+        return DatabaseType.MSSQL
+    return declared
+
+
 @dataclass
 class ConnectionResult:
     """Connection details accepted by the startup dialog."""
@@ -88,6 +107,12 @@ class ConnectionResult:
             opts["remote_backup_dir"] = self.remote_backup_dir
         return opts
 
+    def _ssl_mode(self) -> str:
+        """SSH tunnels already encrypt traffic; do not require Postgres SSL as well."""
+        if self.ssh_enabled:
+            return "disable"
+        return "prefer"
+
     def to_connection_info(self) -> ConnectionInfo:
         return ConnectionInfo(
             host=self.host,
@@ -95,7 +120,7 @@ class ConnectionResult:
             database=self.database,
             username=self.username,
             password=self.password,
-            ssl_mode="prefer",
+            ssl_mode=self._ssl_mode(),
             extra_options=self._extra_options(),
         )
 
@@ -110,7 +135,7 @@ def apply_connection(connection: ConnectionResult, profile: str = "default") -> 
         database=connection.database,
         username=connection.username,
         password=SecretStr(connection.password),
-        ssl_mode="prefer",
+        ssl_mode=connection._ssl_mode(),
         extra_options=connection._extra_options(),
     )
 
@@ -132,6 +157,15 @@ def _friendly_error(exc: Exception, connection: ConnectionResult | None = None) 
             f"On the database server ({server_host}), add a pg_hba.conf entry and reload PostgreSQL:\n"
             f"  host    {database}    {username}    {client_ip}/32    scram-sha-256\n"
             "Then run: sudo systemctl reload postgresql"
+        )
+    if "ssl was required" in message.lower() or (
+        "does not support ssl" in message.lower()
+    ):
+        return (
+            f"{message}\n\n"
+            "This PostgreSQL host is not using SSL. With an SSH tunnel the app should "
+            "connect without Postgres SSL — retry Connect. For a direct (non-SSH) link, "
+            "the server must either enable SSL or allow non-SSL clients."
         )
     if "Connection refused" in message:
         return (
@@ -189,11 +223,149 @@ def _reachable_saved_oracle_hint(failed_host: str) -> str:
     )
 
 
+def _has_linux_ssh_credentials(connection: ConnectionResult) -> bool:
+    return bool((connection.linux_username or "").strip() and connection.linux_password)
+
+
+def _enrich_ssh_from_saved(connection: ConnectionResult) -> ConnectionResult:
+    """Fill missing Linux SSH fields from a saved profile with the same name."""
+    if _has_linux_ssh_credentials(connection):
+        from dataclasses import replace
+
+        return replace(
+            connection,
+            ssh_host=connection.ssh_host or connection.host,
+            ssh_port=connection.ssh_port or 22,
+        )
+    try:
+        from desktop.connection_store import load_saved_servers
+    except Exception:
+        return connection
+
+    lookup = (connection.saved_name or connection.name or "").strip().lower()
+    if not lookup:
+        return connection
+    for server in load_saved_servers():
+        if (server.name or "").strip().lower() != lookup:
+            continue
+        if not (server.linux_username and server.linux_password):
+            return connection
+        from dataclasses import replace
+
+        return replace(
+            connection,
+            linux_username=server.linux_username,
+            linux_password=server.linux_password,
+            ssh_host=connection.ssh_host or server.ssh_host or connection.host,
+            ssh_port=connection.ssh_port or server.ssh_port or 22,
+        )
+    return connection
+
+
+def _is_credential_error(message: str) -> bool:
+    """True when the DB rejected the login itself (SSH will not help)."""
+    low = (message or "").lower()
+    needles = (
+        "password authentication failed",
+        "authentication failed for",
+        "ora-01017",
+        "invalid username/password",
+        "login failed for user",
+        "ora-28000",
+        "account is locked",
+        "password has expired",
+        "ora-28001",
+    )
+    return any(n in low for n in needles)
+
+
+def _direct_access_likely_blocked(message: str) -> bool:
+    """True when a direct DB login failed for host/network/firewall reasons SSH can bypass."""
+    if _is_credential_error(message):
+        return False
+    low = (message or "").lower()
+    needles = (
+        "pg_hba.conf",
+        "no pg_hba",
+        "no encryption",
+        "not allowed to connect",
+        "is not allowed",
+        "access denied for user",
+        "connection timed out",
+        "timed out",
+        "connection refused",
+        "could not connect",
+        "can't connect",
+        "cannot connect",
+        "no route to host",
+        "network is unreachable",
+        "server closed the connection",
+        "forcibly closed",
+        "dpy-4011",
+        "dpy-6005",
+        "ora-12541",
+        "ora-12170",
+        "ora-12543",
+        "ora-12535",
+        "login timeout",
+        "name or service not known",
+        "getaddrinfo failed",
+        "ssl was required",
+        "does not support ssl",
+        "oracle port closed",
+        "start the listener",
+        "lsnrctl",
+        "no listener",
+        "enable ssh tunnel",
+        "firewalled",
+        "10054",
+        "10053",
+        "10061",
+        "odbc driver",
+        "adaptive server is unavailable",
+        "server is not found",
+        "unable to connect",
+    )
+    return any(n in low for n in needles)
+
+
+def _adopt_working_path(target: ConnectionResult, working: ConnectionResult) -> None:
+    """Copy the path that succeeded onto the caller's connection object."""
+    target.ssh_enabled = working.ssh_enabled
+    target.linux_username = working.linux_username
+    target.linux_password = working.linux_password
+    target.ssh_host = working.ssh_host
+    target.ssh_port = working.ssh_port
+    # Keep typed DB host; open_ssh_tunnel rewrites the bind for the live session.
+
+
 def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
-    """Test connectivity and return (success, message)."""
+    """Test connectivity for any engine with automatic path recovery.
+
+    Strategy (fresh-user resilient Connect):
+      1. Honor the form (direct or SSH).
+      2. If that fails and the other path is available, try it.
+      3. For Oracle, auto-start the TNS listener over SSH when it is down.
+      4. On success, mutate ``connection`` so the live session uses the working path.
+    """
     from dataclasses import replace
 
-    from desktop.ssh_tunnel import probe_tcp, ssh_tunnel_session
+    from backend.services.ssh_host_keys import SshHostKeyError
+    from desktop.oracle_listener import listener_appears_down, try_start_oracle_listener
+    from desktop.ssh_tunnel import ssh_tunnel_session
+
+    enriched = _enrich_ssh_from_saved(connection)
+    has_ssh = _has_linux_ssh_credentials(enriched)
+
+    def _with_ssh(base: ConnectionResult, enabled: bool) -> ConnectionResult:
+        return replace(
+            base,
+            ssh_enabled=enabled,
+            ssh_host=(base.ssh_host or base.host) if enabled else base.ssh_host,
+            ssh_port=(base.ssh_port or 22) if enabled else base.ssh_port,
+            linux_username=base.linux_username,
+            linux_password=base.linux_password,
+        )
 
     def _probe_db(conn: ConnectionResult) -> tuple[bool, str]:
         with ssh_tunnel_session(conn) as effective:
@@ -209,45 +381,67 @@ def test_connection(connection: ConnectionResult) -> tuple[bool, str]:
             error = health.get("error", "Connection failed")
             return False, _friendly_error(Exception(error), conn)
 
-    from backend.services.ssh_host_keys import SshHostKeyError
+    def _safe_probe(conn: ConnectionResult) -> tuple[bool, str]:
+        try:
+            return _probe_db(conn)
+        except SshHostKeyError:
+            raise
+        except Exception as exc:
+            return False, _friendly_error(exc, conn)
 
-    try:
-        return _probe_db(connection)
-    except SshHostKeyError:
-        raise
-    except RuntimeError as exc:
-        ssh_err = str(exc)
-        # SSH unreachable: try direct DB so Connect is not blocked by a dead SSH hop.
-        if connection.ssh_enabled and (
-            "SSH connection failed" in ssh_err
-            or "timed out" in ssh_err.lower()
-            or "connection refused" in ssh_err.lower()
-        ):
-            direct = replace(connection, ssh_enabled=False)
-            db_probe = probe_tcp(connection.host, connection.port, timeout=5.0)
-            try:
-                ok, message = _probe_db(direct)
-            except Exception as direct_exc:
-                ok, message = False, _friendly_error(direct_exc, direct)
-            if ok:
-                return (
-                    True,
-                    f"{message}\n\n"
-                    "Note: SSH was unreachable, so the app connected directly. "
-                    "Uncheck the SSH tunnel option to skip this next time.",
-                )
-            alt = _reachable_saved_oracle_hint(connection.host)
-            if db_probe is not None:
-                return (
-                    False,
-                    f"Cannot reach this Linux/Oracle host - credentials were not "
-                    f"verified yet.\n"
-                    f"- SSH {connection.ssh_host or connection.host}:"
-                    f"{connection.ssh_port} - failed\n"
-                    f"- Database {connection.host}:{connection.port} - {db_probe}\n\n"
-                    f"{ssh_err}{alt}"
-                )
-            return False, f"{ssh_err}\n\nDirect database login also failed:\n{message}{alt}"
-        return False, ssh_err
-    except Exception as exc:
-        return False, _friendly_error(exc, connection)
+    # Preferred order: what the user asked for first, then the alternate path.
+    attempts: list[ConnectionResult] = []
+    prefer_ssh = bool(connection.ssh_enabled and has_ssh)
+    if prefer_ssh:
+        attempts.append(_with_ssh(enriched, True))
+        attempts.append(_with_ssh(enriched, False))
+    else:
+        attempts.append(_with_ssh(enriched, False))
+        if has_ssh:
+            attempts.append(_with_ssh(enriched, True))
+
+    last_error = "Connection failed"
+    oracle_listener_tried = False
+
+    def _try_oracle_listener_recovery() -> tuple[bool, str] | None:
+        nonlocal oracle_listener_tried, last_error
+        if oracle_listener_tried or not has_ssh:
+            return None
+        if connection.db_type != DatabaseType.ORACLE:
+            return None
+        if not listener_appears_down(last_error):
+            return None
+        oracle_listener_tried = True
+        if not try_start_oracle_listener(enriched):
+            return None
+        for retry_ssh in (True, False):
+            retry = _with_ssh(enriched, retry_ssh)
+            ok2, msg2 = _safe_probe(retry)
+            if ok2:
+                _adopt_working_path(connection, retry)
+                return True, msg2
+            last_error = msg2
+        return None
+
+    for candidate in attempts:
+        ok, message = _safe_probe(candidate)
+        if ok:
+            _adopt_working_path(connection, candidate)
+            return True, message
+        last_error = message
+
+        recovered = _try_oracle_listener_recovery()
+        if recovered is not None:
+            return recovered
+
+        # Wrong DB password / locked account — other network paths will not help.
+        if _is_credential_error(message):
+            break
+
+    recovered = _try_oracle_listener_recovery()
+    if recovered is not None:
+        return recovered
+
+    if connection.db_type == DatabaseType.ORACLE:
+        last_error = f"{last_error}{_reachable_saved_oracle_hint(connection.host)}"
+    return False, last_error

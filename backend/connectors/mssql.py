@@ -14,20 +14,48 @@ class MSSQLConnector(BaseConnector):
 
     db_type = DatabaseType.MSSQL
 
+    def _driver_candidates(self) -> list[str]:
+        try:
+            import pyodbc
+        except ImportError:
+            return ["ODBC Driver 17 for SQL Server"]
+        installed = {name.strip() for name in pyodbc.drivers()}
+        preferred = [
+            "ODBC Driver 18 for SQL Server",
+            "ODBC Driver 17 for SQL Server",
+            "ODBC Driver 13 for SQL Server",
+            "SQL Server",
+        ]
+        return [name for name in preferred if name in installed] or preferred[:2]
+
     def _connect(self) -> Any:
         try:
             import pyodbc
 
-            conn_str = (
-                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                f"SERVER={self.config.host},{self.config.port};"
-                f"DATABASE={self.config.database};"
-                f"UID={self.config.username};"
-                f"PWD={self.config.password}"
-            )
-            return pyodbc.connect(conn_str, timeout=10)
+            opts = self.config.extra_options or {}
+            via_ssh = bool(opts.get("ssh_enabled"))
+            # Driver 18 defaults Encrypt=yes; LAN / SSH targets often have no TLS.
+            encrypt = "no" if via_ssh else "optional"
+            last_error: Exception | None = None
+            for driver in self._driver_candidates():
+                conn_str = (
+                    f"DRIVER={{{driver}}};"
+                    f"SERVER={self.config.host},{self.config.port};"
+                    f"DATABASE={self.config.database};"
+                    f"UID={self.config.username};"
+                    f"PWD={self.config.password};"
+                    f"Encrypt={encrypt};"
+                    "TrustServerCertificate=yes;"
+                )
+                try:
+                    return pyodbc.connect(conn_str, timeout=10)
+                except Exception as exc:
+                    last_error = exc
+            raise ConnectorError(f"MSSQL connection failed: {last_error}") from last_error
         except ImportError as exc:
             raise ConnectorError("pyodbc not installed") from exc
+        except ConnectorError:
+            raise
         except Exception as exc:
             raise ConnectorError(f"MSSQL connection failed: {exc}") from exc
 

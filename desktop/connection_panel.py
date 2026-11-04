@@ -8,7 +8,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from backend.models.schemas import DatabaseType
-from desktop.connection import ConnectionResult, DB_DEFAULTS, test_connection
+from desktop.connection import ConnectionResult, DB_DEFAULTS, coerce_db_type_for_port, test_connection
 from desktop.connection_store import SavedServer, load_saved_servers, remove_server, upsert_server
 from desktop.db_icons import DB_ICON_META
 from desktop.ui_helpers import confirm
@@ -631,15 +631,24 @@ class ConnectionPanel(ctk.CTkFrame):
         )
         self.auth_database_entry.grid(row=5, column=1, sticky="ew", padx=(12, 0), pady=6)
 
+        self.engine_label = ctk.CTkLabel(
+            body,
+            text="Engine: PostgreSQL",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=self.theme.c("primary"),
+            anchor="w",
+        )
+        self.engine_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         self.hint_label = ctk.CTkLabel(
             body,
-            text="Oracle: use Service name (ORCL, XEPDB1). Other engines use database name defaults.",
+            text="",
             font=ctk.CTkFont(size=11),
             text_color=self.theme.c("text_muted"),
             wraplength=560,
             justify="left",
         )
-        self.hint_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.hint_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.after_idle(self._style_inputs)
 
     def _build_linux_access_card(self, parent: ctk.CTkFrame) -> None:
@@ -837,7 +846,7 @@ class ConnectionPanel(ctk.CTkFrame):
         self._selected_saved = None
         self._highlight_saved_selection()
         self._apply_engine_profile(db_type)
-        self._update_mongodb_fields(db_type)
+        self._update_engine_fields(db_type)
         self._sync_action_buttons()
         if notify:
             self._notify_saved_servers_changed(None)
@@ -873,23 +882,41 @@ class ConnectionPanel(ctk.CTkFrame):
         self._with_ssh_fields_enabled(clear_ssh)
         self._sync_ssh_fields()
 
-    def _update_mongodb_fields(self, db_type: DatabaseType) -> None:
+    def _update_engine_fields(self, db_type: DatabaseType) -> None:
+        """Show engine-specific fields and hints (never reuse another engine's copy)."""
+        label = DB_ICON_META[db_type]["label"]
+        if hasattr(self, "engine_label"):
+            self.engine_label.configure(text=f"Engine: {label}")
+
         is_mongo = db_type == DatabaseType.MONGODB
         if is_mongo:
             self.auth_db_label.grid()
             self.auth_database_entry.grid()
-            self.hint_label.configure(
-                text=(
-                    "MongoDB: Db name is the database to use (e.g. db1). "
-                    "Leave Auth database blank to authenticate against admin."
-                )
-            )
         else:
             self.auth_db_label.grid_remove()
             self.auth_database_entry.grid_remove()
-            self.hint_label.configure(
-                text="Oracle: use Service name (ORCL, XEPDB1). Other engines use database name defaults."
-            )
+
+        hints = {
+            DatabaseType.ORACLE: (
+                "Oracle: put the Service name in Db name (e.g. BANKDB, ORCL, XEPDB1). "
+                "DB username is the schema user (e.g. BANKING), not the Linux SSH user."
+            ),
+            DatabaseType.POSTGRESQL: (
+                "PostgreSQL: Db name is the database (e.g. postgres). Default port is 5432."
+            ),
+            DatabaseType.MYSQL: (
+                "MySQL: Db name is the schema (e.g. mysql). Default port is 3306."
+            ),
+            DatabaseType.MSSQL: (
+                "SQL Server: Db name is the database (e.g. master). Default port is 1433."
+            ),
+            DatabaseType.MONGODB: (
+                "MongoDB: Db name is the database to use (e.g. db1). "
+                "Leave Auth database blank to authenticate against admin."
+            ),
+        }
+        if hasattr(self, "hint_label"):
+            self.hint_label.configure(text=hints.get(db_type, ""))
 
     def _refresh_saved_list(self) -> None:
         if not SHOW_SAVED_CONNECTIONS_SIDEBAR:
@@ -1034,6 +1061,16 @@ class ConnectionPanel(ctk.CTkFrame):
         for name, item in self._saved_list_buttons.items():
             item.configure(fg_color=self.theme.c("primary") if name == self._selected_saved else self._sidebar_item_bg())
 
+    def _default_new_db_type(self) -> DatabaseType:
+        """Prefer the Servers sub-nav engine; fall back to PostgreSQL."""
+        raw = (self._servers_filter or "all").strip().lower()
+        if raw and raw != "all":
+            try:
+                return DatabaseType(raw)
+            except ValueError:
+                pass
+        return DatabaseType.POSTGRESQL
+
     def _new_connection(self) -> None:
         self._selected_saved = None
         self._highlight_saved_selection()
@@ -1046,7 +1083,7 @@ class ConnectionPanel(ctk.CTkFrame):
         self.ssh_port_entry.delete(0, "end")
         self.ssh_port_entry.insert(0, "22")
         self._sync_ssh_fields()
-        self._select_db_type(DatabaseType.POSTGRESQL, load_saved=False)
+        self._select_db_type(self._default_new_db_type(), load_saved=False)
 
     def _load_saved_server(self, server: SavedServer) -> None:
         self._selected_saved = server.name
@@ -1054,7 +1091,10 @@ class ConnectionPanel(ctk.CTkFrame):
         self.update_idletasks()
         self._fill_form(server)
         self._sync_action_buttons()
-        self._set_status(f"Loaded '{server.name}'.", "info")
+        self._set_status(
+            f"Loaded '{server.name}' ({DB_ICON_META[DatabaseType(server.db_type)]['label']}).",
+            "info",
+        )
 
     def _sync_action_buttons(self) -> None:
         """Saved profile → Connect + Delete; new/engine form → Test + Save + Connect."""
@@ -1089,7 +1129,7 @@ class ConnectionPanel(ctk.CTkFrame):
         return self.connection_name_entry.get().strip()
 
     def _get_form_values(self) -> ConnectionResult:
-        db_type = DatabaseType(self._db_type_var.get())
+        db_type = self._resolve_form_db_type()
         defaults = DB_DEFAULTS[db_type]
         host = self.host_entry.get().strip() or "localhost"
         database = self.database_entry.get().strip() or str(defaults["database"])
@@ -1116,7 +1156,7 @@ class ConnectionPanel(ctk.CTkFrame):
         db_type = DatabaseType(server.db_type)
         self._db_type_var.set(db_type.value)
         self._apply_db_type_tiles(db_type)
-        self._update_mongodb_fields(db_type)
+        self._update_engine_fields(db_type)
 
         self.connection_name_entry.delete(0, "end")
         self.connection_name_entry.insert(0, server.name)
@@ -1149,6 +1189,23 @@ class ConnectionPanel(ctk.CTkFrame):
 
         self._with_ssh_fields_enabled(fill_ssh)
         self._sync_ssh_fields()
+
+    def _resolve_form_db_type(self) -> DatabaseType:
+        """Return the selected engine, correcting common tile/port mismatches."""
+        declared = DatabaseType(self._db_type_var.get())
+        try:
+            port = int(self.port_entry.get().strip() or "0")
+        except ValueError:
+            return declared
+
+        coerced = coerce_db_type_for_port(declared, port)
+        if coerced == declared:
+            return declared
+
+        self._db_type_var.set(coerced.value)
+        self._apply_db_type_tiles(coerced)
+        self._update_engine_fields(coerced)
+        return coerced
 
     def _persist_current_connection(self) -> bool:
         self._ensure_connection_name()
@@ -1320,6 +1377,27 @@ class ConnectionPanel(ctk.CTkFrame):
         self._set_status("Connecting...", "info")
         self._run_connection_test(connection, on_success_connect=True)
 
+    def _sync_form_from_connection(self, connection: ConnectionResult) -> None:
+        """Keep SSH checkbox/fields aligned when Connect auto-enables a tunnel."""
+        self.ssh_enabled_var.set(bool(connection.ssh_enabled))
+        self._sync_ssh_fields()
+
+        def fill_ssh() -> None:
+            if connection.ssh_host:
+                self.ssh_host_entry.delete(0, "end")
+                self.ssh_host_entry.insert(0, connection.ssh_host)
+            self.ssh_port_entry.delete(0, "end")
+            self.ssh_port_entry.insert(0, str(connection.ssh_port or 22))
+            if connection.linux_username:
+                self.linux_user_entry.delete(0, "end")
+                self.linux_user_entry.insert(0, connection.linux_username)
+            if connection.linux_password:
+                self.linux_password_entry.delete(0, "end")
+                self.linux_password_entry.insert(0, connection.linux_password)
+
+        self._with_ssh_fields_enabled(fill_ssh)
+        self._sync_ssh_fields()
+
     def _on_test_complete(
         self,
         ok: bool,
@@ -1330,7 +1408,13 @@ class ConnectionPanel(ctk.CTkFrame):
     ) -> None:
         self._set_busy(testing=False, connecting=False)
         if ok:
-            self._set_status(message, "success")
+            # Auto SSH fallback mutates connection.ssh_enabled — reflect that in the form
+            # before save so the persistent session keeps the working tunnel.
+            self._sync_form_from_connection(connection)
+            # Keep the green banner short; detailed version/SSH notes go to the log.
+            self._set_status("Connected successfully", "success")
+            if message and message.strip() != "Connected successfully":
+                self._log(message, "INFO")
             if on_success_connect:
                 self._persist_current_connection()
                 connection.saved_name = self._selected_saved

@@ -33,18 +33,20 @@ class MySQLConnector(BaseConnector):
         try:
             import mysql.connector
 
+            opts = self.config.extra_options or {}
             kwargs: dict[str, Any] = {
                 "host": self.config.host,
                 "port": self.config.port,
                 "user": self.config.username,
                 "password": self.config.password,
-                "connection_timeout": (self.config.extra_options or {}).get(
-                    "connect_timeout", 5
-                ),
+                "connection_timeout": opts.get("connect_timeout", 5),
             }
             # Omit database for server-level ops (SHOW DATABASES / SCHEMATA).
             if self.config.database:
                 kwargs["database"] = self.config.database
+            # SSH already encrypts; many LAN MySQL builds have no TLS certs.
+            if opts.get("ssh_enabled"):
+                kwargs["ssl_disabled"] = True
             return mysql.connector.connect(**kwargs)
         except ImportError as exc:
             raise ConnectorError("mysql-connector-python not installed") from exc

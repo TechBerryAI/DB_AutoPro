@@ -657,7 +657,7 @@ def test_test_source_reuses_live_tunneled_session():
     info = migration_connection_result(server, "postgres", live).to_connection_info()
     assert info.host == "127.0.0.1"
     assert info.port == 55490
-    assert info.ssl_mode == "prefer"
+    assert info.ssl_mode == "disable"
     assert info.database == "postgres"
 
     other = SavedServer(
@@ -760,7 +760,7 @@ def test_open_migration_endpoint_reuses_live_session_without_a_second_tunnel(mon
         info = result.to_connection_info()
     assert info.host == "127.0.0.1"
     assert info.port == 55490
-    assert info.ssl_mode == "prefer"
+    assert info.ssl_mode == "disable"
 
 
 def test_typed_target_credentials_do_not_require_a_saved_server():
