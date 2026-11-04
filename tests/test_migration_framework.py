@@ -130,7 +130,7 @@ def test_list_accessible_databases_skips_system_catalogs():
     assert list_accessible_databases("postgresql", broken) == []
 
 
-def test_postgresql_connector_does_not_fall_back_to_disable_when_prefer_is_set(monkeypatch):
+def test_postgresql_connector_falls_back_to_disable_not_require_when_prefer_fails(monkeypatch):
     import types
 
     from backend.connectors.base import ConnectionInfo
@@ -140,7 +140,7 @@ def test_postgresql_connector_does_not_fall_back_to_disable_when_prefer_is_set(m
 
     def connect(**kwargs):
         tried.append(str(kwargs.get("sslmode")))
-        raise RuntimeError(f"rejected {kwargs.get('sslmode')}")
+        raise RuntimeError(f"server does not support SSL, but SSL was required ({kwargs.get('sslmode')})")
 
     fake = types.SimpleNamespace(
         connect=connect,
@@ -163,8 +163,46 @@ def test_postgresql_connector_does_not_fall_back_to_disable_when_prefer_is_set(m
         connector._connect()
     except Exception:
         pass
-    assert tried == ["prefer", "require"]
-    assert "disable" not in tried
+    assert tried == ["prefer", "allow", "disable"]
+    assert "require" not in tried
+
+
+def test_postgresql_connector_uses_disable_first_over_ssh_tunnel(monkeypatch):
+    import types
+
+    from backend.connectors.base import ConnectionInfo
+    from backend.connectors.postgresql import PostgreSQLConnector
+
+    tried: list[str] = []
+
+    def connect(**kwargs):
+        tried.append(str(kwargs.get("sslmode")))
+        raise RuntimeError("rejected")
+
+    fake = types.SimpleNamespace(
+        connect=connect,
+        extras=types.SimpleNamespace(RealDictCursor=object),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "psycopg2", fake)
+    monkeypatch.setitem(__import__("sys").modules, "psycopg2.extras", fake.extras)
+
+    connector = PostgreSQLConnector(
+        ConnectionInfo(
+            host="127.0.0.1",
+            port=51780,
+            database="postgres",
+            username="postgres",
+            password="x",
+            ssl_mode="disable",
+            extra_options={"ssh_enabled": True, "db_host": "192.168.1.159", "db_port": 5432},
+        )
+    )
+    try:
+        connector._connect()
+    except Exception:
+        pass
+    assert tried[0] == "disable"
+    assert "require" not in tried
 
 
 def test_destination_copy_is_named_from_the_source_and_not_a_saved_default():

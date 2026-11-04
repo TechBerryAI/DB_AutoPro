@@ -15,10 +15,23 @@ _active_forwarder: Any = None
 
 
 def _remote_bind_host(connection: ConnectionResult) -> str:
-    ssh_host = connection.ssh_host or connection.host
-    if ssh_host == connection.host:
+    """Choose the address the SSH server uses to reach the database.
+
+    - Oracle: use the configured DB host. Many listener.ora files bind only to
+      the LAN IP, so 127.0.0.1:1521 is refused on the server.
+    - Other engines on the same host as SSH: use 127.0.0.1 so PostgreSQL/MySQL
+      see a local client (pg_hba local rules) instead of the LAN IP with
+      "no encryption".
+    - DB on a different host than SSH: forward to that DB host.
+    """
+    host = (connection.host or "").strip() or "127.0.0.1"
+    ssh_host = (connection.ssh_host or connection.host or "").strip() or host
+    db_type = str(getattr(connection.db_type, "value", connection.db_type) or "").lower()
+    if db_type == "oracle":
+        return host
+    if ssh_host == host:
         return "127.0.0.1"
-    return connection.host
+    return host
 
 
 def probe_tcp(host: str, port: int, timeout: float = 5.0) -> str | None:

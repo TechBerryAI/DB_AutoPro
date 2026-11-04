@@ -35,25 +35,43 @@ class PostgreSQLConnector(BaseConnector):
             except Exception:
                 pass
 
+    def _ssl_mode_candidates(self) -> list[str]:
+        """Return sslmode values to try, never escalating prefer → require.
+
+        Escalating to ``require`` breaks common LAN/SSH Postgres hosts that have
+        no SSL certificates. Prefer cleartext fallbacks instead; SSH tunnels
+        already encrypt the hop.
+        """
+        opts = self.config.extra_options or {}
+        requested = (self.config.ssl_mode or "").strip().lower()
+        via_ssh = bool(opts.get("ssh_enabled"))
+
+        if requested == "require":
+            return ["require"]
+        if requested == "verify-full":
+            return ["verify-full"]
+        if requested == "verify-ca":
+            return ["verify-ca"]
+        if via_ssh or requested == "disable":
+            return ["disable", "allow"]
+        if requested == "allow":
+            return ["allow", "disable"]
+        if requested == "prefer":
+            return ["prefer", "allow", "disable"]
+        if requested:
+            return [requested]
+        return ["prefer", "allow", "disable"]
+
     def _connect(self) -> Any:
         try:
             import psycopg2
             from psycopg2.extras import RealDictCursor
 
             timeout = (self.config.extra_options or {}).get("connect_timeout", 5)
-            requested = (self.config.ssl_mode or "").strip().lower()
-            ssl_modes: list[str] = []
-            if requested:
-                ssl_modes.append(requested)
-                if requested == "prefer":
-                    ssl_modes.append("require")
-            else:
-                ssl_modes.extend(("prefer", "require", "allow", "disable"))
-
             tried: set[str] = set()
             last_error: Exception | None = None
 
-            for sslmode in ssl_modes:
+            for sslmode in self._ssl_mode_candidates():
                 if sslmode in tried:
                     continue
                 tried.add(sslmode)
@@ -70,6 +88,12 @@ class PostgreSQLConnector(BaseConnector):
                     return conn, RealDictCursor
                 except Exception as exc:
                     last_error = exc
+                    # Keep trying softer modes when SSL is the only blocker.
+                    low = str(exc).lower()
+                    if "ssl" not in low and "certificate" not in low:
+                        # Non-SSL failure (auth, refused, timeout) — still try remaining
+                        # modes once; some libpq builds treat prefer oddly over tunnels.
+                        continue
 
             raise ConnectorError(f"PostgreSQL connection failed: {last_error}") from last_error
         except ImportError as exc:

@@ -20,16 +20,29 @@ class OracleConnector(BaseConnector):
         display_port = int(opts.get("db_port") or port)
         endpoint = f"{display_host}:{display_port}"
         low = detail.lower()
-        service = (self.config.database or "").strip()
+        service = (self.config.database or "").strip() or "(unset)"
 
-        if "dpy-4011" in low or "forcibly closed" in low or "10054" in low:
+        if "ora-12541" in low or "no listener" in low:
+            return (
+                f"No Oracle listener on {endpoint}. "
+                "On the Linux host run: lsnrctl start  (then ALTER SYSTEM REGISTER;)."
+            )
+        if "connection refused" in low or "10061" in low:
+            return (
+                f"Oracle port closed on {endpoint}. "
+                "Start the listener (lsnrctl start) or enable SSH tunnel if 1521 is firewalled."
+            )
+        if "dpy-4011" in low or "forcibly closed" in low or "10054" in low or "10053" in low:
             msg = (
                 f"Oracle closed the connection to {endpoint} (service {service}). "
-                "Use the schema user in DB username (e.g. BANKING, SYSTEM), "
-                "not the Linux/SSH user."
+                "Confirm the TNS listener is running (lsnrctl status) and Db name is the "
+                "service name (e.g. BANKDB)."
             )
             if user.lower() in {"oracle", "grid", "root", "postgres", "mongodb", "user"}:
-                msg += f" '{user}' is not a valid Oracle DB login on this server."
+                msg += (
+                    f" '{user}' looks like an OS login — use the schema user in "
+                    "DB username (e.g. BANKING, SYSTEM)."
+                )
             return msg
         if "ora-01017" in low or "invalid username" in low:
             return (
@@ -39,24 +52,56 @@ class OracleConnector(BaseConnector):
         if "ora-12514" in low or "listener does not currently know" in low:
             return (
                 f"Oracle service '{service}' was not found on {endpoint}. "
-                "Check Database / Service (e.g. orclpdb1)."
+                "Check Database / Service (e.g. BANKDB, orclpdb1)."
             )
         return f"Oracle connection failed ({endpoint}): {detail}"
+
+    def _dsn_candidates(self, oracledb: Any) -> list[tuple[str, str]]:
+        """Build service_name and SID DSNs for the configured database name."""
+        host = self.config.host
+        port = int(self.config.port)
+        name = (self.config.database or "").strip()
+        if not name:
+            raise ConnectorError("Oracle Db name / service name is required.")
+        candidates: list[tuple[str, str]] = [
+            ("service_name", oracledb.makedsn(host, port, service_name=name)),
+            ("sid", oracledb.makedsn(host, port, sid=name)),
+        ]
+        # Deduplicate if makedsn forms collide
+        seen: set[str] = set()
+        unique: list[tuple[str, str]] = []
+        for label, dsn in candidates:
+            if dsn in seen:
+                continue
+            seen.add(dsn)
+            unique.append((label, dsn))
+        return unique
 
     def _connect(self) -> Any:
         try:
             import oracledb
 
-            dsn = oracledb.makedsn(
-                self.config.host, self.config.port, service_name=self.config.database
-            )
-            return oracledb.connect(
-                user=self.config.username,
-                password=self.config.password,
-                dsn=dsn,
-            )
+            last_error: Exception | None = None
+            for _label, dsn in self._dsn_candidates(oracledb):
+                try:
+                    return oracledb.connect(
+                        user=self.config.username,
+                        password=self.config.password,
+                        dsn=dsn,
+                        tcp_connect_timeout=10,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    low = str(exc).lower()
+                    # Auth / privilege errors should not fall through to SID retry.
+                    if "ora-01017" in low or "ora-28000" in low or "ora-01031" in low:
+                        raise
+            assert last_error is not None
+            raise last_error
         except ImportError as exc:
             raise ConnectorError("oracledb not installed") from exc
+        except ConnectorError:
+            raise
         except Exception as exc:
             raise ConnectorError(
                 self._format_connect_error(

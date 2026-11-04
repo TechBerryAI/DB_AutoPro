@@ -53,3 +53,21 @@ def test_tunneled_connection_preserves_display_endpoint():
     effective = ssh_tunnel._tunneled_connection(conn, 55000)
 
     assert effective.endpoint_label == "192.168.1.57:5432"
+
+
+def test_remote_bind_host_prefers_loopback_for_same_host_postgres():
+    """Same-host Postgres/MySQL tunnels should hit 127.0.0.1 for local pg_hba rules."""
+    conn = _ssh_connection()
+    assert ssh_tunnel._remote_bind_host(conn) == "127.0.0.1"
+
+    oracle = replace(
+        conn,
+        host="192.168.1.161",
+        ssh_host="192.168.1.161",
+        db_type=DatabaseType.ORACLE,
+        port=1521,
+    )
+    assert ssh_tunnel._remote_bind_host(oracle) == "192.168.1.161"
+
+    remote_db = replace(conn, host="10.0.0.5", ssh_host="192.168.1.57")
+    assert ssh_tunnel._remote_bind_host(remote_db) == "10.0.0.5"

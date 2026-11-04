@@ -90,7 +90,7 @@ class ServersView(BaseView):
             self._panel.load_saved_by_name(name)
 
     def start_new_connection(self) -> None:
-        """Reset the connection form to a blank, unselected PostgreSQL default."""
+        """Reset the form to a blank connection for the current Servers engine filter."""
         if self._panel:
             self._panel._new_connection()
         else:
