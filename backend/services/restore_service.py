@@ -127,23 +127,34 @@ class RestoreService:
             status=OperationStatus.RUNNING,
             message="Restore started",
             started_at=started_at,
+            details={
+                "profile": request.profile,
+                "database": request.database or request.profile,
+                "db_type": request.db_type.value,
+                "progress": 0.0,
+            },
         )
         _operations[operation_id] = result
 
+        def _track_progress(pct: float, msg: str) -> None:
+            result.message = msg or result.message
+            result.details = {**(result.details or {}), "progress": float(pct)}
+            _operations[operation_id] = result
+            if progress_callback:
+                progress_callback(pct, msg)
+
         try:
-            request = self._prepare_restore_request(request, progress_callback)
+            request = self._prepare_restore_request(request, _track_progress)
             backup_path = Path(request.backup_path)
             remote_backup = _is_remote_path(request.backup_path)
             if not remote_backup and not backup_path.exists():
                 raise RestoreError(f"Backup not found: {request.backup_path}")
 
             if request.validate_backup and not remote_backup and backup_path.exists():
-                if progress_callback:
-                    progress_callback(0.1, "Validating backup...")
+                _track_progress(0.1, "Validating backup...")
                 self._validate_backup_path(backup_path)
 
-            if progress_callback:
-                progress_callback(0.3, "Starting restore...")
+            _track_progress(0.3, "Starting restore...")
 
             if not remote_backup and backup_path.exists():
                 restore_path = self._decompress_if_needed(backup_path)
@@ -160,14 +171,18 @@ class RestoreService:
             if not handler:
                 raise RestoreError(f"Restore not supported for: {request.db_type}")
 
-            handler(request, restore_path, progress_callback)
+            handler(request, restore_path, _track_progress)
 
-            if progress_callback:
-                progress_callback(1.0, "Restore completed")
+            _track_progress(1.0, "Restore completed")
 
             result.status = OperationStatus.COMPLETED
             result.message = "Restore completed successfully"
             result.completed_at = datetime.now(timezone.utc)
+            result.details = {
+                **(result.details or {}),
+                "db_type": request.db_type.value,
+                "progress": 1.0,
+            }
             audit.log(
                 "restore",
                 user,

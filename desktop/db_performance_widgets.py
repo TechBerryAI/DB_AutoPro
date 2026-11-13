@@ -1,4 +1,4 @@
-"""Database Performance dashboard widgets with charts."""
+"""Database Performance Analytics — Beacon-style metrics + dual-line chart."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from typing import Callable
 
 import customtkinter as ctk
 
-from desktop.dashboard_widgets import analytics_card
 from desktop.design_system import font
 from desktop.theme import ThemeManager
 
@@ -18,74 +17,80 @@ def _multi_line_chart(
     *,
     height: int = 160,
     series_specs: list[tuple[str, str, str]],
-) -> Callable[[list[dict]], None]:
-    canvas = tk.Canvas(
+) -> Callable[[list[dict] | None, str | None], None]:
+    chart_shell = ctk.CTkFrame(
         parent,
+        fg_color=theme.c("bg_elevated"),
+        corner_radius=theme.radius("sm"),
+        border_width=0,
+    )
+    chart_shell.pack(fill="both", expand=True)
+
+    canvas = tk.Canvas(
+        chart_shell,
         height=height,
-        bg=theme.c("bg_glass") if not theme.is_light else theme.c("bg_card"),
+        bg=theme.c("bg_elevated"),
         highlightthickness=0,
         borderwidth=0,
     )
-    canvas.pack(fill="both", expand=True)
+    canvas.pack(fill="both", expand=True, padx=8, pady=(8, 4))
 
-    legend = ctk.CTkFrame(parent, fg_color="transparent")
-    legend.pack(fill="x", pady=(4, 0))
-    for label, color_key in [(lbl, ck) for _, lbl, ck in series_specs]:
-        row = ctk.CTkFrame(legend, fg_color="transparent")
-        row.pack(side="left", padx=(0, 12))
-        ctk.CTkFrame(row, width=8, height=8, corner_radius=4, fg_color=theme.c(color_key)).pack(side="left", padx=(0, 4))
-        ctk.CTkLabel(row, text=label, font=font(theme, 9), text_color=theme.c("text_muted")).pack(side="left")
+    foot = ctk.CTkFrame(chart_shell, fg_color="transparent")
+    foot.pack(fill="x", padx=10, pady=(0, 8))
+    note = ctk.CTkLabel(
+        foot,
+        text="",
+        font=font(theme, 9),
+        text_color=theme.c("text_muted"),
+        anchor="w",
+    )
+    note.pack(side="left")
 
     keys = [k for k, _, _ in series_specs]
     colors = [theme.c(c) for _, _, c in series_specs]
     last_series: list[dict] = []
+    empty_message = "Illustrative chart only – actual telemetry required."
     redraw_job: str | None = None
     drawn_width = -1
 
-    def update(series: list[dict] | None = None) -> None:
-        nonlocal last_series
+    def update(series: list[dict] | None = None, message: str | None = None) -> None:
+        nonlocal last_series, empty_message
         if series is not None:
             last_series = list(series)
+        if message is not None:
+            empty_message = message
         canvas.delete("all")
-        if not last_series:
-            canvas.create_text(
-                120,
-                height / 2,
-                text="Connect a database",
-                fill=theme.c("text_muted"),
-                font=("Segoe UI", 10),
-            )
-            return
-        w = max(canvas.winfo_width(), 640)
+        w = max(canvas.winfo_width(), 480)
         h = height
-        pad_l, pad_r, pad_t, pad_b = 28, 12, 12, 24
+        pad_l, pad_r, pad_t, pad_b = 12, 12, 12, 16
         chart_w = w - pad_l - pad_r
         chart_h = h - pad_t - pad_b
-        max_y = max(1.0, max(max(d.get(k, 0) for k in keys) for d in last_series))
+
+        grid = theme.c("border")
+        for i in range(4):
+            y = pad_t + chart_h * i / 3
+            canvas.create_line(pad_l, y, w - pad_r, y, fill=grid, width=1)
+
+        if not last_series:
+            note.configure(text=empty_message or "Illustrative chart only – actual telemetry required.")
+            return
+
+        note.configure(text="")
+        max_y = max(1.0, max(max(float(d.get(k, 0) or 0) for k in keys) for d in last_series))
         n = len(last_series)
         xs = [pad_l + (chart_w * i / max(n - 1, 1)) for i in range(n)]
         for key, color in zip(keys, colors):
             points: list[float] = []
             for i, pt in enumerate(last_series):
-                val = float(pt.get(key, 0))
+                val = float(pt.get(key, 0) or 0)
                 y = pad_t + chart_h - (val / max_y) * chart_h
                 points.extend([xs[i], y])
-                canvas.create_oval(xs[i] - 2, y - 2, xs[i] + 2, y + 2, fill=color, outline=color)
             if len(points) >= 4:
-                canvas.create_line(*points, fill=color, width=2, smooth=True)
-        for i, pt in enumerate(last_series):
-            canvas.create_text(
-                xs[i],
-                h - 6,
-                text=pt.get("label", ""),
-                fill=theme.c("text_muted"),
-                font=("Segoe UI", 7),
-            )
+                width = 2.5 if key == keys[0] else 1.5
+                canvas.create_line(*points, fill=color, width=width, smooth=True)
 
     def _on_configure(event=None) -> None:
         nonlocal redraw_job, drawn_width
-        if not last_series:
-            return
         width = getattr(event, "width", 0) or 0
         if width <= 1 or width == drawn_width:
             return
@@ -101,63 +106,88 @@ def _multi_line_chart(
     return update
 
 
-def _sparkline_row(parent: ctk.CTkFrame, theme: ThemeManager) -> dict[str, ctk.CTkLabel]:
-    row = ctk.CTkFrame(parent, fg_color="transparent")
-    row.pack(fill="x", pady=(8, 0))
-    refs: dict[str, ctk.CTkLabel] = {}
-    for key, label, color in [
-        ("latency", "Query Latency", "metric_purple"),
-        ("connections", "Active Connections", "metric_blue"),
-        ("slow", "Slow Queries", "metric_amber"),
-        ("replication", "Replication Lag", "metric_green"),
-    ]:
-        cell = ctk.CTkFrame(
-            row,
-            fg_color=theme.c("bg_elevated"),
-            corner_radius=theme.radius("sm"),
-            border_width=1,
-            border_color=theme.c("border_subtle"),
-        )
-        cell.pack(side="left", fill="x", expand=True, padx=2)
-        ctk.CTkLabel(cell, text=label, font=font(theme, 9), text_color=theme.c("text_muted")).pack(anchor="w", padx=8, pady=(6, 0))
-        val = ctk.CTkLabel(cell, text="—", font=font(theme, 13, weight="bold"), text_color=theme.c(color))
-        val.pack(anchor="w", padx=8, pady=(2, 8))
-        refs[key] = val
-    return refs
-
-
-def build_database_performance_section(parent: ctk.CTkFrame, theme: ThemeManager) -> dict:
-    """Build Database Performance: full-width real-time chart + sparkline row.
-
-    Used to also render a 5-tile KPI strip (status/uptime/connections/latency/
-    activity), but every one of those numbers already appears in the "Database
-    Activity" panel higher up the dashboard — this section's actual unique value is
-    the real-time chart and sparklines, so the redundant tile strip was dropped
-    (docs/ui_plan.md §6). dashboard.py's _apply_db_performance_dashboard() already
-    guards each of these refs with `.get(...)` + `if lbl:`, so leaving those keys
-    absent from `refs` is a no-op there, not a break.
-    """
+def build_database_performance_section(
+    parent: ctk.CTkFrame,
+    theme: ThemeManager,
+    *,
+    on_view_all: Callable[[], None] | None = None,
+) -> dict:
+    """Beacon performance card: value-over-label metrics + dual-line chart."""
     refs: dict = {}
 
-    # ── Full-width performance chart ──
-    perf_card, perf_body = analytics_card(
+    shell = ctk.CTkFrame(
         parent,
-        theme,
-        "Performance Metrics (Real-time)",
-        accent=theme.c("metric_purple"),
+        fg_color=theme.c("surface"),
+        corner_radius=theme.radius("md"),
+        border_width=1,
+        border_color=theme.c("border"),
     )
-    perf_card.pack(fill="both", expand=True, pady=4)
+    shell.pack(fill="both", expand=True, pady=(0, 10))
+    body = ctk.CTkFrame(shell, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=18, pady=16)
+
+    header = ctk.CTkFrame(body, fg_color="transparent")
+    header.pack(fill="x", pady=(0, 14))
+    ctk.CTkLabel(
+        header,
+        text="DATABASE PERFORMANCE ANALYTICS",
+        font=font(theme, 13, weight="bold"),
+        text_color=theme.c("text_primary"),
+        anchor="w",
+    ).pack(side="left")
+    if on_view_all:
+        view_all = ctk.CTkLabel(
+            header,
+            text="View all →",
+            font=font(theme, 12),
+            text_color=theme.c("primary"),
+            cursor="hand2",
+        )
+        view_all.pack(side="right")
+        view_all.bind("<Button-1>", lambda _e: on_view_all())
+
+    metrics = ctk.CTkFrame(body, fg_color="transparent")
+    metrics.pack(fill="x", pady=(0, 14))
+    for col in range(4):
+        metrics.grid_columnconfigure(col, weight=1, uniform="perfkpi")
+
+    sparks: dict[str, ctk.CTkLabel] = {}
+    for i, (key, label) in enumerate(
+        [
+            ("latency", "Latency"),
+            ("connections", "Connections"),
+            ("slow", "Slow queries"),
+            ("throughput", "TPS"),
+        ]
+    ):
+        cell = ctk.CTkFrame(metrics, fg_color="transparent")
+        cell.grid(row=0, column=i, sticky="w", padx=(0 if i == 0 else 8, 0))
+        val = ctk.CTkLabel(
+            cell,
+            text="—",
+            font=font(theme, 22, weight="bold"),
+            text_color=theme.c("text_primary"),
+            anchor="w",
+        )
+        val.pack(anchor="w")
+        ctk.CTkLabel(
+            cell,
+            text=label,
+            font=font(theme, 11),
+            text_color=theme.c("text_secondary"),
+            anchor="w",
+        ).pack(anchor="w")
+        sparks[key] = val
+    refs["sparklines"] = sparks
+
     refs["update_perf_chart"] = _multi_line_chart(
-        perf_body,
+        body,
         theme,
-        height=280,
+        height=160,
         series_specs=[
-            ("latency", "Latency (ms)", "metric_purple"),
-            ("connections", "Connections", "metric_blue"),
-            ("slow", "Slow queries", "metric_amber"),
-            ("replication", "Repl. lag (s)", "metric_green"),
+            ("latency", "Query latency", "primary"),
+            ("connections", "Active connections", "text_muted"),
         ],
     )
-    refs["sparklines"] = _sparkline_row(perf_body, theme)
 
     return refs

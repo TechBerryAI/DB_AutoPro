@@ -48,9 +48,6 @@ PG_SCOPE_LABELS: list[tuple[str, PgBackupScope]] = [
     ("Single Schema", PgBackupScope.SINGLE_SCHEMA),
     ("Multiple Schemas", PgBackupScope.MULTIPLE_SCHEMAS),
     ("Selected Tables", PgBackupScope.SELECTED_TABLES),
-    ("Data Only", PgBackupScope.DATA_ONLY),
-    ("Schema Only", PgBackupScope.SCHEMA_ONLY),
-    ("Selected Objects (Advanced)", PgBackupScope.SELECTED_OBJECTS),
 ]
 
 PG_SCOPE_LABEL_TO_VALUE = {label: value for label, value in PG_SCOPE_LABELS}
@@ -68,8 +65,6 @@ PG_FORMAT_VALUE_TO_LABEL = {value: label for label, value in PG_FORMAT_LABELS}
 MYSQL_SCOPE_LABELS: list[tuple[str, MySQLBackupScope]] = [
     ("Entire Database", MySQLBackupScope.ENTIRE_DATABASE),
     ("Selected Tables", MySQLBackupScope.SELECTED_TABLES),
-    ("Data Only", MySQLBackupScope.DATA_ONLY),
-    ("Schema Only", MySQLBackupScope.SCHEMA_ONLY),
 ]
 MYSQL_SCOPE_LABEL_TO_VALUE = {label: value for label, value in MYSQL_SCOPE_LABELS}
 

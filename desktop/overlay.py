@@ -77,6 +77,9 @@ def confirm(
     on_confirm: Callable | None = None,
     on_cancel: Callable | None = None,
     destructive: bool = False,
+    confirm_fg: str | None = None,
+    confirm_hover: str | None = None,
+    cancel_fg: str | None = None,
 ) -> Modal:
     dialog = Modal(master, theme, title=title, height=240)
     ctk.CTkLabel(
@@ -114,11 +117,23 @@ def confirm(
     actions = ctk.CTkFrame(dialog.body, fg_color="transparent")
     actions.grid(row=2, column=0, columnspan=2, sticky="e")
     if cancel_text:
-        ghost_button(actions, theme, text=cancel_text, command=_reject).pack(
-            side="left", padx=(0, theme.spacing("sm"))
+        # Default Cancel text to app logo navy (matches DataAutomationPro.ico).
+        cancel_btn = ghost_button(actions, theme, text=cancel_text, command=_reject)
+        cancel_btn.configure(
+            text_color=cancel_fg or "#111827",
+            hover_color="#E8EEF5",
         )
-    action = danger_button if destructive else primary_button
-    action(actions, theme, text=confirm_text, command=_accept).pack(side="left")
+        cancel_btn.pack(side="left", padx=(0, theme.spacing("sm")))
+    if destructive:
+        btn = danger_button(actions, theme, text=confirm_text, command=_accept)
+    else:
+        btn = primary_button(actions, theme, text=confirm_text, command=_accept)
+        if confirm_fg:
+            btn.configure(
+                fg_color=confirm_fg,
+                hover_color=confirm_hover or confirm_fg,
+            )
+    btn.pack(side="left")
     return dialog
 
 

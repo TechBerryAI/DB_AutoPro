@@ -181,7 +181,7 @@ class MigrationView(BaseView):
         page_header(
             scroll,
             self.theme,
-            "Database Migration",
+            "Migration",
             subtitle="Safely migrate database schema and data between supported database systems.",
             pady=(0, 12),
         )

@@ -16,19 +16,19 @@ def _type_font(theme: ThemeManager, role: str) -> ctk.CTkFont:
     return font(theme, size, weight=weight)
 
 
-# KPI key → Lucide icon (chips stay neutral; colour only when a value warrants it)
+# KPI key → Lucide icon (soft tinted chip + colored stroke, matching mockup)
 KPI_ICONS = {
-    "linux_servers": "server",
-    "databases": "database",
-    "healthy_dbs": "heart-pulse",
-    "active_jobs": "activity",
+    "linux_servers": "database",
+    "databases": "database-zap",
     "active_alerts": "bell",
     "failed_today": "hard-drive",
+    "active_jobs": "activity",
+    "system_status": "heart-pulse",
 }
 
 
 def surface_card(parent, theme: ThemeManager) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
-    """Neutral elevated surface — 1px border, no coloured accents or hover chrome."""
+    """Charcoal analytics surface — subtle border, restrained radius."""
     shell = ctk.CTkFrame(
         parent,
         corner_radius=theme.radius("sm"),
@@ -37,7 +37,7 @@ def surface_card(parent, theme: ThemeManager) -> tuple[ctk.CTkFrame, ctk.CTkFram
         border_color=theme.c("border"),
     )
     inner = ctk.CTkFrame(shell, fg_color="transparent")
-    inner.pack(fill="both", expand=True, padx=14, pady=12)
+    inner.pack(fill="both", expand=True, padx=12, pady=10)
     return shell, inner
 
 
@@ -156,14 +156,164 @@ def command_center_header(
     datetime_text: str = "",
     on_refresh: Callable[[], None] | None = None,
 ) -> None:
-    """Dashboard page title — same typography as every other page_header."""
+    """Legacy alias — prefer beacon_hero_header on the dashboard."""
     del greeting, role, initials, datetime_text, on_refresh
     page_header(
         parent,
         theme,
         "Dashboard",
-        subtitle="Active connection activity and workstation metrics.",
+        subtitle="Infrastructure health and operational status.",
     )
+
+
+def beacon_hero_header(
+    parent,
+    theme: ThemeManager,
+    *,
+    on_refresh: Callable[[], None] | None = None,
+    on_quick_action: Callable[[], None] | None = None,
+    quick_action_text: str = "Open Servers",
+) -> dict[str, ctk.CTkLabel | ctk.CTkFrame]:
+    """Mockup status banner: icon title, HEALTHY pill, LIVE pulse, Open Servers."""
+    wrap = ctk.CTkFrame(
+        parent,
+        fg_color="#F3FAF7",
+        corner_radius=12,
+        border_width=1,
+        border_color="#C8E6D9",
+    )
+    wrap.pack(fill="x", pady=(0, 12))
+    body = ctk.CTkFrame(wrap, fg_color="transparent")
+    body.pack(fill="x", padx=18, pady=16)
+
+    top = ctk.CTkFrame(body, fg_color="transparent")
+    top.pack(fill="x")
+
+    left = ctk.CTkFrame(top, fg_color="transparent")
+    left.pack(side="left", fill="x", expand=True)
+
+    datetime_lbl = ctk.CTkLabel(
+        left,
+        text="",
+        font=font(theme, 10),
+        text_color=theme.c("text_muted"),
+        anchor="w",
+    )
+    datetime_lbl.pack(anchor="w")
+
+    title_row = ctk.CTkFrame(left, fg_color="transparent")
+    title_row.pack(anchor="w", fill="x", pady=(6, 0))
+    icon = lucide_icon_badge(
+        title_row,
+        "database",
+        "#0078D4",
+        "#DEECF9",
+        box=38,
+        icon_size=19,
+        radius=10,
+    )
+    icon.pack(side="left", padx=(0, 10))
+    headline = ctk.CTkLabel(
+        title_row,
+        text="Database Infrastructure Status",
+        font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+        text_color=theme.c("text_primary"),
+        anchor="w",
+    )
+    headline.pack(side="left")
+
+    summary = ctk.CTkLabel(
+        left,
+        text="",
+        font=font(theme, 11),
+        text_color=theme.c("text_secondary"),
+        anchor="w",
+    )
+    summary.pack(anchor="w", pady=(6, 0))
+
+    refreshed = ctk.CTkLabel(
+        left,
+        text="Last refreshed —",
+        font=font(theme, 9),
+        text_color=theme.c("text_muted"),
+        anchor="w",
+    )
+    refreshed.pack(anchor="w", pady=(2, 0))
+
+    mid = ctk.CTkFrame(top, fg_color="transparent")
+    mid.pack(side="left", padx=(20, 12))
+    health_badge = ctk.CTkLabel(
+        mid,
+        text="  HEALTHY — System is running normally.  ",
+        font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+        text_color="#0B6A0B",
+        fg_color="#DFF5E5",
+        corner_radius=16,
+        height=34,
+    )
+    health_badge.pack(anchor="center", pady=(16, 0))
+
+    right = ctk.CTkFrame(top, fg_color="transparent")
+    right.pack(side="right", padx=(8, 0))
+
+    pulse_wrap = ctk.CTkFrame(right, fg_color="transparent")
+    pulse_wrap.pack(side="left", padx=(0, 14))
+    pulse_dot = ctk.CTkLabel(
+        pulse_wrap,
+        text="● LIVE",
+        font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+        text_color="#0B6A0B",
+        anchor="e",
+    )
+    pulse_dot.pack(anchor="e", pady=(8, 0))
+    pulse_sub = ctk.CTkLabel(
+        pulse_wrap,
+        text="System activity",
+        font=font(theme, 9),
+        text_color=theme.c("text_muted"),
+        anchor="e",
+    )
+    pulse_sub.pack(anchor="e")
+
+    actions = ctk.CTkFrame(right, fg_color="transparent")
+    actions.pack(side="left", pady=(6, 0))
+    if on_refresh:
+        refresh_btn = ghost_button(
+            actions,
+            theme,
+            text="Refresh",
+            command=on_refresh,
+            height=30,
+        )
+        refresh_btn.configure(width=80, corner_radius=7)
+        refresh_btn.pack(side="left", padx=(0, 8))
+    if on_quick_action:
+        btn = primary_button(
+            actions,
+            theme,
+            text=quick_action_text,
+            command=on_quick_action,
+            height=30,
+            width=124,
+        )
+        btn.configure(
+            corner_radius=7,
+            fg_color="#0078D4",
+            hover_color="#106EBE",
+        )
+        btn.pack(side="left")
+
+    return {
+        "wrap": wrap,
+        "datetime": datetime_lbl,
+        "headline": headline,
+        "health_badge": health_badge,
+        "summary": summary,
+        "refreshed": refreshed,
+        "pulse": pulse_dot,
+        "pulse_sub": pulse_sub,
+    }
+
 
 def metric_card(
     parent,
@@ -173,25 +323,44 @@ def metric_card(
     label: str,
     secondary: str = "",
 ) -> tuple[ctk.CTkFrame, ctk.CTkLabel, ctk.CTkLabel]:
-    """Dense KPI tile (~88–96px): neutral chip, clear label, tabular-feeling value."""
+    """Mockup KPI cell: soft tinted icon chip + title + large value."""
     icon_name = KPI_ICONS.get(key, "activity")
     chip_fg = theme.c("text_secondary")
-    chip_bg = theme.c("bg_elevated") if not theme.is_light else theme.c("neutral_muted")
+    chip_bg = theme.c("bg_elevated")
 
-    shell, body = surface_card(parent, theme)
+    # Pastel chips matching the reference screenshot
+    tone_map = {
+        "linux_servers": ("#0078D4", "#DEECF9"),
+        "databases": ("#107C10", "#E6F4E6"),
+        "active_alerts": ("#CA5010", "#FFF4CE"),
+        "failed_today": ("#C42B1C", "#FDE7E9"),
+        "active_jobs": ("#0078D4", "#DEECF9"),
+        "system_status": ("#107C10", "#E6F4E6"),
+    }
+    chip_fg, chip_bg = tone_map.get(key, (chip_fg, chip_bg))
+
+    shell = ctk.CTkFrame(
+        parent,
+        corner_radius=12,
+        fg_color="#FFFFFF",
+        border_width=1,
+        border_color=theme.c("border"),
+    )
+    body = ctk.CTkFrame(shell, fg_color="transparent")
+    body.pack(fill="both", expand=True, padx=12, pady=12)
 
     top = ctk.CTkFrame(body, fg_color="transparent")
     top.pack(fill="x")
 
     icon = lucide_icon_badge(
-        top, icon_name, chip_fg, chip_bg, box=28, icon_size=14, radius=8
+        top, icon_name, chip_fg, chip_bg, box=34, icon_size=17, radius=10
     )
     icon.pack(side="left")
 
     title = ctk.CTkLabel(
         top,
         text=label,
-        font=_type_font(theme, "card_title"),
+        font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
         text_color=theme.c("text_secondary"),
         anchor="w",
     )
@@ -200,17 +369,17 @@ def metric_card(
     value = ctk.CTkLabel(
         body,
         text="0",
-        font=_type_font(theme, "kpi_value"),
+        font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"),
         text_color=theme.c("text_primary"),
         anchor="w",
     )
-    value.pack(anchor="w", pady=(8, 0))
+    value.pack(anchor="w", pady=(10, 0))
 
     secondary_lbl = ctk.CTkLabel(
         body,
         text=secondary or "—",
-        font=_type_font(theme, "metadata"),
-        text_color=theme.c("text_secondary"),
+        font=ctk.CTkFont(family="Segoe UI", size=10),
+        text_color=theme.c("text_muted"),
         anchor="w",
     )
     secondary_lbl.pack(anchor="w", pady=(2, 0))

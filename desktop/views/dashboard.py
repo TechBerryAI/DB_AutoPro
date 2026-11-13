@@ -1,4 +1,4 @@
-"""Enterprise Database Operations Command Center dashboard."""
+"""Premium Beacon-inspired Database Operations Command Center."""
 
 from __future__ import annotations
 
@@ -12,66 +12,80 @@ import customtkinter as ctk
 from backend.models.schemas import DatabaseType
 from backend.services.monitoring_service import MonitoringService
 from desktop.connection_store import load_saved_servers
-from desktop.db_catalog import fetch_server_databases
 from desktop.db_performance import fetch_database_performance
-from desktop.dashboard_widgets import host_stat_row, section_block
 from desktop.db_performance_widgets import build_database_performance_section
-from desktop.design_system import font, status_chip
+from desktop.design_system import font
 from desktop.employee_store import EmployeeSession
-from desktop.ui_helpers import detail_panel, make_clickable
-from desktop.infrastructure_health import InfrastructureHealthPanel
+from desktop.engine_icons import engine_icon_label
+from desktop.lucide_icons import lucide_ctk_image, lucide_icon_badge, lucide_icon_label
+from desktop.ui_helpers import make_clickable
 from desktop.ops_widgets import (
-    KPI_ICONS,
-    activity_item,
-    alert_item_compact,
-    command_center_header,
+    beacon_hero_header,
     compact_kpi_card,
-    compact_section,
     empty_state,
-    health_overview_visual,
-    panel_card,
-    resource_progress_row,
-    threshold_color,
 )
-from desktop.security_widgets import build_security_section, security_alert_item, top_risk_row
-from desktop.theme import ThemeManager
+from desktop.status_footer import format_footer_version
+from desktop.theme import CONTENT_BOTTOM_INSET, ThemeManager
 from desktop.views.base_view import BaseView
 
-
-def _greeting() -> str:
-    hour = datetime.now().hour
-    if hour < 12:
-        return "Good morning"
-    if hour < 17:
-        return "Good afternoon"
-    return "Good evening"
-
-
-def _role_label(role) -> str:
-    labels = {"admin": "Administrator", "operator": "Operator", "viewer": "Viewer"}
-    return labels.get(role.value, role.value.title())
-
-
-def _initials(name: str) -> str:
-    parts = [p for p in name.split() if p]
-    if len(parts) >= 2:
-        return (parts[0][0] + parts[-1][0]).upper()
-    return (name[:2] if name else "U").upper()
+_ENGINE_COLORS = {
+    "POSTGRESQL": ("#336791", "#E8F1F8"),
+    "ORACLE": ("#C74634", "#FCEDEB"),
+    "MONGODB": ("#00684A", "#E6F4EF"),
+    "MYSQL": ("#00758F", "#E6F3F6"),
+    "MARIADB": ("#C3368B", "#F9EAF3"),
+    "SQLSERVER": ("#CC2927", "#FCE9E9"),
+}
+_ENGINE_NICE = {
+    "POSTGRESQL": "PostgreSQL",
+    "ORACLE": "Oracle",
+    "MONGODB": "MongoDB",
+    "MYSQL": "MySQL",
+    "MARIADB": "MariaDB",
+    "SQLSERVER": "SQL Server",
+}
 
 
-def _format_gb(value_gb: float) -> str:
-    if value_gb >= 100:
-        return f"{value_gb:.0f} GB"
-    return f"{value_gb:.1f} GB"
+def _engine_label(db_type) -> str:
+    """Canonical ENGINE column text from a saved/live db_type value."""
+    raw = getattr(db_type, "value", db_type)
+    text = str(raw or "").strip().lower()
+    if not text:
+        return "—"
+    try:
+        return DatabaseType(text).value.upper()
+    except ValueError:
+        return text.upper()
 
 
-def _gauge_color(theme: ThemeManager, pct: float, base: str) -> str:
-    _ = base
-    return threshold_color(theme, pct)
+def _short_version(raw: str) -> str:
+    return format_footer_version(raw) if raw else "—"
+
+
+def _pad_uptime(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text or text in {"—", "-", "…"}:
+        return "—"
+    # Normalize "1d 3h 2m" → "01d 03h 02m" when possible.
+    parts = text.replace(",", " ").split()
+    out: list[str] = []
+    for part in parts:
+        num = ""
+        unit = ""
+        for ch in part:
+            if ch.isdigit():
+                num += ch
+            else:
+                unit += ch
+        if num and unit:
+            out.append(f"{int(num):02d}{unit}")
+        else:
+            out.append(part)
+    return " ".join(out) if out else text
 
 
 class DashboardView(BaseView):
-    """Enterprise Database Operations Command Center."""
+    """Premium enterprise analytics dashboard for Database Automation Pro."""
 
     def __init__(
         self,
@@ -81,6 +95,7 @@ class DashboardView(BaseView):
         navigate_callback: Callable[[str], None] | None = None,
         employee: EmployeeSession | None = None,
         sidebar_refresh: Callable[[], None] | None = None,
+        on_object_properties: Callable[[str], None] | None = None,
         **kwargs,
     ) -> None:
         initial_refresh = kwargs.pop("initial_refresh", True)
@@ -88,48 +103,58 @@ class DashboardView(BaseView):
         self.monitoring = MonitoringService()
         self.navigate_callback = navigate_callback
         self.sidebar_refresh = sidebar_refresh
+        self.on_object_properties = on_object_properties
         self._metric_values: dict[str, ctk.CTkLabel] = {}
         self._metric_secondary: dict[str, ctk.CTkLabel] = {}
-        self._gauges: dict[str, tuple[ctk.CTkProgressBar, ctk.CTkLabel, ctk.CTkLabel]] = {}
-        self._host_labels: dict[str, ctk.CTkLabel] = {}
-        self._host_status_chip: ctk.CTkLabel | None = None
         self._poll_job: str | None = None
         self._db_poll_busy = False
-        self._sys_poll_busy = False
+        self._db_poll_pending = False
+        self._db_poll_token: int | None = None
+        self._db_poll_result: tuple[dict, int] | None = None
         self._db_perf_refs: dict = {}
-        self._db_samples: deque = deque(maxlen=24)
-        self._last_sys_metrics: dict = {}
-        self._security_refs: dict = {}
-        self._health_panel: InfrastructureHealthPanel | None = None
+        self._db_samples: deque = deque(maxlen=36)
         self._last_db_metrics: dict = {}
         self._timers_active = True
-        self._db_health_counts: dict[str, ctk.CTkLabel] = {}
         self._db_health_rows: ctk.CTkFrame | None = None
-        self._health_visual_host: ctk.CTkFrame | None = None
-        self._health_update: Callable[[dict[str, int]], None] | None = None
-        self._alerts_list: ctk.CTkFrame | None = None
+        self._infra_summary_lbl: ctk.CTkLabel | None = None
+        self._infra_action_icons: list = []
         self._activity_list: ctk.CTkFrame | None = None
         self._jobs_list: ctk.CTkFrame | None = None
         self._backup_labels: dict[str, ctk.CTkLabel] = {}
-        self._activity_metric_labels: dict[str, ctk.CTkLabel] = {}
-        self._conn_limit_label: ctk.CTkLabel | None = None
+        self._overview_labels: dict[str, ctk.CTkLabel] = {}
+        self._system_status_lbl: ctk.CTkLabel | None = None
+        self._conn_status_online: ctk.CTkLabel | None = None
+        self._conn_status_offline: ctk.CTkLabel | None = None
+        self._conn_status_health: ctk.CTkLabel | None = None
+        self._conn_active_name: ctk.CTkLabel | None = None
+        self._conn_detail_labels: dict[str, ctk.CTkLabel] = {}
+        self._jobs_count_label: ctk.CTkLabel | None = None
+        self._hero_refs: dict = {}
+        self._perf_range = "24H"
         self._panel_fingerprint: dict[str, str] = {}
-        self._db_list_cache: tuple[float, list] | None = None
         self._build_ui()
         if initial_refresh:
             self.refresh()
-        self._schedule_system_poll()
+        self._schedule_live_poll()
+
+    def on_connection_changed(self) -> None:
+        """Re-poll as soon as the app pushes a new session (drop stale offline results)."""
+        self._db_poll_pending = True
+        if self.connection:
+            self._poll_database_metrics()
+        else:
+            self._db_samples.clear()
+            empty = fetch_database_performance(None)
+            self._last_db_metrics = empty
+            self._apply_db_performance_dashboard(empty)
+            self._apply_command_center_panels(empty, force=True)
+            self._refresh_key_metrics()
+            self._update_status_footer_from_metrics(empty)
 
     def destroy(self) -> None:
         self._timers_active = False
         self._db_poll_busy = False
-        self._sys_poll_busy = False
-        if self._health_panel is not None:
-            try:
-                self._health_panel.destroy()
-            except Exception:
-                pass
-            self._health_panel = None
+        self._db_poll_pending = False
         job = getattr(self, "_poll_job", None)
         if job is not None:
             try:
@@ -140,20 +165,12 @@ class DashboardView(BaseView):
         super().destroy()
 
     def _content_changed(self, key: str, fingerprint: str, *, force: bool = False) -> bool:
-        """Return True when panel widgets must be rebuilt (content actually changed)."""
         if not force and self._panel_fingerprint.get(key) == fingerprint:
             return False
         self._panel_fingerprint[key] = fingerprint
         return True
 
-    def _cached_server_databases(self) -> list:
-        """Last inventory fetched off the UI thread. Never opens a connection here."""
-        if self._db_list_cache:
-            return self._db_list_cache[1]
-        return []
-
     def _nav(self, key: str, **extra) -> None:
-        """Same path as sidebar navigation so the active nav item highlights."""
         if not self.navigate_callback:
             return
         if extra:
@@ -161,8 +178,43 @@ class DashboardView(BaseView):
         else:
             self.navigate_callback(key)
 
+    def _open_database_properties(self, name: str) -> None:
+        """Show properties in the classic workspace when embedded; otherwise a child window."""
+        if self.on_object_properties:
+            self.on_object_properties(name)
+            return
+
+        from desktop.database_properties_window import open_database_properties_by_name
+
+        app = self.winfo_toplevel()
+        theme = self.theme
+        active = self.connection
+        log_store = getattr(app, "log_store", None)
+
+        def _disconnect() -> None:
+            if callable(getattr(app, "clear_connection", None)):
+                app.clear_connection()
+
+        def _navigate(key: str) -> None:
+            self._nav(key)
+
+        def _connect(connection) -> None:
+            if callable(getattr(app, "_establish_connection", None)):
+                app._establish_connection(connection, navigate_to=None)
+
+        open_database_properties_by_name(
+            app,
+            theme,
+            name,
+            owner_username=self.owner_username,
+            active_connection=active,
+            log_store=log_store,
+            on_disconnect=_disconnect,
+            on_navigate=_navigate,
+            on_connect=_connect,
+        )
+
     def _nav_kpi(self, key: str) -> None:
-        """Stat cards deep-link into workspace pages (not detail dialogs)."""
         connected_name = ""
         if self.connection:
             connected_name = (self.connection.saved_name or self.connection.name or "").strip()
@@ -172,10 +224,10 @@ class DashboardView(BaseView):
         routes = {
             "linux_servers": ("servers", server_extra),
             "databases": ("databases", {}),
-            "healthy_dbs": ("databases", {}),
-            "active_jobs": ("logs", {"log_filter": "jobs"}),
             "active_alerts": ("logs", {"log_filter": "alerts"}),
             "failed_today": ("backup", {}),
+            "active_jobs": ("logs", {"log_filter": "jobs"}),
+            "system_status": ("databases", {}),
         }
         target = routes.get(key)
         if not target:
@@ -187,65 +239,75 @@ class DashboardView(BaseView):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
+        # Single vertical scroll host — avoid nested scrollables that clip content.
         scroll = ctk.CTkScrollableFrame(
             self,
             fg_color="transparent",
             scrollbar_button_color=self.theme.c("bg_elevated"),
             scrollbar_button_hover_color=self.theme.c("primary"),
         )
-        scroll.grid(row=0, column=0, sticky="nsew", padx=24, pady=(12, 0))
+        scroll.grid(row=0, column=0, sticky="nsew", padx=20, pady=(10, 0))
         scroll.grid_columnconfigure(0, weight=1)
+        self._scroll = scroll
         self._build_command_center(scroll)
 
     def _build_command_center(self, scroll: ctk.CTkScrollableFrame) -> None:
-        name = self.employee.full_name if self.employee else "User"
-        role = _role_label(self.employee.role) if self.employee else "Operator"
-
-        command_center_header(
+        # Hero → KPIs → infra + connection → performance graphs → backup/jobs → recent activity
+        self._hero_refs = beacon_hero_header(
             scroll,
             self.theme,
-            greeting=f"{_greeting()}, {name}",
-            role=role,
-            initials=_initials(name),
             on_refresh=self.refresh,
+            on_quick_action=lambda: self._nav("servers"),
+            quick_action_text="Open Servers",
         )
-
         self._build_kpi_row(scroll)
-        self._build_health_alerts_row(scroll)
-        self._build_infra_activity_row(scroll)
-        self._build_backup_jobs_row(scroll)
-        self._build_recent_activity(scroll)
-        self._build_legacy_detail_sections(scroll)
+        self._build_infrastructure_section(scroll)
+        self._build_performance_overview(scroll)
+        self._build_recent_operations(scroll)
+        ctk.CTkFrame(scroll, fg_color="transparent", height=CONTENT_BOTTOM_INSET).pack(fill="x")
 
     def _build_kpi_row(self, scroll: ctk.CTkScrollableFrame) -> None:
+        """Mockup: 4 equal KPIs on top, 2 wider cards below."""
         grid = ctk.CTkFrame(scroll, fg_color="transparent")
-        grid.pack(fill="x", pady=(0, 16))
-        for col in range(3):
-            grid.grid_columnconfigure(col, weight=1, uniform="kpi3")
+        grid.pack(fill="x", pady=(0, 10))
+        for col in range(4):
+            grid.grid_columnconfigure(col, weight=1, uniform="kpi4")
 
-        tiles = [
-            ("linux_servers", "Saved Servers", "No active connection"),
-            ("databases", "Connected Databases", "Active connections"),
-            ("healthy_dbs", "Healthy", "Passing health checks"),
-            ("active_jobs", "Active Jobs", "Running automation"),
-            ("active_alerts", "Active Alerts", "Requires attention"),
+        top_tiles = [
+            ("linux_servers", "Registered Databases", "Saved profiles"),
+            ("databases", "Connected Databases", "Active session"),
+            ("active_alerts", "Active Alerts", "Failed ops today"),
             ("failed_today", "Failed Backups", "Failed today"),
         ]
-        for i, (key, label, secondary) in enumerate(tiles):
-            r, c = divmod(i, 3)
+        for i, (key, label, secondary) in enumerate(top_tiles):
             card, val, sec = compact_kpi_card(
-                grid,
+                grid, self.theme, key=key, label=label, secondary=secondary
+            )
+            card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0), pady=0)
+            self._metric_values[key] = val
+            self._metric_secondary[key] = sec
+            make_clickable(
+                card,
                 self.theme,
-                key=key,
-                label=label,
-                secondary=secondary,
+                lambda k=key: self._nav_kpi(k),
+                hover_border=self.theme.c("border"),
+            )
+
+        bottom_tiles = [
+            ("active_jobs", "Running Automation Jobs", "In-flight ops"),
+            ("system_status", "System Health", "Live session health"),
+        ]
+        for i, (key, label, secondary) in enumerate(bottom_tiles):
+            card, val, sec = compact_kpi_card(
+                grid, self.theme, key=key, label=label, secondary=secondary
             )
             card.grid(
-                row=r,
-                column=c,
+                row=1,
+                column=i * 2,
+                columnspan=2,
                 sticky="nsew",
-                padx=(0 if c == 0 else 6, 0),
-                pady=(0 if r == 0 else 6, 0),
+                padx=(0 if i == 0 else 8, 0),
+                pady=(8, 0),
             )
             self._metric_values[key] = val
             self._metric_secondary[key] = sec
@@ -253,388 +315,334 @@ class DashboardView(BaseView):
                 card,
                 self.theme,
                 lambda k=key: self._nav_kpi(k),
-                hover_border=self.theme.c("primary"),
+                hover_border=self.theme.c("border"),
             )
 
-    # ------------------------------------------------------------------
-    # KPI card -> detail dialog
-    # ------------------------------------------------------------------
+    def _build_infrastructure_section(self, parent: ctk.CTkFrame) -> None:
+        """Technical Database Infrastructure grid + compact System Status."""
+        shell = ctk.CTkFrame(
+            parent,
+            fg_color=self.theme.c("surface"),
+            corner_radius=10,
+            border_width=1,
+            border_color=self.theme.c("border"),
+        )
+        shell.pack(fill="x", pady=(0, 10))
+        content = ctk.CTkFrame(shell, fg_color="transparent")
+        content.pack(fill="both", expand=True, padx=14, pady=12)
 
-    def _metric_detail_rows(self, key: str) -> list[tuple[str, str]]:
-        """Real data backing a KPI card, as (label, value) rows."""
-        try:
-            if key == "linux_servers":
-                saved = load_saved_servers(self.owner_username) or load_saved_servers()
-                return [
-                    (s.name, f"{s.db_type} · {s.host}:{s.port}")
-                    for s in sorted(saved, key=lambda x: x.name.lower())
-                ]
+        header = ctk.CTkFrame(content, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(
+            header,
+            text="Database Infrastructure",
+            font=font(self.theme, 13, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        ).pack(side="left")
+        view_all = ctk.CTkLabel(
+            header,
+            text="View all →",
+            font=font(self.theme, 10),
+            text_color=self.theme.c("primary"),
+            cursor="hand2",
+        )
+        view_all.pack(side="right")
+        view_all.bind("<Button-1>", lambda _e: self._nav("databases"))
 
-            if key in ("databases", "healthy_dbs"):
-                saved = load_saved_servers(self.owner_username) or load_saved_servers()
-                active = ""
-                if self._is_actively_connected():
-                    active = (self.connection.saved_name or self.connection.name or "").strip()
-                out: list[tuple[str, str]] = []
-                for s in sorted(saved, key=lambda x: x.name.lower()):
-                    if active and s.name == active:
-                        bucket = self._connection_health_bucket(self._last_db_metrics or {})
-                        out.append((s.name, f"Connected · {bucket.title()}"))
-                    else:
-                        out.append((s.name, "Registered"))
-                if self._is_actively_connected() and active and not any(
-                    s.name == active for s in saved
-                ):
-                    bucket = self._connection_health_bucket(self._last_db_metrics or {})
-                    out.insert(0, (active, f"Connected · {bucket.title()}"))
-                return out
+        self._infra_summary_lbl = ctk.CTkLabel(
+            content,
+            text="",
+            font=font(self.theme, 10),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        )
+        self._infra_summary_lbl.pack(fill="x", pady=(0, 8))
 
-            if key == "active_jobs":
-                active, pending = self.monitoring.count_live_jobs()
-                return [("Running now", str(active)), ("Pending", str(pending))]
+        grid = ctk.CTkFrame(content, fg_color="transparent")
+        grid.pack(fill="both", expand=True)
+        grid.grid_columnconfigure(0, weight=72)
+        grid.grid_columnconfigure(1, weight=0)
+        grid.grid_columnconfigure(2, weight=28, minsize=220)
 
-            if key == "active_alerts":
-                sec = self.monitoring.get_security_dashboard_data(
-                    user=self.owner_username, days=1
-                )
-                posture = sec.get("posture") or {}
-                return [
-                    (str(k).replace("_", " ").title(), str(v))
-                    for k, v in posture.items()
-                ]
+        left = ctk.CTkFrame(grid, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ctk.CTkFrame(grid, width=1, fg_color=self.theme.c("border_subtle")).grid(
+            row=0, column=1, sticky="ns", padx=8
+        )
+        right = ctk.CTkFrame(grid, fg_color="transparent")
+        right.grid(row=0, column=2, sticky="nsew", padx=(4, 0))
 
-            if key == "failed_today":
-                ctx = self._backup_stats_context()
-                db_type = ctx.get("db_type")
-                ok, failed = self.monitoring.count_audit_today(
-                    actions=("backup", "restore"),
-                    db_type=db_type,
-                    user=self.owner_username,
-                )
-                c_ok, c_failed = self.monitoring.count_audit_today(
-                    actions=("connect",), user=self.owner_username
-                )
-                return [
-                    ("Backup / restore failed", str(failed)),
-                    ("Backup / restore succeeded", str(ok)),
-                    ("Connection failures", str(c_failed)),
-                    ("Connections succeeded", str(c_ok)),
-                ]
-        except Exception as exc:  # detail view must never break the dashboard
-            return [("Could not load details", str(exc))]
-        return []
-
-    def _open_metric_detail(self, key: str, label: str) -> None:
-        value_lbl = self._metric_values.get(key)
-        sec_lbl = self._metric_secondary.get(key)
-        value_text = value_lbl.cget("text") if value_lbl is not None else "—"
-        secondary_text = sec_lbl.cget("text") if sec_lbl is not None else ""
-        accent = self.theme.c(KPI_ICONS.get(key, ("", "primary", ""))[1])
-        rows = self._metric_detail_rows(key)
-
-        def body(container: ctk.CTkFrame) -> None:
-            head = ctk.CTkFrame(container, fg_color="transparent")
-            head.pack(fill="x", padx=8, pady=(4, 12))
+        cols = ctk.CTkFrame(left, fg_color=self.theme.c("bg_elevated"), corner_radius=6, height=28)
+        cols.pack(fill="x", pady=(0, 4))
+        cols.pack_propagate(False)
+        for text, width in (
+            ("#", 24),
+            ("DATABASE", 126),
+            ("ENGINE", 108),
+            ("HOST", 100),
+            ("STATUS", 78),
+            ("VERSION", 80),
+            ("SESSIONS", 52),
+            ("ACTIONS", 52),
+        ):
             ctk.CTkLabel(
-                head,
-                text=value_text,
-                font=font(self.theme, 34, weight="bold"),
-                text_color=accent,
+                cols,
+                text=text,
+                width=width,
                 anchor="w",
-            ).pack(anchor="w")
-            if secondary_text:
-                ctk.CTkLabel(
-                    head,
-                    text=secondary_text,
-                    font=font(self.theme, 12),
-                    text_color=self.theme.c("text_muted"),
-                    anchor="w",
-                ).pack(anchor="w", pady=(2, 0))
+                font=font(self.theme, 9, weight="bold"),
+                text_color=self.theme.c("text_muted"),
+            ).pack(side="left", padx=(6 if text == "#" else 3, 0))
 
-            if not rows:
-                ctk.CTkLabel(
-                    container,
-                    text="Nothing to show yet.",
-                    font=font(self.theme, 13),
-                    text_color=self.theme.c("text_muted"),
-                ).pack(anchor="w", padx=8, pady=(4, 8))
-                return
+        self._db_health_rows = ctk.CTkFrame(left, fg_color="transparent")
+        self._db_health_rows.pack(fill="x")
+        self._infra_action_icons: list = []
 
-            for name, detail in rows:
-                row = ctk.CTkFrame(
-                    container,
-                    fg_color=self.theme.c("bg_elevated"),
-                    corner_radius=self.theme.radius("sm"),
-                )
-                row.pack(fill="x", padx=8, pady=3)
-                inner = ctk.CTkFrame(row, fg_color="transparent")
-                inner.pack(fill="x", padx=12, pady=9)
-                ctk.CTkLabel(
-                    inner,
-                    text=str(detail),
-                    font=font(self.theme, 12),
-                    text_color=self.theme.c("text_secondary"),
-                    anchor="e",
-                ).pack(side="right", padx=(12, 0))
-                ctk.CTkLabel(
-                    inner,
-                    text=str(name),
-                    font=font(self.theme, 13, weight="bold"),
-                    text_color=self.theme.c("text_primary"),
-                    anchor="w",
-                ).pack(side="left", fill="x", expand=True)
-
-        detail_panel(
-            self,
-            self.theme,
-            title=label,
-            subtitle="Live detail from your current environment",
-            body=body,
-            width=560,
-            accent=accent,
-        )
-
-    def _build_health_alerts_row(self, scroll: ctk.CTkScrollableFrame) -> None:
-        row = ctk.CTkFrame(scroll, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 20))
-        row.grid_columnconfigure(0, weight=65)
-        row.grid_columnconfigure(1, weight=35)
-
-        left_wrap = ctk.CTkFrame(row, fg_color="transparent")
-        left_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        left_body = compact_section(
-            left_wrap,
-            self.theme,
-            "Database Health Overview",
-            subtitle="Operational status across infrastructure",
-            action_text="View databases →",
-            action_command=lambda: self._nav("databases"),
-        )
-        health_shell, health_content = panel_card(left_body, self.theme)
-        health_shell.pack(fill="both", expand=True)
-
-        self._health_visual_host = ctk.CTkFrame(health_content, fg_color="transparent")
-        self._health_visual_host.pack(fill="x")
-        self._db_health_counts, self._health_update = health_overview_visual(
-            self._health_visual_host,
-            self.theme,
-        )
-
-        self._db_health_rows = ctk.CTkFrame(health_content, fg_color="transparent")
-        self._db_health_rows.pack(fill="x", pady=(12, 0))
-
-        right_wrap = ctk.CTkFrame(row, fg_color="transparent")
-        right_wrap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        right_body = compact_section(
-            right_wrap,
-            self.theme,
-            "Active Alerts",
-            subtitle="Critical failures and warnings",
-            action_text="View alerts →",
-            action_command=lambda: self._nav("logs", log_filter="alerts"),
-        )
-        alerts_shell, alerts_content = panel_card(right_body, self.theme)
-        alerts_shell.pack(fill="both", expand=True)
-        self._alerts_list = ctk.CTkFrame(alerts_content, fg_color="transparent")
-        self._alerts_list.pack(fill="both", expand=True)
-
-    def _build_infra_activity_row(self, scroll: ctk.CTkScrollableFrame) -> None:
-        row = ctk.CTkFrame(scroll, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 14))
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(1, weight=1)
-
-        left = ctk.CTkFrame(row, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        left_body = compact_section(
-            left,
-            self.theme,
-            "Resource Utilization",
-            subtitle="CPU, memory, disk and connections",
-        )
-        infra_shell, infra_content = panel_card(left_body, self.theme)
-        infra_shell.pack(fill="both", expand=True)
-
-        status_row = ctk.CTkFrame(infra_content, fg_color="transparent")
-        status_row.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(
-            status_row, text="Local agent", font=font(self.theme, 11), text_color=self.theme.c("text_muted")
-        ).pack(side="left")
-        self._host_status_chip = status_chip(status_row, self.theme, text="—", tone="neutral")
-        self._host_status_chip.pack(side="right")
-
-        for label, key in [
-            ("CPU Usage", "cpu"),
-            ("Memory Usage", "ram"),
-            ("Disk Usage", "storage"),
-            ("Network Traffic", "network"),
-        ]:
-            self._gauges[key] = resource_progress_row(infra_content, self.theme, label)
-
-        conn_row = ctk.CTkFrame(infra_content, fg_color="transparent")
-        conn_row.pack(fill="x", pady=(8, 0))
-        ctk.CTkLabel(
-            conn_row, text="Active Connections", font=font(self.theme, 11), text_color=self.theme.c("text_secondary")
-        ).pack(side="left")
-        self._conn_limit_label = ctk.CTkLabel(
-            conn_row, text="— / —", font=font(self.theme, 12, weight="bold"), text_color=self.theme.c("text_primary")
-        )
-        self._conn_limit_label.pack(side="right")
-
-        host_grid = ctk.CTkFrame(infra_content, fg_color="transparent")
-        host_grid.pack(fill="x", pady=(8, 0))
-        for label, key in [("Hostname", "hostname"), ("OS", "os"), ("Uptime", "uptime")]:
-            self._host_labels[key] = host_stat_row(host_grid, self.theme, label)
-
-        right = ctk.CTkFrame(row, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        right_body = compact_section(
+        # Active connection card (mockup right rail)
+        panel = ctk.CTkFrame(
             right,
-            self.theme,
-            "Database Activity",
-            subtitle="Sessions, queries and throughput on the active connection",
+            fg_color=self.theme.c("bg_elevated"),
+            corner_radius=10,
+            border_width=1,
+            border_color=self.theme.c("border"),
         )
-        act_shell, act_content = panel_card(right_body, self.theme)
-        act_shell.pack(fill="both", expand=True)
+        panel.pack(fill="both", expand=True, anchor="n")
+        inner = ctk.CTkFrame(panel, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=14)
 
-        metrics_grid = ctk.CTkFrame(act_content, fg_color="transparent")
-        metrics_grid.pack(fill="x")
-        for col in range(2):
-            metrics_grid.grid_columnconfigure(col, weight=1)
+        hdr = ctk.CTkFrame(inner, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(
+            hdr,
+            text="Connection Status",
+            font=font(self.theme, 12, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        ).pack(side="left")
+        self._conn_status_health = ctk.CTkLabel(
+            hdr,
+            text="  OFFLINE  ",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color="#5A6573",
+            fg_color="#EEF1F5",
+            corner_radius=10,
+            height=22,
+        )
+        self._conn_status_health.pack(side="right")
+        self._system_status_lbl = self._conn_status_health
 
-        activity_specs = [
-            ("active_sessions", "Active Sessions"),
-            ("blocked_sessions", "Blocked Sessions"),
-            ("long_queries", "Long Running Queries"),
-            ("slow_queries", "Slow Queries"),
-            ("tps", "Transactions/sec"),
-            ("connections", "Total Connections"),
-        ]
-        for i, (key, label) in enumerate(activity_specs):
-            r, c = divmod(i, 2)
-            cell = ctk.CTkFrame(
-                metrics_grid,
-                fg_color=self.theme.c("bg_elevated"),
-                corner_radius=8,
-                border_width=1,
-                border_color=self.theme.c("border_subtle"),
-            )
-            cell.grid(row=r, column=c, sticky="ew", padx=(0 if c == 0 else 4, 0), pady=(0 if r == 0 else 6, 0))
-            inner = ctk.CTkFrame(cell, fg_color="transparent")
-            inner.pack(fill="x", padx=10, pady=8)
-            ctk.CTkLabel(inner, text=label, font=font(self.theme, 10), text_color=self.theme.c("text_muted"), anchor="w").pack(
-                anchor="w"
-            )
+        self._conn_detail_labels: dict[str, ctk.CTkLabel] = {}
+        self._conn_row_icons: list = []
+        self._conn_active_name = None
+        conn_icons = {
+            "active": ("database", "#0078D4"),
+            "engine": ("server", "#336791"),
+            "host": ("hard-drive", "#64748B"),
+            "version": ("circle-check", "#107C10"),
+            "uptime": ("activity", "#0078D4"),
+            "sessions": ("cpu", "#CA5010"),
+        }
+        for key, label in (
+            ("active", "Active Connection"),
+            ("engine", "Engine"),
+            ("host", "Host"),
+            ("version", "Version"),
+            ("uptime", "Uptime"),
+            ("sessions", "Sessions"),
+        ):
+            block = ctk.CTkFrame(inner, fg_color="transparent")
+            block.pack(fill="x", pady=(0, 7))
+            left = ctk.CTkFrame(block, fg_color="transparent")
+            left.pack(side="left")
+            icon_name, icon_color = conn_icons[key]
+            try:
+                ico = lucide_icon_label(left, icon_name, icon_color, size=13)
+                ico.pack(side="left", padx=(0, 6))
+                self._conn_row_icons.append(ico)
+            except Exception:
+                pass
+            ctk.CTkLabel(
+                left,
+                text=label,
+                font=font(self.theme, 10),
+                text_color=self.theme.c("text_secondary"),
+                anchor="w",
+            ).pack(side="left")
             val = ctk.CTkLabel(
-                inner, text="—", font=font(self.theme, 18, weight="bold"), text_color=self.theme.c("text_primary"), anchor="w"
+                block,
+                text="—",
+                font=font(self.theme, 11, weight="bold"),
+                text_color=self.theme.c("text_primary"),
+                anchor="e",
             )
-            val.pack(anchor="w")
-            self._activity_metric_labels[key] = val
+            val.pack(side="right")
+            self._conn_detail_labels[key] = val
+            if key == "active":
+                self._conn_active_name = val
 
-    def _build_backup_jobs_row(self, scroll: ctk.CTkScrollableFrame) -> None:
-        row = ctk.CTkFrame(scroll, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 14))
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(1, weight=1)
+        # Hidden counters kept for apply_system_overview compatibility
+        self._conn_status_online = None
+        self._conn_status_offline = None
+        self._overview_labels = {}
 
-        left = ctk.CTkFrame(row, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        left_body = compact_section(
-            left,
+    def _build_performance_overview(self, parent: ctk.CTkFrame) -> None:
+        self._db_perf_refs = build_database_performance_section(
+            parent,
             self.theme,
-            "Backup & Recovery Status",
-            subtitle="Today's backup outcomes from the audit log",
-            action_text="Open backup →",
-            action_command=lambda: self._nav("backup"),
+            on_view_all=lambda: self._nav("databases"),
         )
-        bak_shell, bak_content = panel_card(left_body, self.theme)
-        bak_shell.pack(fill="both", expand=True)
+        self._perf_range = "24H"
 
-        stats = ctk.CTkFrame(bak_content, fg_color="transparent")
-        stats.pack(fill="x")
-        for key, label in [("successful", "Successful"), ("failed", "Failed"), ("running", "Running")]:
-            cell = ctk.CTkFrame(stats, fg_color=self.theme.c("bg_elevated"), corner_radius=8)
-            cell.pack(side="left", fill="x", expand=True, padx=(0 if key == "successful" else 4, 0))
-            ctk.CTkLabel(cell, text=label, font=font(self.theme, 10), text_color=self.theme.c("text_muted")).pack(pady=(6, 0))
-            val = ctk.CTkLabel(cell, text="0", font=font(self.theme, 20, weight="bold"), text_color=self.theme.c("text_primary"))
-            val.pack(pady=(0, 6))
-            self._backup_labels[key] = val
+    def _on_perf_range_change(self, name: str) -> None:
+        self._perf_range = name
+        self._apply_db_performance_dashboard(self._last_db_metrics or None)
 
-        for key, label in [("last", "Last Successful"), ("next", "Next Scheduled")]:
-            line = ctk.CTkFrame(bak_content, fg_color="transparent")
-            line.pack(fill="x", pady=(8, 0))
-            ctk.CTkLabel(line, text=label, font=font(self.theme, 11), text_color=self.theme.c("text_secondary")).pack(side="left")
-            val = ctk.CTkLabel(line, text="—", font=font(self.theme, 11, weight="bold"), text_color=self.theme.c("text_primary"))
+    def _build_backup_jobs_row(self, parent: ctk.CTkFrame) -> None:
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 12))
+        row.grid_columnconfigure(0, weight=1, uniform="ops2")
+        row.grid_columnconfigure(1, weight=1, uniform="ops2")
+
+        # Backup & Recovery — large hero metric
+        left = ctk.CTkFrame(
+            row,
+            fg_color=self.theme.c("surface"),
+            corner_radius=2,
+            border_width=1,
+            border_color=self.theme.c("border"),
+        )
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        bak = ctk.CTkFrame(left, fg_color="transparent")
+        bak.pack(fill="both", expand=True, padx=12, pady=10)
+        ctk.CTkLabel(
+            bak,
+            text="BACKUP & RECOVERY",
+            font=font(self.theme, 10, weight="bold"),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        ).pack(anchor="w")
+        ok_val = ctk.CTkLabel(
+            bak,
+            text="0",
+            font=font(self.theme, 22, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        )
+        ok_val.pack(anchor="w", pady=(6, 0))
+        self._backup_labels["successful"] = ok_val
+        ctk.CTkLabel(
+            bak,
+            text="Successful today",
+            font=font(self.theme, 12),
+            text_color=self.theme.c("text_secondary"),
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 12))
+        for key, label in [("failed", "Failed"), ("running", "Running")]:
+            line = ctk.CTkFrame(bak, fg_color="transparent")
+            line.pack(fill="x", pady=4)
+            ctk.CTkLabel(
+                line,
+                text=label,
+                font=font(self.theme, 12),
+                text_color=self.theme.c("text_secondary"),
+                anchor="w",
+            ).pack(side="left")
+            val = ctk.CTkLabel(
+                line,
+                text="0",
+                font=font(self.theme, 13, weight="bold"),
+                text_color=self.theme.c("text_primary"),
+                anchor="e",
+            )
             val.pack(side="right")
             self._backup_labels[key] = val
+        # Keep last/next available for refresh without showing in this compact card
+        self._backup_labels["last"] = ctk.CTkLabel(bak, text="")
+        self._backup_labels["next"] = ctk.CTkLabel(bak, text="")
+        self._backup_labels["last"].pack_forget()
+        self._backup_labels["next"].pack_forget()
 
-        right = ctk.CTkFrame(row, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        right_body = compact_section(
-            right,
-            self.theme,
-            "Running Automation Jobs",
-            subtitle="In-memory backup and restore operations",
-            action_text="View jobs →",
-            action_command=lambda: self._nav("logs", log_filter="jobs"),
+        # Automation Jobs
+        right = ctk.CTkFrame(
+            row,
+            fg_color=self.theme.c("surface"),
+            corner_radius=2,
+            border_width=1,
+            border_color=self.theme.c("border"),
         )
-        jobs_shell, jobs_content = panel_card(right_body, self.theme)
-        jobs_shell.pack(fill="both", expand=True)
-        self._jobs_list = ctk.CTkFrame(jobs_content, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        jobs = ctk.CTkFrame(right, fg_color="transparent")
+        jobs.pack(fill="both", expand=True, padx=12, pady=10)
+        ctk.CTkLabel(
+            jobs,
+            text="AUTOMATION JOBS",
+            font=font(self.theme, 10, weight="bold"),
+            text_color=self.theme.c("text_muted"),
+            anchor="w",
+        ).pack(anchor="w")
+        self._jobs_count_label = ctk.CTkLabel(
+            jobs,
+            text="0",
+            font=font(self.theme, 22, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        )
+        self._jobs_count_label.pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(
+            jobs,
+            text="Currently running",
+            font=font(self.theme, 11),
+            text_color=self.theme.c("text_secondary"),
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 8))
+        self._jobs_list = ctk.CTkFrame(jobs, fg_color="transparent")
         self._jobs_list.pack(fill="both", expand=True)
 
-    def _build_recent_activity(self, scroll: ctk.CTkScrollableFrame) -> None:
-        body = compact_section(
-            scroll,
-            self.theme,
-            "Recent Activity",
-            subtitle="Latest connect, backup and restore events",
-            action_text="Open logs →",
-            action_command=lambda: self._nav("logs"),
+    def _build_recent_operations(self, parent: ctk.CTkFrame) -> None:
+        shell = ctk.CTkFrame(
+            parent,
+            fg_color=self.theme.c("surface"),
+            corner_radius=2,
+            border_width=1,
+            border_color=self.theme.c("border"),
         )
-        shell, content = panel_card(body, self.theme)
-        shell.pack(fill="x")
+        shell.pack(fill="x", pady=(0, 8))
+        content = ctk.CTkFrame(shell, fg_color="transparent")
+        content.pack(fill="x", padx=12, pady=10)
+        header = ctk.CTkFrame(content, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(
+            header,
+            text="RECENT OPERATIONS",
+            font=font(self.theme, 11, weight="bold"),
+            text_color=self.theme.c("text_primary"),
+            anchor="w",
+        ).pack(side="left")
+        view_all = ctk.CTkLabel(
+            header,
+            text="View all →",
+            font=font(self.theme, 12),
+            text_color=self.theme.c("primary"),
+            cursor="hand2",
+        )
+        view_all.pack(side="right")
+        view_all.bind("<Button-1>", lambda _e: self._nav("logs"))
         self._activity_list = ctk.CTkFrame(content, fg_color="transparent")
         self._activity_list.pack(fill="x")
 
-    def _build_legacy_detail_sections(self, scroll: ctk.CTkScrollableFrame) -> None:
-        """Detail panels below the command-center rows.
-
-        "Service Status" (InfrastructureHealthPanel) used to render here too, but every
-        one of its 4 rows (saved profiles, connection, backup, replication) already has a
-        home above — the KPI row, the "Database Health Overview" panel, and the
-        "Backup & Recovery Status" panel — so it was pure duplication with zero unique
-        data. Dropped rather than kept redundant (docs/ui_plan.md §6).
-        """
-        db_body = section_block(
-            scroll,
-            self.theme,
-            "Database Performance",
-            subtitle="Connection health and query metrics in real-time",
-        )
-        self._db_perf_refs = build_database_performance_section(db_body, self.theme)
-
-        sec_body = section_block(
-            scroll,
-            self.theme,
-            "Security Analytics",
-            subtitle="Database connection failures and backup/restore events from audit log",
-        )
-        self._security_refs = build_security_section(sec_body, self.theme)
-
-
-    def _apply_command_center_panels(self, db_metrics: dict | None = None, *, force: bool = False) -> None:
-        """Refresh command-center panels from live MonitoringService / connection data."""
+    def _apply_command_center_panels(
+        self, db_metrics: dict | None = None, *, force: bool = False
+    ) -> None:
         metrics = db_metrics if db_metrics is not None else self._last_db_metrics
         self._apply_db_health_overview(metrics, force=force)
-        self._apply_active_alerts_panel(force=force)
-        self._apply_database_activity_panel(metrics)
         self._apply_backup_recovery_panel()
         self._apply_automation_jobs_panel(force=force)
-        self._apply_recent_activity_panel(force=force)
+        self._apply_recent_operations_panel(force=force)
+        self._apply_system_overview()
+        self._apply_hero()
 
     def _is_actively_connected(self, metrics: dict | None = None) -> bool:
-        """True only when a live session exists (not merely a saved profile)."""
         if not self.connection:
             return False
         m = metrics if metrics is not None else (self._last_db_metrics or {})
@@ -643,7 +651,6 @@ class DashboardView(BaseView):
         return True
 
     def _connection_health_bucket(self, metrics: dict) -> str:
-        """Return healthy|warning|critical for the active connected session."""
         status = str(metrics.get("status", "")).lower()
         load = float(metrics.get("load_pct") or 0)
         if load >= 85 or status in {"critical", "error", "down", "offline"}:
@@ -652,12 +659,190 @@ class DashboardView(BaseView):
             return "warning"
         return "healthy"
 
-    def _apply_db_health_overview(self, metrics: dict, *, force: bool = False) -> None:
-        """Health counts are for *connected* profiles only; others stay Registered."""
+    def _apply_hero(self) -> None:
+        refs = self._hero_refs or {}
+        now = datetime.now().astimezone()
+        if refs.get("datetime"):
+            refs["datetime"].configure(text=now.strftime("%A, %d %B %Y · %H:%M"))
+        if refs.get("refreshed"):
+            refs["refreshed"].configure(text=f"Last refreshed {now.strftime('%H:%M:%S')}")
+
         saved = load_saved_servers(self.owner_username)
         if not saved and self.owner_username:
             saved = load_saved_servers()
         registered = len(saved)
+        connected = 1 if self._is_actively_connected() else 0
+        metrics = self._last_db_metrics or {}
+        _bak_ok, bak_fail = self.monitoring.count_audit_today(
+            actions=("backup",), user=self.owner_username
+        )
+        _r_ok, restore_fail = self.monitoring.count_audit_today(
+            actions=("restore",), user=self.owner_username
+        )
+        _c_ok, connect_fail = self.monitoring.count_audit_today(
+            actions=("connect",), user=self.owner_username
+        )
+        alerts = bak_fail + restore_fail + connect_fail
+
+        badge_bg = self.theme.c("bg_elevated")
+        badge_fg = self.theme.c("text_muted")
+        badge_text = "  READY — Connect a database to begin.  "
+        pulse_color = self.theme.c("text_muted")
+        pulse_text = "● IDLE"
+
+        if connected:
+            bucket = self._connection_health_bucket(metrics)
+            if bucket == "critical":
+                badge_text, badge_fg, badge_bg = (
+                    "  CRITICAL — Attention required.  ",
+                    self.theme.c("error"),
+                    self.theme.c("error_muted"),
+                )
+                pulse_color, pulse_text = self.theme.c("error"), "● CRITICAL"
+            elif bucket == "warning" or alerts:
+                badge_text, badge_fg, badge_bg = (
+                    "  DEGRADED — Warnings detected.  ",
+                    self.theme.c("warning"),
+                    self.theme.c("warning_muted"),
+                )
+                pulse_color, pulse_text = self.theme.c("warning"), "● DEGRADED"
+            else:
+                badge_text, badge_fg, badge_bg = (
+                    "  HEALTHY — System is running normally.  ",
+                    "#0B6A0B",
+                    "#DFF5E5",
+                )
+                pulse_color, pulse_text = "#0B6A0B", "● LIVE"
+        elif registered:
+            badge_text, badge_fg, badge_bg = (
+                "  READY — Registered databases available.  ",
+                "#5A6573",
+                "#EEF1F5",
+            )
+            pulse_color, pulse_text = "#64748B", "● IDLE"
+
+        if refs.get("headline"):
+            refs["headline"].configure(text="Database Infrastructure Status")
+        if refs.get("health_badge"):
+            refs["health_badge"].configure(
+                text=badge_text, text_color=badge_fg, fg_color=badge_bg
+            )
+        if refs.get("summary"):
+            refs["summary"].configure(
+                text=(
+                    f"{registered} registered databases · {connected} active connection"
+                    f"{'' if connected == 1 else 's'} · {alerts} critical alerts"
+                )
+            )
+        if refs.get("pulse"):
+            refs["pulse"].configure(text=pulse_text, text_color=pulse_color)
+
+    def _status_pill(self, parent, text: str, tone: str) -> ctk.CTkLabel:
+        palette = {
+            "success": ("#E6F4E6", "#0B6A0B"),
+            "warning": ("#FFF4CE", "#8A5700"),
+            "error": ("#FDE7E9", "#A4262C"),
+            "neutral": ("#EEF1F5", "#5A6573"),
+        }
+        bg, fg = palette.get(tone, palette["neutral"])
+        return ctk.CTkLabel(
+            parent,
+            text=f"  {text}  ",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=fg,
+            fg_color=bg,
+            corner_radius=10,
+            height=20,
+        )
+
+    def _apply_system_overview(self) -> None:
+        saved = load_saved_servers(self.owner_username)
+        if not saved and self.owner_username:
+            saved = load_saved_servers()
+        connected = 1 if self._is_actively_connected() else 0
+        metrics = self._last_db_metrics or {}
+        _bak_ok, bak_fail = self.monitoring.count_audit_today(
+            actions=("backup",), user=self.owner_username
+        )
+        _r_ok, restore_fail = self.monitoring.count_audit_today(
+            actions=("restore",), user=self.owner_username
+        )
+        _c_ok, connect_fail = self.monitoring.count_audit_today(
+            actions=("connect",), user=self.owner_username
+        )
+        alerts = bak_fail + restore_fail + connect_fail
+
+        # Active connection card (right rail)
+        if self.connection and connected:
+            name = (self.connection.saved_name or self.connection.name or "Connected").strip()
+            engine = _engine_label(self.connection.db_type)
+            host = (
+                f"{self.connection.host}:{self.connection.port}"
+                if self.connection.host
+                else "—"
+            )
+            version = _short_version(str(metrics.get("version") or "").strip())
+            uptime = _pad_uptime(
+                str(metrics.get("uptime") or metrics.get("uptime_human") or "").strip()
+            )
+            sessions = metrics.get("sessions")
+            if sessions in (None, "", "—"):
+                sessions = metrics.get("connections_num")
+            session_txt = str(sessions) if sessions not in (None, "", "—") else "—"
+            details = {
+                "active": name,
+                "engine": _ENGINE_NICE.get(engine, engine) if engine != "—" else "—",
+                "host": host,
+                "version": version,
+                "uptime": uptime,
+                "sessions": session_txt,
+            }
+        else:
+            details = {
+                "active": "No active connection",
+                "engine": "—",
+                "host": "—",
+                "version": "—",
+                "uptime": "—",
+                "sessions": "—",
+            }
+        for key, text in details.items():
+            lbl = self._conn_detail_labels.get(key)
+            if lbl:
+                lbl.configure(text=text)
+
+        if self._system_status_lbl is not None:
+            if connected:
+                bucket = self._connection_health_bucket(metrics)
+                if bucket == "critical":
+                    self._system_status_lbl.configure(
+                        text="  CRITICAL  ",
+                        text_color=self.theme.c("error"),
+                        fg_color=self.theme.c("error_muted"),
+                    )
+                elif bucket == "warning" or alerts:
+                    self._system_status_lbl.configure(
+                        text="  DEGRADED  ",
+                        text_color=self.theme.c("warning"),
+                        fg_color=self.theme.c("warning_muted"),
+                    )
+                else:
+                    self._system_status_lbl.configure(
+                        text="  ONLINE  ",
+                        text_color="#0B6A0B",
+                        fg_color="#DFF5E5",
+                    )
+            else:
+                self._system_status_lbl.configure(
+                    text="  OFFLINE  ",
+                    text_color="#5A6573",
+                    fg_color="#EEF1F5",
+                )
+
+    def _apply_db_health_overview(self, metrics: dict, *, force: bool = False) -> None:
+        saved = load_saved_servers(self.owner_username)
+        if not saved and self.owner_username:
+            saved = load_saved_servers()
         connected = self._is_actively_connected(metrics)
 
         healthy = warning = critical = 0
@@ -670,159 +855,239 @@ class DashboardView(BaseView):
             else:
                 healthy = 1
 
-        connected_count = 1 if connected else 0
-        registered_only = max(0, registered - connected_count)
-        total = max(registered, connected_count)
-
-        count_map = {
-            "total": total,
-            "healthy": healthy,
-            "warning": warning,
-            "critical": critical,
-            "offline": registered_only,  # gray segment = registered / not connected
-        }
-
-        show_empty = not connected and not saved
-        if self._health_visual_host:
-            if show_empty:
-                if self._health_visual_host.winfo_manager():
-                    self._health_visual_host.pack_forget()
-            else:
-                if not self._health_visual_host.winfo_manager():
-                    self._health_visual_host.pack(fill="x")
-                if self._health_update:
-                    self._health_update(count_map)
-
         if not self._db_health_rows:
             return
 
-        rows: list[tuple[str, str, str]] = []
+        version = _short_version(str((metrics or {}).get("version") or "").strip())
+        sessions = metrics.get("sessions")
+        if sessions in (None, "", "—"):
+            sessions = metrics.get("connections_num")
+        session_txt = str(sessions) if sessions not in (None, "", "—") else "—"
+        # Rows: name, engine, host, status_text, tone, version, sessions
+        rows: list[tuple[str, str, str, str, str, str, str]] = []
         active_saved = ""
+        online_count = 0
         if self.connection:
             active_saved = (self.connection.saved_name or self.connection.name or "").strip()
-            label = f"{self.connection.db_type.value.upper()}  {self.connection.name}"
+            name = self.connection.saved_name or self.connection.name
+            engine_title = _engine_label(self.connection.db_type)
+            host = f"{self.connection.host}:{self.connection.port}" if self.connection.host else "—"
             if critical:
-                rows.append((label, "Critical", "error"))
+                rows.append((name, engine_title, host, "CRITICAL", "error", version, session_txt))
+                online_count = 1
             elif warning:
-                rows.append((label, "Warning", "warning"))
+                rows.append((name, engine_title, host, "WARNING", "warning", version, session_txt))
+                online_count = 1
             elif connected:
-                rows.append((label, "Healthy", "success"))
+                rows.append((name, engine_title, host, "ONLINE", "success", version, session_txt))
+                online_count = 1
             else:
-                rows.append((label, "Registered", "neutral"))
+                rows.append((name, engine_title, host, "OFFLINE", "error", version, "—"))
+
+        offline_rows: list[tuple[str, str, str, str, str, str, str]] = []
         for server in saved:
             if active_saved and server.name == active_saved:
                 continue
-            name = f"{server.db_type.upper()}  {server.name}"
-            rows.append((name, "Registered", "neutral"))
+            host = f"{server.host}:{server.port}" if server.host else "—"
+            offline_rows.append(
+                (
+                    server.name,
+                    _engine_label(server.db_type),
+                    host,
+                    "OFFLINE",
+                    "neutral",
+                    "—",
+                    "—",
+                )
+            )
+        offline_rows.sort(key=lambda r: r[0].lower())
+        rows.extend(offline_rows)
 
-        fingerprint = f"empty={show_empty}|{rows[:8]}|{count_map}"
+        if self._infra_summary_lbl is not None:
+            total = len(rows)
+            self._infra_summary_lbl.configure(
+                text=f"{total} registered · {online_count} online · {max(total - online_count, 0)} offline"
+            )
+
+        show_empty = not rows
+        fingerprint = f"grid3|{show_empty}|{rows[:20]}"
         if not self._content_changed("health_rows", fingerprint, force=force):
             return
 
         for child in self._db_health_rows.winfo_children():
             child.destroy()
+        self._infra_action_icons = []
 
         if show_empty:
             empty_state(
                 self._db_health_rows,
                 self.theme,
                 icon="database",
-                title="No databases connected",
-                message="Connect a database to start monitoring health, performance and backup status.",
+                title="No databases registered",
+                message="Save a connection on Servers, then connect to monitor health.",
                 action_text="+ Connect Database",
                 action_command=lambda: self._nav("servers"),
                 tone="info",
             )
             return
 
-        for title, status, tone in rows[:8]:
-            line = ctk.CTkFrame(self._db_health_rows, fg_color="transparent")
-            line.pack(fill="x", pady=3)
-            ctk.CTkLabel(
-                line,
-                text=title,
-                font=font(self.theme, 12),
-                text_color=self.theme.c("text_primary"),
+        for idx, (name, engine, host, status, tone, ver, sess) in enumerate(rows):
+            bg = "#F7F9FC" if idx % 2 else "#FFFFFF"
+            line = ctk.CTkFrame(self._db_health_rows, fg_color=bg, corner_radius=6, height=32)
+            line.pack(fill="x", pady=1)
+            line.pack_propagate(False)
+            line.configure(cursor="hand2")
+            line.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            def _cell(text: str, width: int, color: str, *, bold: bool = False, padx: int = 3) -> None:
+                lbl = ctk.CTkLabel(
+                    line,
+                    text=text,
+                    width=width,
+                    anchor="w",
+                    font=font(self.theme, 10, weight="bold" if bold else "normal"),
+                    text_color=color,
+                    cursor="hand2",
+                )
+                lbl.pack(side="left", padx=(padx, 0))
+                lbl.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            _cell(str(idx + 1), 24, self.theme.c("text_muted"), padx=6)
+
+            # Database name with small engine brand icon (mockup style)
+            name_wrap = ctk.CTkFrame(line, fg_color="transparent", width=126, height=28)
+            name_wrap.pack(side="left", padx=3)
+            name_wrap.pack_propagate(False)
+            try:
+                db_ico = engine_icon_label(name_wrap, engine, size=14)
+                db_ico.pack(side="left", padx=(0, 6), pady=7)
+                self._infra_action_icons.append(getattr(db_ico, "_engine_image", None))
+            except Exception:
+                pass
+            name_lbl = ctk.CTkLabel(
+                name_wrap,
+                text=name,
                 anchor="w",
-            ).pack(side="left")
-            colors = {
-                "success": self.theme.c("success"),
-                "warning": self.theme.c("warning"),
-                "error": self.theme.c("error"),
-                "neutral": self.theme.c("text_muted"),
-            }
-            ctk.CTkLabel(
-                line,
-                text=status,
-                font=font(self.theme, 12, weight="bold"),
-                text_color=colors.get(tone, self.theme.c("text_muted")),
-            ).pack(side="right")
+                font=font(self.theme, 10, weight="bold"),
+                text_color=self.theme.c("text_primary"),
+                cursor="hand2",
+            )
+            name_lbl.pack(side="left", fill="x", expand=True)
+            name_lbl.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
 
-    def _apply_active_alerts_panel(self, *, force: bool = False) -> None:
-        if not self._alerts_list:
-            return
+            eng_fg, eng_bg = _ENGINE_COLORS.get(engine, ("#475569", "#EEF2F7"))
+            eng_wrap = ctk.CTkFrame(line, fg_color="transparent", width=108, height=28)
+            eng_wrap.pack(side="left", padx=3)
+            eng_wrap.pack_propagate(False)
+            eng_inner = ctk.CTkFrame(eng_wrap, fg_color=eng_bg, corner_radius=8, height=22)
+            eng_inner.pack(anchor="w", pady=5)
+            try:
+                eng_ico = engine_icon_label(eng_inner, engine, size=12)
+                eng_ico.pack(side="left", padx=(6, 4), pady=3)
+                self._infra_action_icons.append(getattr(eng_ico, "_engine_image", None))
+            except Exception:
+                pass
+            eng_pill = ctk.CTkLabel(
+                eng_inner,
+                text=engine,
+                font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+                text_color=eng_fg,
+                cursor="hand2",
+            )
+            eng_pill.pack(side="left", padx=(0, 8), pady=2)
+            eng_pill.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            _cell(host, 100, self.theme.c("text_secondary"))
+
+            status_wrap = ctk.CTkFrame(line, fg_color="transparent", width=78, height=28)
+            status_wrap.pack(side="left", padx=3)
+            status_wrap.pack_propagate(False)
+            pill = self._status_pill(status_wrap, status, tone)
+            pill.configure(cursor="hand2")
+            pill.pack(anchor="w", pady=6)
+            pill.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            _cell(ver if ver != "—" else "—", 80, self.theme.c("text_secondary"))
+            _cell(sess, 52, self.theme.c("text_secondary"))
+
+            actions = ctk.CTkFrame(line, fg_color="transparent")
+            actions.pack(side="left", padx=(2, 4))
+            for icon_name in ("settings", "download"):
+                try:
+                    img = lucide_ctk_image(icon_name, "#0078D4", size=13)
+                    self._infra_action_icons.append(img)
+                    act = ctk.CTkButton(
+                        actions,
+                        text="",
+                        image=img,
+                        width=24,
+                        height=22,
+                        corner_radius=5,
+                        fg_color="transparent",
+                        hover_color="#DEECF9",
+                        command=lambda n=name: self._open_database_properties(n),
+                    )
+                    act.pack(side="left", padx=1)
+                except Exception:
+                    pass
+
+    def _format_last_backup(self) -> str:
         try:
-            data = self.monitoring.get_security_dashboard_data(user=self.owner_username, days=7)
+            _ok, _fail, last_success = self.monitoring._backup_audit_stats()
         except Exception:
-            data = {}
-        alerts = data.get("recent_alerts") or []
-        fingerprint = repr(
-            [(a.get("severity"), a.get("title"), a.get("detail"), a.get("time")) for a in alerts[:5]]
-        ) or "empty"
-        if not self._content_changed("alerts", fingerprint, force=force):
-            return
+            return "—"
+        if not last_success:
+            return "—"
+        try:
+            return last_success.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "—"
 
-        for child in self._alerts_list.winfo_children():
-            child.destroy()
-        if not alerts:
-            empty_state(
-                self._alerts_list,
-                self.theme,
-                icon="shield-check",
-                title="Everything looks healthy",
-                message="No active database alerts detected.",
-                tone="success",
-            )
-            return
-        for alert in alerts[:5]:
-            alert_item_compact(
-                self._alerts_list,
-                self.theme,
-                severity=str(alert.get("severity", "info")),
-                title=str(alert.get("title", "Alert")),
-                detail=str(alert.get("detail", "")),
-                time_text=str(alert.get("time", "")),
-            )
+    def _format_next_backup(self) -> str:
+        try:
+            from backend.services.scheduler_service import SchedulerService
 
-    def _apply_database_activity_panel(self, metrics: dict) -> None:
-        connected = bool(metrics.get("connected"))
-        conn_n = int(metrics.get("connections_num") or 0) if connected else 0
-        max_c = metrics.get("max_connections") if connected else None
-        slow = int(metrics.get("slow_num") or 0) if connected else 0
-        tput = metrics.get("throughput") if connected else None
-        blocked = int(metrics.get("blocked_sessions") or 0) if connected else 0
-        long_q = int(metrics.get("long_running") or metrics.get("long_queries") or 0) if connected else 0
+            jobs = SchedulerService().list_jobs()
+        except Exception:
+            return "Not configured"
+        next_runs = [j.get("next_run") for j in jobs if j.get("next_run") and j.get("next_run") != "None"]
+        if not next_runs:
+            return "Not configured"
+        raw = str(next_runs[0])
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return raw[:16] if len(raw) > 16 else raw
 
-        values = {
-            "active_sessions": str(conn_n) if connected else "—",
-            "blocked_sessions": str(blocked) if connected else "—",
-            "long_queries": str(long_q) if connected else "—",
-            "slow_queries": str(slow) if connected else "—",
-            "tps": f"{float(tput):.0f}" if connected and tput is not None else "—",
-            "connections": (
-                f"{conn_n}" if connected else "—"
-            ),
-        }
-        for key, text in values.items():
-            lbl = self._activity_metric_labels.get(key)
-            if lbl:
-                lbl.configure(text=text)
+    def _count_running_backups(self) -> int:
+        try:
+            jobs = self.monitoring.list_live_jobs()
+        except Exception:
+            return 0
+        return sum(
+            1
+            for j in jobs
+            if str(j.get("operation", "")).lower() == "backup"
+            and str(j.get("status", "")).lower() in {"running", "pending"}
+        )
 
-        if self._conn_limit_label:
-            if connected:
-                self._conn_limit_label.configure(text=f"{conn_n} / {max_c or '—'}")
-            else:
-                self._conn_limit_label.configure(text="— / —")
+    @staticmethod
+    def _format_job_duration(started_at: str | None) -> str:
+        if not started_at:
+            return "—"
+        try:
+            started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            seconds = max(0, int((datetime.now(started.tzinfo) - started).total_seconds()))
+        except Exception:
+            return "—"
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, sec = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m {sec}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m"
 
     def _apply_backup_recovery_panel(self) -> None:
         try:
@@ -832,13 +1097,13 @@ class DashboardView(BaseView):
             )
         except Exception:
             ok, failed = 0, 0
-        running, _pending = self.monitoring.count_live_jobs()
+        running = self._count_running_backups()
         mapping = {
             "successful": str(ok),
             "failed": str(failed),
             "running": str(running),
-            "last": "—" if ok == 0 else "Today",
-            "next": "Scheduled / Manual",
+            "last": self._format_last_backup(),
+            "next": self._format_next_backup(),
         }
         for key, text in mapping.items():
             lbl = self._backup_labels.get(key)
@@ -849,67 +1114,103 @@ class DashboardView(BaseView):
                 color = self.theme.c("error")
             elif key == "successful" and ok > 0:
                 color = self.theme.c("success")
+            elif key == "running" and running > 0:
+                color = self.theme.c("warning")
             lbl.configure(text=text, text_color=color)
 
     def _apply_automation_jobs_panel(self, *, force: bool = False) -> None:
         if not self._jobs_list:
             return
-        running, pending = self.monitoring.count_live_jobs()
-        fingerprint = f"{running}:{pending}"
+        try:
+            jobs = self.monitoring.list_live_jobs()
+        except Exception:
+            jobs = []
+        fingerprint = repr(
+            [
+                (
+                    j.get("id"),
+                    j.get("status"),
+                    j.get("name"),
+                    j.get("progress"),
+                    j.get("target"),
+                    j.get("started_at"),
+                )
+                for j in jobs
+            ]
+        ) or "empty"
         if not self._content_changed("jobs", fingerprint, force=force):
             return
 
         for child in self._jobs_list.winfo_children():
             child.destroy()
-        if running == 0 and pending == 0:
-            empty_state(
-                self._jobs_list,
-                self.theme,
-                icon="briefcase",
-                title="No active jobs",
-                message="Backup and restore jobs will appear here when running.",
-                tone="info",
-            )
-            return
-        if running:
-            row = ctk.CTkFrame(self._jobs_list, fg_color=self.theme.c("bg_elevated"), corner_radius=8)
-            row.pack(fill="x", pady=4)
-            inner = ctk.CTkFrame(row, fg_color="transparent")
-            inner.pack(fill="x", padx=10, pady=8)
-            ctk.CTkLabel(
-                inner,
-                text="Backup / Restore",
-                font=font(self.theme, 12, weight="bold"),
-                text_color=self.theme.c("text_primary"),
-            ).pack(anchor="w")
-            ctk.CTkLabel(
-                inner,
-                text=f"Running · {running} active",
-                font=font(self.theme, 11),
-                text_color=self.theme.c("primary"),
-            ).pack(anchor="w")
-            bar = ctk.CTkProgressBar(
-                inner,
-                height=6,
-                progress_color=self.theme.c("primary"),
-                fg_color=self.theme.c("bg_card"),
-            )
-            bar.pack(fill="x", pady=(6, 0))
-            bar.set(0.65)
-        if pending:
-            ctk.CTkLabel(
-                self._jobs_list,
-                text=f"{pending} job(s) pending in queue",
-                font=font(self.theme, 11),
-                text_color=self.theme.c("warning"),
-                anchor="w",
-            ).pack(anchor="w", pady=(6, 0))
+        if self._jobs_count_label:
+            self._jobs_count_label.configure(text=str(len(jobs)))
 
-    def _apply_recent_activity_panel(self, *, force: bool = False) -> None:
+        if not jobs:
+            ctk.CTkLabel(
+                self._jobs_list,
+                text="No active jobs currently running.",
+                font=font(self.theme, 12),
+                text_color=self.theme.c("text_muted"),
+                anchor="w",
+            ).pack(anchor="w")
+            return
+
+        for job in jobs[:4]:
+            line = ctk.CTkFrame(self._jobs_list, fg_color="transparent")
+            line.pack(fill="x", pady=3)
+            name = str(job.get("name") or job.get("operation") or "Job")
+            if len(name) > 36:
+                name = name[:33] + "…"
+            ctk.CTkLabel(
+                line,
+                text=name,
+                font=font(self.theme, 12),
+                text_color=self.theme.c("text_primary"),
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+            progress = job.get("progress")
+            if progress is not None:
+                try:
+                    right_text = f"{int(float(progress) * 100)}%"
+                except (TypeError, ValueError):
+                    right_text = str(job.get("status") or "").title()
+            else:
+                right_text = str(job.get("status") or "Running").title()
+            ctk.CTkLabel(
+                line,
+                text=right_text,
+                font=font(self.theme, 11, weight="bold"),
+                text_color=self.theme.c("primary"),
+                anchor="e",
+            ).pack(side="right")
+
+    def _friendly_operation_title(self, action: str, status: str) -> str:
+        action_l = action.lower().replace("_", " ").strip()
+        status_l = status.lower()
+        mapping = {
+            ("backup", "success"): "Backup completed",
+            ("backup", "failed"): "Backup failed",
+            ("restore", "success"): "Restore completed",
+            ("restore", "failed"): "Restore failed",
+            ("connect", "success"): "Database connection established",
+            ("connect", "failed"): "Database connection failed",
+            ("migration", "success"): "Migration executed",
+            ("migration", "failed"): "Migration failed",
+            ("patch", "success"): "Patching executed",
+            ("patch_execute", "success"): "Patching executed",
+            ("patch", "failed"): "Patching failed",
+        }
+        for (act, st), title in mapping.items():
+            if action_l.startswith(act) and status_l == st:
+                return title
+        return f"{action_l.title()} {status_l}"
+
+    def _apply_recent_operations_panel(self, *, force: bool = False) -> None:
         if not self._activity_list:
             return
         try:
-            events = self.monitoring.get_recent_activity(limit=8)
+            events = self.monitoring.get_recent_activity(limit=5)
         except Exception:
             events = []
         fingerprint = repr(
@@ -921,14 +1222,13 @@ class DashboardView(BaseView):
         for child in self._activity_list.winfo_children():
             child.destroy()
         if not events:
-            empty_state(
+            ctk.CTkLabel(
                 self._activity_list,
-                self.theme,
-                icon="activity",
-                title="No recent activity",
-                message="Connect, backup and restore events will show up here.",
-                tone="info",
-            )
+                text="No recent operations yet.",
+                font=font(self.theme, 12),
+                text_color=self.theme.c("text_muted"),
+                anchor="w",
+            ).pack(anchor="w")
             return
         for event in events:
             status = str(event.get("status", "info")).lower()
@@ -940,15 +1240,39 @@ class DashboardView(BaseView):
                 tone = "warning"
             else:
                 tone = "info"
-            activity_item(
-                self._activity_list,
-                self.theme,
-                time_text=str(event.get("time", "")),
-                title=str(event.get("action", "event")).replace("_", " ").title(),
-                detail=str(event.get("resource", "") or event.get("user", "")),
-                tone=tone,
+            action = str(event.get("action", "event"))
+            title = self._friendly_operation_title(action, status)
+            row = ctk.CTkFrame(self._activity_list, fg_color="transparent")
+            row.pack(fill="x", pady=6)
+            badge = lucide_icon_badge(
+                row,
+                "activity",
+                self.theme.c("success") if tone == "success" else self.theme.c(
+                    "error" if tone == "error" else "primary"
+                ),
+                self.theme.c("bg_elevated"),
+                box=28,
+                icon_size=14,
+                radius=8,
             )
-
+            badge.pack(side="left")
+            ctk.CTkLabel(
+                row,
+                text=title,
+                font=font(self.theme, 13),
+                text_color=self.theme.c("text_primary"),
+                anchor="w",
+            ).pack(side="left", padx=(10, 0), fill="x", expand=True)
+            link = ctk.CTkLabel(
+                row,
+                text="Activity log",
+                font=font(self.theme, 12),
+                text_color=self.theme.c("text_secondary"),
+                cursor="hand2",
+            )
+            link.pack(side="right")
+            link.bind("<Button-1>", lambda _e: self._nav("logs"))
+            row.bind("<Button-1>", lambda _e: self._nav("logs"))
 
     def _apply_db_performance_dashboard(self, metrics: dict | None = None) -> None:
         if not self._db_perf_refs:
@@ -958,6 +1282,41 @@ class DashboardView(BaseView):
 
         refs = self._db_perf_refs
         connected = bool(metrics.get("connected"))
+        update_chart = refs.get("update_perf_chart")
+        sparks = refs.get("sparklines") or {}
+
+        conn_n = int(metrics.get("connections_num") or 0)
+        latency_lbl = sparks.get("latency")
+        if latency_lbl:
+            if not connected:
+                latency_lbl.configure(text="—")
+            else:
+                lat_ms = metrics.get("latency_ms")
+                latency_lbl.configure(
+                    text=f"{lat_ms:.0f} ms" if lat_ms is not None else "N/A"
+                )
+        connections_lbl = sparks.get("connections")
+        if connections_lbl:
+            connections_lbl.configure(text="—" if not connected else str(conn_n))
+        slow_lbl = sparks.get("slow")
+        if slow_lbl:
+            if not connected or metrics.get("slow_num") is None:
+                slow_lbl.configure(text="N/A" if connected else "—")
+            else:
+                slow_lbl.configure(text=str(metrics.get("slow_num")))
+        throughput_lbl = sparks.get("throughput")
+        if throughput_lbl:
+            if not connected:
+                throughput_lbl.configure(text="—")
+            else:
+                tps = metrics.get("throughput")
+                label = str(metrics.get("throughput_label") or "").lower()
+                if tps is None or (
+                    "transaction" not in label and float(tps or 0) <= 0
+                ):
+                    throughput_lbl.configure(text="N/A")
+                else:
+                    throughput_lbl.configure(text=f"{float(tps):.0f}")
 
         if connected:
             self._db_samples.append({
@@ -965,217 +1324,22 @@ class DashboardView(BaseView):
                 "latency": float(metrics.get("latency_ms") or 0),
                 "connections": int(metrics.get("connections_num") or 0),
                 "slow": int(metrics.get("slow_num") or 0),
-                "replication": float(metrics.get("replication_sec") or 0),
+                "throughput": float(metrics.get("throughput") or 0),
             })
 
-        status_lbl = refs.get("kpi_status")
-        if status_lbl:
-            if connected:
-                status_lbl.configure(text="Healthy", text_color=self.theme.c("success"))
-            else:
-                status_lbl.configure(text="Offline", text_color=self.theme.c("error"))
-
-        uptime_lbl = refs.get("kpi_uptime")
-        if uptime_lbl:
-            uptime_lbl.configure(text=str(metrics.get("uptime", "—")))
-
-        conn_n = int(metrics.get("connections_num") or 0)
-        max_c = metrics.get("max_connections")
-        conn_lbl = refs.get("kpi_connections")
-        if conn_lbl:
-            conn_lbl.configure(text=str(conn_n))
-            if hasattr(conn_lbl, "_subtitle"):
-                conn_lbl._subtitle.configure(text=f"Active / {max_c or '—'} Max")  # type: ignore[attr-defined]
-
-        lat_lbl = refs.get("kpi_latency")
-        if lat_lbl:
-            lat_ms = metrics.get("latency_ms")
-            lat_lbl.configure(text=f"{lat_ms:.1f} ms" if lat_ms is not None else "—")
-
-        tput_lbl = refs.get("kpi_throughput")
-        if tput_lbl:
-            tput = metrics.get("throughput")
-            tput_lbl.configure(text=f"{float(tput):.0f}" if connected and tput is not None else "—")
-            if hasattr(tput_lbl, "_subtitle"):
-                label = str(metrics.get("throughput_label") or "Lifetime counter")
-                tput_lbl._subtitle.configure(text=label)  # type: ignore[attr-defined]
-
-        update_chart = refs.get("update_perf_chart")
-        if update_chart:
-            update_chart(list(self._db_samples))
-
-        sparks = refs.get("sparklines") or {}
-        if sparks:
-            # NOTE: `.get(key, ctk.CTkLabel())` looks like a safe fallback but
-            # isn't — Python evaluates the default argument eagerly, so
-            # ctk.CTkLabel() was being constructed (and crashing, missing its
-            # required `master`) on every call regardless of whether the key
-            # existed. Only configure a label when it's actually present.
-            latency_lbl = sparks.get("latency")
-            if latency_lbl:
-                latency_lbl.configure(
-                    text=metrics.get("latency", "Connect a database") if not connected else metrics.get("latency", "—")
-                )
-            connections_lbl = sparks.get("connections")
-            if connections_lbl:
-                connections_lbl.configure(text="Offline" if not connected else str(conn_n))
-            slow_lbl = sparks.get("slow")
-            if slow_lbl:
-                slow_lbl.configure(text="—" if not connected else str(metrics.get("slow_num", "—")))
-            replication_lbl = sparks.get("replication")
-            if replication_lbl:
-                replication_lbl.configure(text=str(metrics.get("replication_lag", "N/A")))
-
-    def _apply_security_dashboard(self) -> None:
-        if not self._security_refs:
+        if not update_chart:
             return
-        try:
-            data = self.monitoring.get_security_dashboard_data(user=self.owner_username, days=7)
-        except Exception:
-            return
-
-        posture = data.get("posture") or {}
-        refs = self._security_refs
-
-        failed = refs.get("failed_logins")
-        if failed:
-            failed.configure(text=str(posture.get("failed_logins", 0)))
-
-        alerts_chip = refs.get("alerts_chip")
-        if alerts_chip:
-            alerts_chip.configure(text=str(posture.get("security_alerts", 0)))
-
-        compliance = refs.get("compliance")
-        if compliance:
-            comp_text = posture.get("compliance", "Compliant")
-            compliance.configure(text=comp_text)
-            if comp_text == "Compliant":
-                compliance.configure(
-                    fg_color=self.theme.c("success_muted"),
-                    text_color=self.theme.c("success"),
-                )
-            elif comp_text == "Needs Attention":
-                compliance.configure(
-                    fg_color=self.theme.c("warning_muted"),
-                    text_color=self.theme.c("warning"),
-                )
-            else:
-                compliance.configure(
-                    fg_color=self.theme.c("error_muted"),
-                    text_color=self.theme.c("error"),
-                )
-
-        update_donut = refs.get("update_donut")
-        if update_donut:
-            update_donut(data.get("overview") or {})
-
-        update_trend = refs.get("update_trend")
-        if update_trend:
-            update_trend(data.get("trend") or [])
-
-        recent_frame = refs.get("recent_frame")
-        if recent_frame:
-            alerts = data.get("recent_alerts") or []
-            fingerprint = repr(
-                [(a.get("severity"), a.get("title"), a.get("time")) for a in alerts]
-            ) or "empty"
-            if self._content_changed("security_alerts", fingerprint):
-                for child in recent_frame.winfo_children():
-                    child.destroy()
-                if not alerts:
-                    ctk.CTkLabel(
-                        recent_frame,
-                        text="No security alerts recorded.",
-                        font=ctk.CTkFont(size=12),
-                        text_color=self.theme.c("text_muted"),
-                    ).pack(anchor="w", pady=8)
-                else:
-                    for alert in alerts:
-                        security_alert_item(recent_frame, self.theme, alert)
-
-        risks_frame = refs.get("risks_frame")
-        if risks_frame:
-            risks = data.get("top_risks") or []
-            fingerprint = repr([(r.get("title"), r.get("score")) for r in risks]) or "empty"
-            if self._content_changed("security_risks", fingerprint):
-                for child in risks_frame.winfo_children():
-                    child.destroy()
-                if not risks:
-                    ctk.CTkLabel(
-                        risks_frame,
-                        text="No risks detected today.",
-                        font=ctk.CTkFont(size=12),
-                        text_color=self.theme.c("text_muted"),
-                    ).pack(anchor="w", pady=8)
-                else:
-                    for risk in risks:
-                        top_risk_row(risks_frame, self.theme, risk)
-
-    def _apply_health_dashboard(self, db_metrics: dict | None = None) -> None:
-        if not self._health_panel:
-            return
-        metrics = db_metrics if db_metrics is not None else self._last_db_metrics
-        saved = load_saved_servers(self.owner_username)
-        if not saved and self.owner_username:
-            saved = load_saved_servers()
-        saved_count = len(saved)
-
-        # App session is the source of truth for "are we connected?"
-        # Probe metrics refine health quality; they should not flip the row to
-        # "Not Connected" while the footer still shows Connected · mongodb.
-        session_active = bool(self.connection)
-        probe_ok = bool(metrics.get("connected")) if metrics else False
-
-        if session_active:
-            servers = f"{saved_count} Saved · 1 Active" if saved_count else "1 Active"
-        elif saved_count:
-            servers = f"{saved_count} Saved"
+        # Only plot real live samples — never invent a decorative series.
+        if connected and len(self._db_samples) >= 2:
+            update_chart(list(self._db_samples), message="")
         else:
-            servers = "None Saved"
-
-        if session_active:
-            try:
-                db_count = len(self._cached_server_databases())
-            except Exception:
-                db_count = 0
-            name = self.connection.saved_name or self.connection.name
-            engine = self.connection.db_type.value.upper()
-            suffix = f" · {db_count} DB{'s' if db_count != 1 else ''}" if db_count else ""
-            if probe_ok:
-                databases = f"Connected · {engine} {name}{suffix}"
-            else:
-                databases = f"Connected · {engine} {name} (checking…)"
-        else:
-            databases = "Not Connected"
-
-        backup_success, backup_failed = self.monitoring.count_audit_today(
-            actions=("backup",),
-            user=self.owner_username,
-        )
-        if backup_failed > 0:
-            backup = f"{backup_failed} Failed"
-        elif backup_success > 0:
-            backup = f"{backup_success} Successful"
-        else:
-            backup = "No Backups Today"
-
-        if not session_active:
-            replication = "N/A"
-        else:
-            replication = str(metrics.get("replication_lag") or "N/A")
-
-        self._health_panel.update_health(
-            servers=servers,
-            databases=databases,
-            backup=backup,
-            replication=replication,
-        )
+            update_chart(
+                [],
+                message="Illustrative chart only – actual telemetry required.",
+            )
 
     def _refresh_key_metrics(self) -> None:
         try:
-            ctx = self._backup_stats_context()
-            db_type = ctx.get("db_type")
-            # Prefer user-scoped list; fall back to all profiles so legacy rows still count.
             saved = load_saved_servers(self.owner_username)
             if not saved and self.owner_username:
                 saved = load_saved_servers()
@@ -1187,70 +1351,74 @@ class DashboardView(BaseView):
                 active_name = (self.connection.saved_name or self.connection.name or "").strip()
                 active_engine = self.connection.db_type.value.upper()
 
-            # Connected = live session only; registered = saved profiles.
             connected_count = 1 if self._is_actively_connected() else 0
             metrics = self._last_db_metrics or {}
-            healthy = 0
-            if connected_count:
-                healthy = 1 if self._connection_health_bucket(metrics) == "healthy" else 0
 
             active_jobs, pending_jobs = self.monitoring.count_live_jobs()
-            backup_success, backup_failed = self.monitoring.count_audit_today(
-                actions=("backup", "restore"), db_type=db_type, user=self.owner_username,
-            )
-            connect_success, connect_failed = self.monitoring.count_audit_today(
-                actions=("connect",), user=self.owner_username,
-            )
-            success_today = backup_success + connect_success
-            failed_today = backup_failed + connect_failed
-
-            try:
-                sec = self.monitoring.get_security_dashboard_data(user=self.owner_username, days=1)
-                alerts_n = int((sec.get("posture") or {}).get("security_alerts", 0))
-            except Exception:
-                alerts_n = failed_today
-
-            bak_ok, bak_fail = self.monitoring.count_audit_today(
+            _bak_ok, bak_fail = self.monitoring.count_audit_today(
                 actions=("backup",), user=self.owner_username,
             )
+            _restore_ok, restore_fail = self.monitoring.count_audit_today(
+                actions=("restore",), user=self.owner_username,
+            )
+            _connect_ok, connect_fail = self.monitoring.count_audit_today(
+                actions=("connect",), user=self.owner_username,
+            )
+            alerts_n = bak_fail + restore_fail + connect_fail
+
+            if connected_count:
+                bucket = self._connection_health_bucket(metrics)
+                if bucket == "critical":
+                    system_status, system_secondary = "Critical", "Session needs attention"
+                elif bucket == "warning":
+                    system_status, system_secondary = "Warning", "Elevated load or degraded"
+                else:
+                    system_status, system_secondary = "Healthy", "Live session OK"
+            else:
+                system_status, system_secondary = "Offline", "No active connection"
 
             for key, value in {
                 "linux_servers": str(saved_count),
                 "databases": str(connected_count),
-                "healthy_dbs": str(healthy),
-                "active_jobs": str(active_jobs),
                 "active_alerts": str(alerts_n),
                 "failed_today": str(bak_fail),
+                "active_jobs": str(active_jobs),
+                "system_status": system_status,
             }.items():
                 if key in self._metric_values:
-                    self._metric_values[key].configure(text=value)
+                    color = self.theme.c("text_primary")
+                    if key == "active_alerts" and alerts_n:
+                        color = self.theme.c("error")
+                    elif key == "failed_today" and bak_fail:
+                        color = self.theme.c("error")
+                    elif key == "system_status":
+                        if system_status == "Healthy":
+                            color = self.theme.c("success")
+                        elif system_status == "Warning":
+                            color = self.theme.c("warning")
+                        elif system_status == "Critical":
+                            color = self.theme.c("error")
+                    self._metric_values[key].configure(text=value, text_color=color)
 
             if active_name:
-                saved_secondary = f"Active: {active_name} · {active_engine}"
+                registered_secondary = f"Active: {active_name} · {active_engine}"
             elif saved_count:
-                saved_secondary = f"{saved_count} registered · none active"
+                registered_secondary = f"{saved_count} registered · none active"
             else:
-                saved_secondary = "No saved profiles"
+                registered_secondary = "No saved profiles"
 
             if saved_count:
                 databases_secondary = f"{connected_count} of {saved_count} registered"
             else:
                 databases_secondary = "Connected" if connected_count else "Not connected"
 
-            if healthy:
-                healthy_secondary = "Passing health checks"
-            elif connected_count:
-                healthy_secondary = "Needs attention"
-            else:
-                healthy_secondary = "None online"
-
             sec_map = {
-                "linux_servers": saved_secondary,
+                "linux_servers": registered_secondary,
                 "databases": databases_secondary,
-                "healthy_dbs": healthy_secondary,
-                "active_jobs": f"{pending_jobs} queued" if pending_jobs else "None running",
                 "active_alerts": "Needs attention" if alerts_n else "All clear",
-                "failed_today": f"{bak_ok} succeeded today",
+                "failed_today": f"{_bak_ok} succeeded today",
+                "active_jobs": f"{pending_jobs} queued" if pending_jobs else "None running",
+                "system_status": system_secondary,
             }
             for key, text in sec_map.items():
                 if key in self._metric_secondary:
@@ -1258,216 +1426,96 @@ class DashboardView(BaseView):
         except Exception:
             pass
 
-    def _backup_stats_context(self) -> dict:
-        profile = self.get_active_profile()
-        local_dir: str | None = None
-        remote_dir = "/mnt/backup"
-        list_remote = False
-        db_type: DatabaseType | None = None
-
-        if self.connection:
-            db_type = self.connection.db_type
-            lookup = self.connection.saved_name or self.connection.name
-            for server in load_saved_servers(self.owner_username):
-                if server.name == lookup and server.db_type == db_type.value:
-                    if server.local_output_dir:
-                        local_dir = server.local_output_dir
-                    if server.remote_backup_dir:
-                        remote_dir = server.remote_backup_dir
-                    break
-            if self.connection.remote_backup_dir:
-                remote_dir = self.connection.remote_backup_dir
-            if db_type == DatabaseType.MONGODB and self.connection.ssh_enabled:
-                list_remote = True
-
-        return {
-            "profile": profile,
-            "db_type": db_type,
-            "list_remote": list_remote,
-            "remote_dir": remote_dir,
-            "local_dir": local_dir,
-        }
-
-    def _set_gauge(
-        self,
-        key: str,
-        *,
-        pct: float,
-        value: str,
-        detail: str,
-        color_key: str,
-    ) -> None:
-        gauge = self._gauges.get(key)
-        if not gauge:
-            return
-        bar, val_lbl, detail_lbl = gauge
-        bar.set(min(1.0, max(0.0, pct / 100)))
-        bar.configure(progress_color=_gauge_color(self.theme, pct, color_key))
-        val_lbl.configure(text=value)
-        detail_lbl.configure(text=detail)
-
-    def _apply_system_metrics(self, sys_m: dict) -> None:
-        self._last_sys_metrics = sys_m
-        cpu = float(sys_m.get("cpu_percent", 0))
-        mem = sys_m.get("memory") or {}
-        mem_pct = float(mem.get("percent", 0))
-        mem_used_gb = float(mem.get("used_mb", 0)) / 1024
-        mem_total_gb = float(mem.get("total_mb", 0)) / 1024
-
-        disk = sys_m.get("disk") or {}
-        disk_pct = float(disk.get("percent", 0))
-        disk_used = float(disk.get("used_gb", 0))
-        disk_total = float(disk.get("total_gb", 0))
-        disk_path = str(disk.get("path", "")).rstrip("\\/")
-
-        net = sys_m.get("network") or {}
-        net_pct = float(net.get("throughput_pct", 0))
-        sent_label = net.get("sent_label", "0 B/s")
-        recv_label = net.get("recv_label", "0 B/s")
-        total_label = net.get("total_label", "0 B/s")
-
-        cpu_count = int(sys_m.get("cpu_count", 0))
-        cpu_freq = sys_m.get("cpu_freq_mhz")
-        cpu_detail = f"{cpu_count} logical cores"
-        if cpu_freq:
-            cpu_detail += f" · {cpu_freq:.0f} MHz"
-
-        host = sys_m.get("host") or {}
-        hostname = host.get("hostname", "—")
-        os_name = host.get("os", "—")
-        uptime = host.get("uptime_label", "—")
-        processes = str(host.get("process_count", "—"))
-
-        self._set_gauge(
-            "cpu",
-            pct=cpu,
-            value=f"{cpu:.0f}%",
-            detail=cpu_detail,
-            color_key="metric_blue",
-        )
-        self._set_gauge(
-            "ram",
-            pct=mem_pct,
-            value=f"{mem_pct:.0f}%",
-            detail=f"{_format_gb(mem_used_gb)} / {_format_gb(mem_total_gb)}",
-            color_key="metric_purple",
-        )
-        self._set_gauge(
-            "storage",
-            pct=disk_pct,
-            value=f"{disk_pct:.0f}%",
-            detail=f"{_format_gb(disk_used)} / {_format_gb(disk_total)} on {disk_path or 'system'}",
-            color_key="metric_amber",
-        )
-        self._set_gauge(
-            "network",
-            pct=net_pct,
-            value=total_label,
-            detail=f"↑ {sent_label}   ↓ {recv_label}",
-            color_key="metric_green",
-        )
-
-        host_values = {
-            "hostname": hostname,
-            "os": os_name,
-            "uptime": uptime,
-            "cpu": f"{cpu_count} cores" + (f" @ {cpu_freq:.0f} MHz" if cpu_freq else ""),
-            "memory": f"{_format_gb(mem_total_gb)} total",
-            "disk": f"{_format_gb(disk_total)} on {disk_path or 'system'}",
-            "processes": processes,
-        }
-        for key, text in host_values.items():
-            lbl = self._host_labels.get(key)
-            if lbl:
-                lbl.configure(text=text)
-
-        if self._host_status_chip:
-            stress = max(cpu, mem_pct, disk_pct)
-            if stress >= 90:
-                self._host_status_chip.configure(
-                    text="CRITICAL",
-                    fg_color=self.theme.c("error_muted"),
-                    text_color=self.theme.c("error"),
-                )
-            elif stress >= 75:
-                self._host_status_chip.configure(
-                    text="ELEVATED",
-                    fg_color=self.theme.c("warning_muted"),
-                    text_color=self.theme.c("warning"),
-                )
-            else:
-                self._host_status_chip.configure(
-                    text="HEALTHY",
-                    fg_color=self.theme.c("success_muted"),
-                    text_color=self.theme.c("success"),
-                )
-
     def _poll_database_metrics(self) -> None:
-        if self._db_poll_busy or not self.winfo_exists():
+        if not self.winfo_exists():
+            return
+        if self._db_poll_busy:
+            # A connect/disconnect arrived while a poll was in flight — rerun after.
+            self._db_poll_pending = True
             return
         connection = self.connection
+        token = id(connection) if connection is not None else 0
         self._db_poll_busy = True
+        self._db_poll_pending = False
+        self._db_poll_token = token
 
         def worker() -> None:
             try:
                 metrics = fetch_database_performance(connection)
             except Exception:
                 metrics = {"connected": False}
-            rows: list = []
-            if connection is not None:
-                try:
-                    rows = fetch_server_databases(connection)
-                except Exception:
-                    rows = []
             try:
-                self.after(0, lambda m=metrics, r=rows: self._finish_db_poll(m, r))
+                self.after(0, lambda m=metrics, t=token: self._finish_db_poll(m, t))
             except RuntimeError:
-                pass
+                # Tk rejects after() off the main loop — never leave the poll latch stuck.
+                self._db_poll_busy = False
+                self._db_poll_result = (metrics, token)
 
         threading.Thread(target=worker, daemon=True).start()
+        self.after(100, self._drain_db_poll_result)
 
-    def _finish_db_poll(self, metrics: dict, db_rows: list | None = None) -> None:
+    def _drain_db_poll_result(self) -> None:
+        """Apply metrics posted when a worker could not schedule after() itself."""
+        if not self.winfo_exists():
+            return
+        result = self._db_poll_result
+        if result is not None:
+            self._db_poll_result = None
+            metrics, token = result
+            self._finish_db_poll(metrics, token)
+            return
+        if self._db_poll_busy:
+            self.after(100, self._drain_db_poll_result)
+
+    def _finish_db_poll(self, metrics: dict, token: int | None = None) -> None:
         self._db_poll_busy = False
         if not self._timers_active or not self.winfo_exists():
             return
-        if db_rows is not None:
-            import time
-
-            self._db_list_cache = (time.monotonic(), db_rows)
+        current = id(self.connection) if self.connection is not None else 0
+        stale = token is not None and token != current
+        if stale or self._db_poll_pending:
+            self._db_poll_pending = False
+            self._poll_database_metrics()
+            if stale:
+                return
         self._last_db_metrics = metrics
         self._apply_db_performance_dashboard(metrics)
-        self._apply_health_dashboard(metrics)
         self._apply_command_center_panels(metrics)
         self._refresh_key_metrics()
         self._update_status_footer_from_metrics(metrics)
 
     def _update_status_footer_from_metrics(self, metrics: dict) -> None:
-        """Keep the shell footer in sync with the same poll as the dashboard."""
-        updater = None
-        widget = self.winfo_toplevel()
-        if callable(getattr(widget, "update_status_footer", None)):
-            updater = widget.update_status_footer
-        if not callable(updater):
-            return
         if self.connection:
             name = self.connection.saved_name or self.connection.name
             conn_status = f"● Connected · {name}"
         else:
             conn_status = "● Disconnected"
 
-        version = str(metrics.get("version") or "").strip() or "—"
-        uptime = str(metrics.get("uptime") or "—")
+        version = _short_version(str(metrics.get("version") or "").strip())
+        uptime = _pad_uptime(str(metrics.get("uptime") or metrics.get("uptime_human") or "—"))
         if metrics.get("connected"):
-            sessions = str(int(metrics.get("connections_num") or 0))
+            sessions = str(int(metrics.get("connections_num") or metrics.get("sessions") or 0))
         else:
             sessions = "—"
 
-        updater(
-            connection_status=conn_status,
-            version=version,
-            uptime=uptime,
-            sessions=sessions,
-        )
+        payload = {
+            "connection_status": conn_status,
+            "version": version,
+            "uptime": uptime,
+            "sessions": sessions,
+        }
+
+        widget = self.winfo_toplevel()
+        if callable(getattr(widget, "update_status_footer", None)):
+            widget.update_status_footer(**payload)
+
+        # Also paint the classic navy status strip (image-2).
+        parent = self.master
+        while parent is not None:
+            if callable(getattr(parent, "update_session_status", None)):
+                parent.update_session_status(**payload)
+                break
+            parent = getattr(parent, "master", None)
 
     def _dashboard_visible(self) -> bool:
         try:
@@ -1475,55 +1523,27 @@ class DashboardView(BaseView):
         except Exception:
             return False
 
-    def _request_system_metrics(self) -> None:
-        if self._sys_poll_busy:
-            return
-        self._sys_poll_busy = True
-        monitoring = self.monitoring
-
-        def worker() -> None:
-            sys_m = None
-            try:
-                sys_m = monitoring.get_system_metrics()
-            except Exception:
-                pass
-            try:
-                self.after(0, lambda m=sys_m: self._finish_system_poll(m))
-            except RuntimeError:
-                pass
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _finish_system_poll(self, sys_m: dict | None) -> None:
-        self._sys_poll_busy = False
-        if not self._timers_active or not self.winfo_exists() or not sys_m:
-            return
-        self._apply_system_metrics(sys_m)
-
     def _request_live_poll(self) -> None:
-        """Refresh gauges and database stats without blocking the UI thread."""
         if not self._timers_active or not self.winfo_exists():
             return
-        self._request_system_metrics()
         if self.connection:
             self._poll_database_metrics()
         else:
             self._apply_command_center_panels()
             self._refresh_key_metrics()
-            if self._health_panel:
-                self._apply_health_dashboard()
-        self._apply_security_dashboard()
+            empty = fetch_database_performance(None)
+            self._last_db_metrics = empty
+            self._apply_db_performance_dashboard(empty)
+            self._update_status_footer_from_metrics(empty)
 
-    def _schedule_system_poll(self) -> None:
+    def _schedule_live_poll(self) -> None:
         if not self._timers_active or not self.winfo_exists():
             return
-        # Hidden pages must not keep querying the database or the host.
         if self._dashboard_visible():
             self._request_live_poll()
-        self._poll_job = self.after(10000, self._schedule_system_poll)
+        self._poll_job = self.after(10000, self._schedule_live_poll)
 
     def resume(self) -> None:
-        """Restart live updates when the dashboard is shown again."""
         self._request_live_poll()
 
     def refresh(self, *, force: bool = False) -> None:
@@ -1536,15 +1556,13 @@ class DashboardView(BaseView):
                 empty = fetch_database_performance(None)
                 self._last_db_metrics = empty
                 self._apply_db_performance_dashboard(empty)
-                self._apply_health_dashboard(empty)
+                self._update_status_footer_from_metrics(empty)
 
-            self._apply_security_dashboard()
-            self._apply_command_center_panels()
+            self._apply_command_center_panels(force=True)
 
             if self.sidebar_refresh:
                 self.sidebar_refresh()
 
-            self._request_system_metrics()
             if self.connection:
                 self._poll_database_metrics()
 

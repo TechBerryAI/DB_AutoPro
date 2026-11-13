@@ -510,17 +510,75 @@ class MonitoringService:
 
     def count_live_jobs(self) -> tuple[int, int]:
         """Return (running, pending) in-memory backup/restore operations."""
-        from backend.services import backup_service, restore_service
-
-        running = 0
-        pending = 0
-        for module in (backup_service, restore_service):
-            for op in getattr(module, "_operations", {}).values():
-                if op.status == OperationStatus.RUNNING:
-                    running += 1
-                elif op.status == OperationStatus.PENDING:
-                    pending += 1
+        jobs = self.list_live_jobs()
+        running = sum(1 for j in jobs if j.get("status") == "running")
+        pending = sum(1 for j in jobs if j.get("status") == "pending")
         return running, pending
+
+    def list_live_jobs(self) -> list[dict]:
+        """Return in-flight backup/restore/migration/patch jobs for the dashboard."""
+        from backend.services import backup_service, migration_service, restore_service
+
+        jobs: list[dict] = []
+        sources = (
+            ("Backup", backup_service),
+            ("Restore", restore_service),
+            ("Migration", migration_service),
+        )
+        for op_type, module in sources:
+            for op in getattr(module, "_operations", {}).values():
+                status = getattr(op.status, "value", str(op.status)).lower()
+                if status not in {"running", "pending"}:
+                    continue
+                details = getattr(op, "details", None) or {}
+                target = (
+                    str(details.get("database") or details.get("profile") or "")
+                    or str(getattr(op, "output_path", "") or "")
+                    or "—"
+                )
+                started = getattr(op, "started_at", None)
+                jobs.append(
+                    {
+                        "id": getattr(op, "operation_id", ""),
+                        "name": str(getattr(op, "message", "") or op_type),
+                        "operation": op_type,
+                        "target": target,
+                        "status": status,
+                        "progress": details.get("progress"),
+                        "db_type": details.get("db_type", ""),
+                        "started_at": started.isoformat() if started is not None else None,
+                    }
+                )
+
+        try:
+            for entry in self.patch_service.get_history():
+                status = getattr(entry.status, "value", str(entry.status)).lower()
+                if status != "running":
+                    continue
+                started = getattr(entry, "executed_at", None)
+                jobs.append(
+                    {
+                        "id": getattr(entry, "patch_id", ""),
+                        "name": str(
+                            getattr(entry, "patch_name", "")
+                            or getattr(entry, "description", "")
+                            or "Patch"
+                        ),
+                        "operation": "Patching",
+                        "target": str(
+                            getattr(entry, "target_database", "")
+                            or getattr(entry, "target_host", "")
+                            or "—"
+                        ),
+                        "status": status,
+                        "progress": None,
+                        "db_type": "",
+                        "started_at": started.isoformat() if started is not None else None,
+                    }
+                )
+        except Exception:
+            pass
+        return jobs
 
     def _list_backups_for_context(
         self,

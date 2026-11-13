@@ -39,8 +39,9 @@ def test_describe_backup_command_shows_remote_pg_dump_over_ssh():
     assert "ssh ubuntu@192.168.1.57" in preview
     assert "pg_dump -h 127.0.0.1 -p 5432" in preview
     assert "--format=custom" in preview
-    assert "-f -" in preview
-    assert "Streams pg_dump over SSH" in preview
+    assert "-f /tmp/<output.dump>" in preview
+    assert "-f -" not in preview
+    assert "cannot stream to stdout" in preview
     assert "SSH tunnel" not in preview
 
 
@@ -66,6 +67,37 @@ def test_describe_backup_command_pg_plain_sql_format():
     assert "--format=plain" in preview
     assert "<output.sql>" in preview
     assert "--format=custom" not in preview
+
+
+def test_describe_backup_command_pg_plain_sql_over_ssh_still_streams():
+    conn = ConnectionInfo(
+        host="127.0.0.1",
+        port=59495,
+        database="postgres",
+        username="postgres",
+        password="secret",
+        extra_options={
+            "ssh_enabled": True,
+            "ssh_host": "192.168.1.57",
+            "linux_username": "ubuntu",
+            "db_host": "192.168.1.57",
+            "db_port": 5432,
+        },
+    )
+    request = BackupRequest(
+        profile="default",
+        db_type=DatabaseType.POSTGRESQL,
+        method=BackupMethod.PG_DUMP,
+        backup_mode=BackupMode.FULL,
+        database="postgres",
+        pg_dump_format=PgDumpFormat.PLAIN,
+    )
+    with patch("backend.services.backup_catalog.resolve_connection", return_value=conn):
+        preview = describe_backup_command(request)
+
+    assert "-f -" in preview
+    assert "--format=plain" in preview
+    assert "Streams pg_dump over SSH" in preview
 
 
 def test_describe_backup_command_pg_tar_format():

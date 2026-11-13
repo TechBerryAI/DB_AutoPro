@@ -23,6 +23,10 @@ ENTRY_HEIGHT = 36
 BODY_PAD_X = 28
 BODY_PAD_Y = 24
 FORM_WIDTH = 360
+# Matches deployment/assets/DataAutomationPro.ico (navy / dark blue).
+LOGO_NAVY = "#111827"
+LOGO_NAVY_HOVER = "#1E293B"
+LOGO_NAVY_MUTED = "#E8EEF5"
 _MODE_SIZES = {
     "login": (420, 520),
     "register": (420, 680),
@@ -107,12 +111,12 @@ class AuthDialog(ctk.CTk):
                 pass
 
     def _brand_mark(self) -> None:
-        """Compact product mark — matches slim sidebar brand."""
+        """Compact product mark — same navy as the window logo."""
         ctk.CTkLabel(
             self.form_frame,
             text="DB Automation Pro",
             font=font(self.theme, 12, weight="bold"),
-            text_color=self.theme.c("primary"),
+            text_color=LOGO_NAVY,
             anchor="w",
         ).pack(fill="x", pady=(0, 16))
 
@@ -121,7 +125,7 @@ class AuthDialog(ctk.CTk):
             self.form_frame,
             text=title,
             font=font(self.theme, 20, weight="bold"),
-            text_color=self.theme.c("text_primary"),
+            text_color=LOGO_NAVY,
             anchor="w",
             wraplength=FORM_WIDTH,
             justify="left",
@@ -233,8 +237,8 @@ class AuthDialog(ctk.CTk):
             height=28,
         )
         back.configure(
-            text_color=self.theme.c("text_secondary"),
-            hover_color=self.theme.c("bg_card_hover"),
+            text_color=LOGO_NAVY,
+            hover_color=LOGO_NAVY_MUTED,
             font=font(self.theme, 12),
             anchor="w",
         )
@@ -274,10 +278,10 @@ class AuthDialog(ctk.CTk):
             variable=self._remember_var,
             font=font(self.theme, 12),
             text_color=self.theme.c("text_secondary"),
-            fg_color=self.theme.c("primary"),
-            hover_color=self.theme.c("primary_hover"),
+            fg_color=LOGO_NAVY,
+            hover_color=LOGO_NAVY_HOVER,
             border_color=self.theme.c("border"),
-            checkmark_color=self.theme.c("text_on_primary"),
+            checkmark_color="#FFFFFF",
             corner_radius=4,
             command=self._on_remember_toggled,
         ).pack(anchor="w", pady=(14, 0))
@@ -294,7 +298,12 @@ class AuthDialog(ctk.CTk):
             height=36,
             width=FORM_WIDTH,
         )
-        self.login_btn.configure(corner_radius=self.theme.radius("sm"))
+        self.login_btn.configure(
+            corner_radius=self.theme.radius("sm"),
+            fg_color=LOGO_NAVY,
+            hover_color=LOGO_NAVY_HOVER,
+            text_color="#FFFFFF",
+        )
         self.login_btn.pack(fill="x", pady=(20, 8))
 
         create = ghost_button(
@@ -305,8 +314,8 @@ class AuthDialog(ctk.CTk):
             height=32,
         )
         create.configure(
-            text_color=self.theme.c("text_secondary"),
-            hover_color=self.theme.c("bg_card_hover"),
+            text_color=LOGO_NAVY,
+            hover_color=LOGO_NAVY_MUTED,
             font=font(self.theme, 12),
         )
         create.pack(fill="x", pady=(2, 0))
@@ -363,7 +372,12 @@ class AuthDialog(ctk.CTk):
             height=36,
             width=FORM_WIDTH,
         )
-        register_btn.configure(corner_radius=self.theme.radius("sm"))
+        register_btn.configure(
+            corner_radius=self.theme.radius("sm"),
+            fg_color=LOGO_NAVY,
+            hover_color=LOGO_NAVY_HOVER,
+            text_color="#FFFFFF",
+        )
         register_btn.pack(fill="x", pady=(18, 8))
 
         back = ghost_button(
@@ -374,8 +388,8 @@ class AuthDialog(ctk.CTk):
             height=32,
         )
         back.configure(
-            text_color=self.theme.c("text_secondary"),
-            hover_color=self.theme.c("bg_card_hover"),
+            text_color=LOGO_NAVY,
+            hover_color=LOGO_NAVY_MUTED,
             font=font(self.theme, 12),
         )
         back.pack(fill="x", pady=(2, 4))
@@ -412,7 +426,7 @@ class AuthDialog(ctk.CTk):
             self.form_frame,
             text="You're ready to sign in",
             font=font(self.theme, 18, weight="bold"),
-            text_color=self.theme.c("text_primary"),
+            text_color=LOGO_NAVY,
             anchor="w",
         ).pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(
@@ -436,7 +450,12 @@ class AuthDialog(ctk.CTk):
             height=36,
             width=FORM_WIDTH,
         )
-        done.configure(corner_radius=self.theme.radius("sm"))
+        done.configure(
+            corner_radius=self.theme.radius("sm"),
+            fg_color=LOGO_NAVY,
+            hover_color=LOGO_NAVY_HOVER,
+            text_color="#FFFFFF",
+        )
         done.pack(fill="x")
 
         self.unbind("<Return>")

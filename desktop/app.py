@@ -26,6 +26,8 @@ from desktop.theme import (
     save_sidebar_width,
 )
 from desktop.design_system import confirm
+from desktop.classic_workspace import ClassicWorkspaceView
+from desktop.classic_workspace.chrome import SIDEBAR
 from desktop.views.backup_view import BackupView
 from desktop.views.dashboard import DashboardView
 from desktop.views.databases_view import DatabasesView
@@ -47,7 +49,7 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, type]]]] = [
     (
         "Overview",
         [
-    ("dashboard", "Dashboard", DashboardView),
+            ("workspace", "Workspace", ClassicWorkspaceView),
         ],
     ),
     (
@@ -101,18 +103,23 @@ def mysql_software_patch_visible(connection) -> bool:
     return _connected_db_type(connection) == "mysql"
 
 
+# Dashboard content is embedded inside the classic Workspace shell (not a sidebar row).
+_EMBEDDED_NAV_ITEMS: list[tuple[str, str, type]] = [
+    ("dashboard", "Workspace", DashboardView),
+]
+
 NAV_ITEMS: list[tuple[str, str, type]] = [
     (key, label, cls) for _, items in NAV_GROUPS for key, label, cls in items
-] + PATCH_SUBNAV
+] + _EMBEDDED_NAV_ITEMS + PATCH_SUBNAV
 
 SIDEBAR_WIDTH = 232
 SIDEBAR_MIN_WIDTH = 180
 SIDEBAR_MAX_WIDTH = 420
 SIDEBAR_SASH_WIDTH = 4
-NAV_ROW_HEIGHT = 30
-SAVED_NAV_ROW_HEIGHT = 30
+NAV_ROW_HEIGHT = 28
+SAVED_NAV_ROW_HEIGHT = 28
 SAVED_NAV_VISIBLE_ROWS = 5
-NAV_GROUP_PADY = (4, 1)
+NAV_GROUP_PADY = (8, 2)
 
 # Pages that need an active DB session. Observability stays offline-ready.
 # Backup (sidebar + Dashboard "Open backup") prompts to connect first.
@@ -149,7 +156,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._servers_filter = "all"
         self._active_saved_connection: str | None = None
         self._t = self.theme_manager
-        self._active_nav = "dashboard"
+        self._active_nav = "workspace"
         self._brand_title: ctk.CTkLabel | None = None
         self._nav_header: ctk.CTkLabel | None = None
         self._nav_group_labels: list[ctk.CTkLabel] = []
@@ -172,6 +179,7 @@ class DatabaseAutomationApp(ctk.CTk):
         self._page_refreshing = False
         self._session_poll_job: str | None = None
         self._session_poll_busy = False
+        self._session_poll_result: dict | None = None
         self.shell_header: ShellHeader | None = None
         self._sign_out_wrap: ctk.CTkFrame | None = None
         self._sign_out_divider: ctk.CTkFrame | None = None
@@ -193,7 +201,8 @@ class DatabaseAutomationApp(ctk.CTk):
         self._maximize_window()
 
         self._build_layout()
-        self.navigate("dashboard")
+        self.navigate("workspace")
+        self.after(80, self._open_workspace_dashboard)
         self.after(400, self._refresh_dashboard_on_login)
         if self.connection:
             self._start_session_status_poll()
@@ -811,10 +820,25 @@ class DatabaseAutomationApp(ctk.CTk):
             db_view.refresh()
         self._refresh_dashboard_on_login()
 
+    def _open_workspace_dashboard(self) -> None:
+        """Landing view: classic shell with the Workspace (dashboard) page open."""
+        workspace = self.views.get("workspace")
+        if workspace is None:
+            return
+        if hasattr(workspace, "_open_landing"):
+            workspace._open_landing()
+        elif hasattr(workspace, "show_embedded_page"):
+            workspace.show_embedded_page("dashboard")
+
     def _refresh_dashboard_on_login(self) -> None:
         dash = self.views.get("dashboard")
         if dash and hasattr(dash, "refresh"):
             dash.refresh()
+        workspace = self.views.get("workspace")
+        if workspace is not None:
+            embedded = getattr(workspace, "_pages", {}).get("dashboard")
+            if embedded is not None and hasattr(embedded, "refresh"):
+                embedded.refresh()
 
     def manage_connections(self) -> None:
         """Open the inline server connection workspace."""
@@ -885,6 +909,7 @@ class DatabaseAutomationApp(ctk.CTk):
 
     def _stop_session_status_poll(self) -> None:
         self._session_poll_busy = False
+        self._session_poll_result = None
         job = self._session_poll_job
         self._session_poll_job = None
         if job is not None:
@@ -915,11 +940,24 @@ class DatabaseAutomationApp(ctk.CTk):
             try:
                 self.after(0, lambda m=metrics: self._apply_session_status(m))
             except RuntimeError:
-                pass
+                self._session_poll_busy = False
+                self._session_poll_result = metrics
 
         import threading
 
         threading.Thread(target=worker, daemon=True).start()
+        self.after(100, self._drain_session_status_result)
+
+    def _drain_session_status_result(self) -> None:
+        if getattr(self, "_signing_out", False):
+            return
+        result = getattr(self, "_session_poll_result", None)
+        if result is not None:
+            self._session_poll_result = None
+            self._apply_session_status(result)
+            return
+        if self._session_poll_busy:
+            self.after(100, self._drain_session_status_result)
 
     def _apply_session_status(self, metrics: dict) -> None:
         self._session_poll_busy = False
@@ -1174,6 +1212,8 @@ class DatabaseAutomationApp(ctk.CTk):
         btn.configure(text="  Servers")
 
     def _nav_icon_color(self, *, active: bool) -> str:
+        if self._active_nav == "workspace":
+            return SIDEBAR["text"] if active else SIDEBAR["muted"]
         t = self._t
         if active:
             return t.c("nav_active_text")
@@ -1400,8 +1440,20 @@ class DatabaseAutomationApp(ctk.CTk):
 
     def _style_navigation(self, key: str) -> None:
         t = self._t
-        accent_color = t.sc("nav_accent") if t.is_light else t.c("nav_indicator")
-        active_bg = t.sc("nav_active") if t.is_light else t.c("nav_active_bg")
+        classic = key == "workspace"
+        accent_color = SIDEBAR["accent"] if classic else (
+            t.sc("nav_accent") if t.is_light else t.c("nav_indicator")
+        )
+        active_bg = SIDEBAR["active"] if classic else (
+            t.sc("nav_active") if t.is_light else t.c("nav_active_bg")
+        )
+        idle_text = SIDEBAR["text"] if classic else (
+            t.sc("text_secondary") if t.is_light else t.c("nav_idle_text")
+        )
+        active_text = SIDEBAR["text"] if classic else t.c("nav_active_text")
+        hover = SIDEBAR["hover"] if classic else (
+            t.sc("nav_hover") if t.is_light else t.c("bg_card_hover")
+        )
         for k, btn in self.nav_buttons.items():
             active = k == key or (k == "patching" and key == "mysql_patch")
             accent = self._nav_accents.get(k)
@@ -1413,7 +1465,8 @@ class DatabaseAutomationApp(ctk.CTk):
                     row.configure(fg_color=active_bg)
                 btn.configure(
                     fg_color=active_bg,
-                    text_color=t.c("nav_active_text"),
+                    text_color=active_text,
+                    hover_color=hover,
                     border_width=0,
                 )
             else:
@@ -1423,7 +1476,8 @@ class DatabaseAutomationApp(ctk.CTk):
                     row.configure(fg_color="transparent")
                 btn.configure(
                     fg_color="transparent",
-                    text_color=t.sc("text_secondary") if t.is_light else t.c("nav_idle_text"),
+                    text_color=idle_text,
+                    hover_color=hover,
                     border_width=0,
                 )
             self._apply_nav_icon(k, btn, active=active)
@@ -1432,16 +1486,220 @@ class DatabaseAutomationApp(ctk.CTk):
 
     def _view_bottom_inset(self, key: str) -> int:
         """Servers pins its own action row, so it only needs a slim gap above the status bar."""
-        if key == "servers":
+        if key in {"servers", "workspace"}:
             return 8
         return CONTENT_BOTTOM_INSET
 
+    def _apply_workspace_chrome(self, key: str) -> None:
+        """Workspace keeps navigation inside Object Explorer, so the side rail is hidden."""
+        classic = key == "workspace"
+        if self.shell_header is not None:
+            try:
+                if classic:
+                    self.shell_header.grid_remove()
+                else:
+                    self.shell_header.grid()
+            except Exception:
+                pass
+        if self.status_footer is not None:
+            try:
+                if classic:
+                    self.status_footer.grid_remove()
+                else:
+                    self.status_footer.grid(row=2, column=0, sticky="ew")
+            except Exception:
+                pass
+        try:
+            if classic:
+                self.sidebar.grid_remove()
+                if self._sidebar_sash is not None:
+                    self._sidebar_sash.grid_remove()
+                self.content.grid(row=0, column=0, columnspan=3, sticky="nsew")
+                self.content.configure(fg_color="#F4F7FB")
+                self.view_container.configure(fg_color="#F4F7FB")
+                workspace = self.views.get("workspace")
+                if workspace is not None and hasattr(workspace, "_install_native_menu"):
+                    workspace._install_native_menu()
+            else:
+                self.content.grid(row=0, column=2, sticky="nsew")
+                self.content.configure(fg_color=self._t.c("bg_content"))
+                self.view_container.configure(fg_color=self._t.c("bg_content"))
+                try:
+                    self.configure(menu="")
+                except Exception:
+                    pass
+                if not self.sidebar.winfo_ismapped():
+                    self.sidebar.grid(row=0, column=0, sticky="nsew")
+                if self._sidebar_sash is not None and not self._sidebar_sash.winfo_ismapped():
+                    self._sidebar_sash.grid(row=0, column=1, sticky="ns")
+                self._paint_sidebar(classic=False)
+        except Exception:
+            pass
+
+    def _paint_sidebar(self, *, classic: bool) -> None:
+        """White sidebar on the classic workspace; restore the app theme elsewhere."""
+        t = self._t
+        if classic:
+            bg = SIDEBAR["bg"]
+            border = SIDEBAR["border"]
+            text = SIDEBAR["text"]
+            muted = SIDEBAR["muted"]
+            hover = SIDEBAR["hover"]
+            card = SIDEBAR["card"]
+        else:
+            bg = t.sc("bg_sidebar") if t.is_light else t.c("bg_sidebar")
+            border = t.sc("border") if t.is_light else t.c("border_subtle")
+            text = t.sc("text_primary")
+            muted = t.sc("text_muted")
+            hover = t.sc("nav_hover") if t.is_light else t.c("bg_card_hover")
+            card = t.c("sidebar_bg_card")
+
+        try:
+            self.sidebar.configure(fg_color=bg, border_color=border)
+        except Exception:
+            pass
+        if self._nav_host is not None:
+            try:
+                self._nav_host.configure(
+                    fg_color=bg,
+                    scrollbar_button_color=border,
+                    scrollbar_button_hover_color=muted,
+                )
+            except Exception:
+                try:
+                    self._nav_host.configure(fg_color=bg)
+                except Exception:
+                    pass
+        if self._servers_saved_frame is not None:
+            try:
+                self._servers_saved_frame.configure(fg_color=bg)
+            except Exception:
+                pass
+        if self._brand_title is not None:
+            self._brand_title.configure(text_color=text)
+        for group_lbl in self._nav_group_labels:
+            group_lbl.configure(text_color=muted)
+        if self._identity_card is not None:
+            self._identity_card.configure(fg_color=card, border_color=border)
+        if self._identity_avatar is not None:
+            self._identity_avatar.configure(fg_color=hover, text_color=text)
+        if self._identity_name is not None:
+            self._identity_name.configure(text_color=text)
+        if self._identity_role is not None:
+            self._identity_role.configure(text_color=muted)
+        if self._sign_out_divider is not None:
+            self._sign_out_divider.configure(fg_color=border)
+        for btn in list(self._servers_sub_buttons.values()) + list(self._servers_saved_buttons.values()) + list(self._patch_sub_buttons.values()):
+            try:
+                btn.configure(text_color=muted, hover_color=hover)
+            except Exception:
+                pass
+        if classic:
+            try:
+                self.content.configure(fg_color="#FFFFFF")
+                self.view_container.configure(fg_color="#FFFFFF")
+            except Exception:
+                pass
+        else:
+            try:
+                self.content.configure(fg_color=t.c("bg_content"))
+                self.view_container.configure(fg_color=t.c("bg_content"))
+            except Exception:
+                pass
+        if self._sidebar_sash is not None and not self._sash_dragging:
+            try:
+                self._sidebar_sash.configure(fg_color=border if classic else t.c("border_subtle"))
+            except Exception:
+                pass
+
+    def create_embedded_page(
+        self,
+        parent,
+        key: str,
+        *,
+        navigate_callback=None,
+        on_object_properties=None,
+        view_extra: dict | None = None,
+    ):
+        """Build a page under the classic workspace right pane (same chrome)."""
+        extra = view_extra or {}
+        view_cls = next((cls for nav_key, _, cls in NAV_ITEMS if nav_key == key), None)
+        if view_cls is None or view_cls is ClassicWorkspaceView:
+            return None
+
+        kwargs: dict = {
+            "log_callback": self.append_log,
+            "connection": self.connection,
+        }
+        nav_cb = navigate_callback or self.navigate
+        if view_cls is DashboardView:
+            kwargs["navigate_callback"] = nav_cb
+            kwargs["employee"] = self.employee
+            kwargs["initial_refresh"] = True
+            if on_object_properties is not None:
+                kwargs["on_object_properties"] = on_object_properties
+        elif view_cls is ServersView:
+            kwargs["establish_callback"] = (
+                lambda c: self._establish_connection(c, navigate_to="workspace")
+            )
+            kwargs["disconnect_callback"] = self.clear_connection
+            kwargs["saved_servers_changed_callback"] = self._on_saved_connection_changed
+            kwargs["servers_filter"] = extra.get("servers_filter", self._servers_filter or "all")
+            restore = extra.get("saved_server") or self._active_saved_connection
+            if not restore and self.connection:
+                restore = self.connection.saved_name or self.connection.name
+            if restore:
+                kwargs["saved_server"] = restore
+            if extra.get("new_connection"):
+                kwargs["new_connection"] = True
+        elif view_cls in {MysqlPatchView, PatchView}:
+            kwargs["employee"] = self.employee
+        elif view_cls is LogsView:
+            kwargs["log_store"] = self.log_store
+            kwargs["register_log_panel"] = self._register_log_panel
+            if extra.get("log_filter"):
+                kwargs["log_filter"] = extra["log_filter"]
+        elif view_cls is SettingsView:
+            kwargs["employee"] = self.employee
+        if key == "audit":
+            kwargs["auto_action"] = "audit"
+
+        page = view_cls(parent, self.theme_manager, **kwargs)
+        return page
+
     def navigate(self, key: str, *, log: bool = True, view_extra: dict | None = None) -> None:
+        # Object Explorer / classic menu keep pages inside the traditional shell.
+        workspace = self.views.get("workspace")
+        if (
+            key != "workspace"
+            and workspace is not None
+            and hasattr(workspace, "show_embedded_page")
+            and (self._active_nav == "workspace" or key == "dashboard")
+        ):
+            if key in CONNECTION_REQUIRED_KEYS and self.connection is None:
+                if self._active_nav != "workspace":
+                    self.navigate("workspace", log=False)
+                self._prompt_connect_required(key)
+                return
+            if self._active_nav != "workspace":
+                self._active_nav = "workspace"
+                for view in self.views.values():
+                    view.grid_forget()
+                workspace.grid(
+                    row=0, column=0, sticky="nsew", pady=(0, self._view_bottom_inset("workspace"))
+                )
+                self._apply_workspace_chrome("workspace")
+                self._style_navigation("workspace")
+            if workspace.show_embedded_page(key, **(view_extra or {})):
+                if log:
+                    self.append_log(f"Opened {key} in classic workspace")
+                return
+
         if key in CONNECTION_REQUIRED_KEYS and self.connection is None:
-            # Land on the dashboard rather than opening a page that has
+            # Land on the workspace rather than opening a page that has
             # nothing to operate on, then explain why.
-            if self._active_nav != "dashboard":
-                self.navigate("dashboard", log=False)
+            if self._active_nav != "workspace":
+                self.navigate("workspace", log=False)
             self._prompt_connect_required(key)
             return
 
@@ -1472,7 +1730,11 @@ class DatabaseAutomationApp(ctk.CTk):
             return
 
         self._active_nav = key
-        if key != "servers":
+        if key == "servers":
+            # Saved servers belong under Infrastructure → Servers.
+            self._servers_nav_expanded = True
+            self._saved_list_expanded = True
+        else:
             self._servers_nav_expanded = False
         if key in {"patching", "mysql_patch"}:
             self._patch_nav_expanded = True
@@ -1498,7 +1760,15 @@ class DatabaseAutomationApp(ctk.CTk):
                         "log_callback": self.append_log,
                         "connection": self.connection,
                     }
-                    if view_cls is DashboardView:
+                    if view_cls is ClassicWorkspaceView:
+                        kwargs["navigate_callback"] = self.navigate
+                        kwargs["employee"] = self.employee
+                        kwargs["establish_callback"] = (
+                            lambda c: self._establish_connection(c, navigate_to="workspace")
+                        )
+                        kwargs["disconnect_callback"] = self.clear_connection
+                        kwargs["sign_out_callback"] = self._sign_out
+                    elif view_cls is DashboardView:
                         kwargs["navigate_callback"] = self.navigate
                         kwargs["employee"] = self.employee
                         if "initial_refresh" in extra:
@@ -1564,10 +1834,17 @@ class DatabaseAutomationApp(ctk.CTk):
                     logs_view.apply_log_filter(extra.get("log_filter"))
             elif key == "dashboard" and hasattr(self.views[key], "resume"):
                 self.views[key].resume()
+            elif key == "workspace":
+                workspace_view = self.views[key]
+                if hasattr(workspace_view, "show_admin_panes"):
+                    workspace_view.show_admin_panes()
+                if hasattr(workspace_view, "refresh"):
+                    workspace_view.refresh()
             elif hasattr(self.views[key], "refresh"):
                 self.views[key].refresh()
 
         self._style_servers_subnav()
+        self._apply_workspace_chrome(key)
 
         if log:
             self.append_log(f"Navigated to {key}")
@@ -1586,6 +1863,9 @@ class DatabaseAutomationApp(ctk.CTk):
             confirm_text="Go to Servers",
             cancel_text="Cancel",
             on_confirm=lambda: self.navigate("servers"),
+            confirm_fg="#0078D4",
+            confirm_hover="#106EBE",
+
         )
 
     def _sign_out(self) -> None:

@@ -314,11 +314,13 @@ def _postgresql_logical_full_via_ssh(
     fmt = None if dumpall else resolve_pg_dump_format(request)
     is_directory = fmt == PgDumpFormat.DIRECTORY
     keep_on_server = bool(request.use_remote_exec)
-    # Stream archive formats over SSH (one pass). Directory format still uses /tmp + SFTP.
-    # When keeping on server, always write to a file path (no stream to this PC).
-    use_stream = (not is_directory) and (not keep_on_server)
+    # pg_dump custom/tar/directory need a seekable path — they reject -f - (stdout).
+    # Only Plain SQL (and pg_dumpall) can stream over SSH; other formats write to
+    # /tmp on the server then download via SFTP. When keeping on the server, never stream.
+    can_stream_stdout = dumpall or fmt == PgDumpFormat.PLAIN
+    use_stream = can_stream_stdout and (not keep_on_server)
     # Plain SQL is bulky on the wire; gzip only for transfer, still save as .sql locally.
-    wire_gzip = use_stream and (dumpall or fmt == PgDumpFormat.PLAIN)
+    wire_gzip = use_stream
 
     if dumpall:
         remote_name = output_path.name if output_path.suffix else f"{output_path.name}.sql"
@@ -398,7 +400,13 @@ def _postgresql_logical_full_via_ssh(
     def _raise_dump_error(stderr: str) -> None:
         detail = (stderr or "").strip() or "pg_dump failed on Linux server"
         lowered = detail.lower()
-        if "permission denied" in lowered:
+        if 'output file "-"' in lowered or "output file '-'" in lowered:
+            detail = (
+                f"{detail}\n\n"
+                "Custom and Tar formats cannot write to a pipe. "
+                "The app should save them to a temporary file on the Linux server first."
+            )
+        elif "permission denied" in lowered:
             detail = (
                 f"{detail}\n\n"
                 f"The database user '{conn.username}' cannot read one or more tables. "
