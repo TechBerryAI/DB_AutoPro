@@ -80,12 +80,25 @@ class BackupService:
             status=OperationStatus.RUNNING,
             message="Backup started",
             started_at=started_at,
+            details={
+                "profile": request.profile,
+                "database": request.database or request.profile,
+                "db_type": request.db_type.value,
+                "method": request.method.value,
+                "progress": 0.0,
+            },
         )
         _operations[operation_id] = result
 
-        try:
+        def _track_progress(pct: float, msg: str) -> None:
+            result.message = msg or result.message
+            result.details = {**(result.details or {}), "progress": float(pct)}
+            _operations[operation_id] = result
             if progress_callback:
-                progress_callback(0.1, "Preparing backup...")
+                progress_callback(pct, msg)
+
+        try:
+            _track_progress(0.1, "Preparing backup...")
 
             self._validate_backup_mode(request)
             output_path = self._resolve_output_path(request)
@@ -100,7 +113,7 @@ class BackupService:
             if not handler:
                 raise BackupError(f"Unsupported database type: {request.db_type}")
 
-            final_path = handler(request, output_path, progress_callback)
+            final_path = handler(request, output_path, _track_progress)
 
             physical = backup_method_category(request.method) == BackupCategory.PHYSICAL
             remote = bool(request.use_remote_exec)
@@ -118,8 +131,7 @@ class BackupService:
                 and mysql_wants_gzip(request)
                 and not final_path.name.endswith(".gz")
             ):
-                if progress_callback:
-                    progress_callback(0.88, "Compressing MySQL dump with gzip (.sql.gz)...")
+                _track_progress(0.88, "Compressing MySQL dump with gzip (.sql.gz)...")
                 final_path = self._compress(final_path)
 
             # Keep output matching the selected Backup Format (e.g. Plain SQL → .sql, not .sql.gz).
@@ -147,12 +159,10 @@ class BackupService:
                 and final_path.is_file()
                 and not final_path.name.endswith(".gz")
             ):
-                if progress_callback:
-                    progress_callback(0.8, "Compressing backup...")
+                _track_progress(0.8, "Compressing backup...")
                 final_path = self._compress(final_path)
 
-            if progress_callback:
-                progress_callback(1.0, "Backup completed")
+            _track_progress(1.0, "Backup completed")
 
             result.status = OperationStatus.COMPLETED
             result.message = "Backup completed successfully"
@@ -174,6 +184,9 @@ class BackupService:
                 "category": backup_method_category(request.method).value,
                 "db_type": request.db_type.value,
                 "remote": remote,
+                "profile": request.profile,
+                "database": request.database or request.profile,
+                "progress": 1.0,
             }
 
             audit.log("backup", user, str(final_path), "success", result.details)

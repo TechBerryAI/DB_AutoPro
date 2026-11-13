@@ -32,6 +32,7 @@ LUCIDE_ALIASES: dict[str, str] = {
     "empty_jobs": "briefcase",
     "empty_activity": "activity",
     "dashboard": "layout-dashboard",
+    "workspace": "hard-drive",
     "backup": "archive",
     "restore": "upload",
     "logs": "scroll-text",
