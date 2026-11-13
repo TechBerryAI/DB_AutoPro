@@ -1501,14 +1501,22 @@ class DatabaseAutomationApp(ctk.CTk):
                     self.shell_header.grid()
             except Exception:
                 pass
+        if self.status_footer is not None:
+            try:
+                if classic:
+                    self.status_footer.grid_remove()
+                else:
+                    self.status_footer.grid(row=2, column=0, sticky="ew")
+            except Exception:
+                pass
         try:
             if classic:
                 self.sidebar.grid_remove()
                 if self._sidebar_sash is not None:
                     self._sidebar_sash.grid_remove()
                 self.content.grid(row=0, column=0, columnspan=3, sticky="nsew")
-                self.content.configure(fg_color="#FFFFFF")
-                self.view_container.configure(fg_color="#FFFFFF")
+                self.content.configure(fg_color="#F4F7FB")
+                self.view_container.configure(fg_color="#F4F7FB")
                 workspace = self.views.get("workspace")
                 if workspace is not None and hasattr(workspace, "_install_native_menu"):
                     workspace._install_native_menu()

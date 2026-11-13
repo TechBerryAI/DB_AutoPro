@@ -13,7 +13,10 @@ from desktop.classic_workspace.properties_panel import PropertiesPanel
 from desktop.classic_workspace.tree_model import NodeKind, TreeNodeData
 from desktop.connection import ConnectionResult
 from desktop.connection_store import SavedServer, load_saved_servers
+from desktop.constants import APP_NAME
 from desktop.employee_store import EmployeeSession
+from desktop.lucide_icons import lucide_ctk_image
+from desktop.status_footer import format_footer_version
 from desktop.theme import ThemeManager
 from desktop.views.base_view import BaseView
 
@@ -72,12 +75,20 @@ class ClassicWorkspaceView(BaseView):
         self._crumb_bar: ctk.CTkFrame | None = None
         self._status_dot: ctk.CTkLabel | None = None
         self._status_detail: ctk.CTkLabel | None = None
+        self._status_meta: ctk.CTkLabel | None = None
+        self._title_icons: list = []
+        self._toolbar_icons: list = []
+        self._session_version = "—"
+        self._session_uptime = "—"
+        self._session_sessions = "—"
         self._build_ui()
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
+        self._build_title_bar()
+        self._build_menu_strip()
         self._build_toolbar()
         self.after(120, self._install_native_menu)
 
@@ -89,7 +100,7 @@ class ClassicWorkspaceView(BaseView):
             bd=0,
             sashrelief="flat",
         )
-        self._h_paned.grid(row=1, column=0, sticky="nsew")
+        self._h_paned.grid(row=3, column=0, sticky="nsew")
 
         left = ctk.CTkFrame(self._h_paned, fg_color=cx(self.theme, "bg_card"), corner_radius=0)
         self._right = ctk.CTkFrame(self._h_paned, fg_color=cx(self.theme, "bg_content"), corner_radius=0)
@@ -139,45 +150,144 @@ class ClassicWorkspaceView(BaseView):
             corner_radius=0,
         )
 
-        status = ctk.CTkFrame(self, fg_color=cx(self.theme, "status_bar"), corner_radius=0, height=24)
-        status.grid(row=2, column=0, sticky="ew")
+        status = ctk.CTkFrame(self, fg_color=cx(self.theme, "status_bar"), corner_radius=0, height=26)
+        status.grid(row=4, column=0, sticky="ew")
         status.grid_propagate(False)
         self._status_dot = ctk.CTkLabel(
             status,
             text="●",
             width=16,
             font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color=cx(self.theme, "text_muted"),
+            text_color=cx(self.theme, "status_muted"),
         )
-        self._status_dot.pack(side="left", padx=(8, 2))
+        self._status_dot.pack(side="left", padx=(10, 2))
         self._status = ctk.CTkLabel(
             status,
             text="Disconnected",
             anchor="w",
-            font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color=cx(self.theme, "text_secondary"),
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            text_color=cx(self.theme, "status_text"),
         )
         self._status.pack(side="left", padx=(0, 12))
         self._status_detail = ctk.CTkLabel(
             status,
-            text="No active session",
+            text="Workspace",
             anchor="w",
             font=ctk.CTkFont(family="Segoe UI", size=10),
-            text_color=cx(self.theme, "text_muted"),
+            text_color=cx(self.theme, "status_muted"),
         )
         self._status_detail.pack(side="left", padx=(0, 8))
+        self._status_meta = ctk.CTkLabel(
+            status,
+            text="Version: —   ·   Uptime: —   ·   Sessions: —",
+            anchor="e",
+            font=ctk.CTkFont(family="Segoe UI", size=10),
+            text_color=cx(self.theme, "status_muted"),
+        )
+        self._status_meta.pack(side="right", padx=(8, 12))
 
         self.after(60, self._open_landing)
         self.after(250, self.restore_default_layout)
 
+    def _build_title_bar(self) -> None:
+        bar = ctk.CTkFrame(
+            self,
+            fg_color=cx(self.theme, "title_bar"),
+            corner_radius=0,
+            height=42,
+        )
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid_propagate(False)
+
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.pack(side="left", fill="y", padx=(12, 0))
+        try:
+            logo = lucide_ctk_image("database", "#5BA3F5", size=20)
+            self._title_icons.append(logo)
+            ctk.CTkLabel(left, text="", image=logo, width=24, height=24).pack(
+                side="left", padx=(0, 8), pady=10
+            )
+        except Exception:
+            ctk.CTkLabel(
+                left,
+                text="▣",
+                font=ctk.CTkFont(family="Segoe UI", size=16),
+                text_color="#5BA3F5",
+            ).pack(side="left", padx=(0, 8), pady=8)
+
+        titles = ctk.CTkFrame(left, fg_color="transparent")
+        titles.pack(side="left", pady=6)
+        ctk.CTkLabel(
+            titles,
+            text=APP_NAME,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=cx(self.theme, "title_text"),
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            titles,
+            text="Enterprise Database Administration & Automation",
+            font=ctk.CTkFont(family="Segoe UI", size=9),
+            text_color=cx(self.theme, "title_muted"),
+            anchor="w",
+        ).pack(anchor="w")
+
+        right = ctk.CTkFrame(bar, fg_color="transparent")
+        right.pack(side="right", padx=(0, 12))
+        for icon_name, tip in (
+            ("bell", "Notifications"),
+            ("settings", "Settings"),
+        ):
+            try:
+                img = lucide_ctk_image(icon_name, cx(self.theme, "title_muted"), size=16)
+                self._title_icons.append(img)
+                btn = ctk.CTkButton(
+                    right,
+                    text="",
+                    image=img,
+                    width=30,
+                    height=28,
+                    corner_radius=6,
+                    fg_color="transparent",
+                    hover_color="#243A66",
+                    command=(lambda: self._nav("settings"))
+                    if icon_name == "settings"
+                    else (lambda: self._set_status("No new notifications")),
+                )
+                btn.pack(side="left", padx=2, pady=7)
+                btn.bind("<Enter>", lambda _e, t=tip: self._set_status(t))
+            except Exception:
+                pass
+        # User chip
+        uname = "User"
+        if self.employee:
+            uname = (self.employee.full_name or self.employee.username or "User").split()[0]
+        ctk.CTkLabel(
+            right,
+            text=f"  {uname}  ",
+            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            text_color=cx(self.theme, "title_text"),
+            fg_color="#243A66",
+            corner_radius=10,
+            height=24,
+        ).pack(side="left", padx=(6, 0), pady=9)
+
     def _open_landing(self) -> None:
-        """App start: Workspace dashboard + Infrastructure tree expanded."""
+        """App start: Workspace dashboard + Object Explorer matching the launch screenshot."""
         if self.explorer:
             self.explorer.reload()
-            self.explorer.select_workspace()
+            self.explorer.apply_landing_tree()
         self.show_embedded_page("dashboard")
         self._set_status("Workspace")
         self._refresh_connection_status()
+        # Re-apply after layout so a later refresh cannot leave Servers expanded.
+        self.after(120, self._ensure_landing_tree)
+
+    def _ensure_landing_tree(self) -> None:
+        if self._active_content != "dashboard":
+            return
+        if self.explorer:
+            self.explorer.apply_landing_tree()
 
     def restore_default_layout(self) -> None:
         """Object Explorer ~23%, Properties fills the right pane."""
@@ -298,94 +408,224 @@ class ClassicWorkspaceView(BaseView):
             self.properties.show_node(node)
         self._set_status(f"Properties · {name}")
 
+    def _build_menu_strip(self) -> None:
+        strip = ctk.CTkFrame(
+            self,
+            fg_color=cx(self.theme, "bg_elevated"),
+            corner_radius=0,
+            height=26,
+        )
+        strip.grid(row=1, column=0, sticky="ew")
+        strip.grid_propagate(False)
+        self._menu_strip = strip
+        self._popup_menus: dict[str, tk.Menu] = {}
+
+        def _popup(name: str, event) -> None:
+            menu = self._popup_menus.get(name)
+            if menu is None:
+                return
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        for label in (
+            "File",
+            "View",
+            "Database",
+            "Operations",
+            "Tools",
+            "Reports",
+            "Help",
+        ):
+            btn = ctk.CTkButton(
+                strip,
+                text=label,
+                width=64,
+                height=22,
+                corner_radius=0,
+                fg_color="transparent",
+                hover_color=cx(self.theme, "bg_card_hover"),
+                text_color=cx(self.theme, "text_primary"),
+                font=ctk.CTkFont(family="Segoe UI", size=10),
+                anchor="w",
+            )
+            btn.pack(side="left", padx=(6 if label == "File" else 0, 0), pady=2)
+            btn.bind("<Button-1>", lambda e, n=label: _popup(n, e))
+
     def _install_native_menu(self) -> None:
+        """Populate dropdown menus for the light menu strip (no OS menubar)."""
         root = self.winfo_toplevel()
         try:
-            menubar = tk.Menu(root, tearoff=0)
-            file_m = tk.Menu(menubar, tearoff=0)
+            # Prefer in-app strip so title → menu → toolbar matches the mockup.
+            try:
+                root.configure(menu="")
+            except Exception:
+                pass
+
+            def _menu() -> tk.Menu:
+                return tk.Menu(
+                    root,
+                    tearoff=0,
+                    bg=cx(self.theme, "bg_card"),
+                    fg=cx(self.theme, "text_primary"),
+                    activebackground=cx(self.theme, "bg_selection"),
+                    activeforeground=cx(self.theme, "text_primary"),
+                )
+
+            file_m = _menu()
             file_m.add_command(label="Refresh Explorer", command=self.refresh)
             file_m.add_separator()
             file_m.add_command(
                 label="Sign Out",
                 command=lambda: self.on_sign_out() if self.on_sign_out else None,
             )
-            menubar.add_cascade(label="File", menu=file_m)
 
-            view_m = tk.Menu(menubar, tearoff=0)
+            view_m = _menu()
             view_m.add_command(label="Restore Default Layout", command=self.restore_default_layout)
             view_m.add_separator()
             view_m.add_command(label="Workspace", command=lambda: self._nav("dashboard"))
             view_m.add_command(label="Servers", command=lambda: self._nav("servers"))
             view_m.add_command(label="Databases", command=lambda: self._nav("databases"))
-            menubar.add_cascade(label="View", menu=view_m)
 
-            db_m = tk.Menu(menubar, tearoff=0)
+            db_m = _menu()
             db_m.add_command(label="Connect", command=self._connect_selected_or_servers)
             db_m.add_command(label="Disconnect", command=self._do_disconnect)
             db_m.add_separator()
             db_m.add_command(label="Backup", command=lambda: self._nav("backup"))
             db_m.add_command(label="Restore", command=lambda: self._nav("restore"))
-            menubar.add_cascade(label="Database", menu=db_m)
 
-            tools_m = tk.Menu(menubar, tearoff=0)
-            tools_m.add_command(label="Migration", command=lambda: self._nav("migration"))
-            tools_m.add_command(label="Patching", command=lambda: self._nav("patching"))
-            tools_m.add_command(label="Reports", command=lambda: self._nav("reports"))
+            ops_m = _menu()
+            ops_m.add_command(label="Backup", command=lambda: self._nav("backup"))
+            ops_m.add_command(label="Restore", command=lambda: self._nav("restore"))
+            ops_m.add_command(label="Migration", command=lambda: self._nav("migration"))
+            ops_m.add_command(label="Patching", command=lambda: self._nav("patching"))
+
+            tools_m = _menu()
+            tools_m.add_command(label="SQL Console", command=lambda: self._nav("databases"))
+            tools_m.add_command(label="Monitor", command=lambda: self._nav("audit"))
             tools_m.add_command(label="Execution Log", command=lambda: self._nav("logs"))
             tools_m.add_command(label="Audit Log", command=lambda: self._nav("audit"))
             tools_m.add_command(label="Settings", command=lambda: self._nav("settings"))
-            menubar.add_cascade(label="Tools", menu=tools_m)
 
-            help_m = tk.Menu(menubar, tearoff=0)
+            reports_m = _menu()
+            reports_m.add_command(label="Open Reports", command=lambda: self._nav("reports"))
+
+            help_m = _menu()
             help_m.add_command(
                 label="About Database Automation Pro",
                 command=lambda: self._set_status(
                     "Database Automation Pro — classic administration workspace"
                 ),
             )
-            menubar.add_cascade(label="Help", menu=help_m)
 
-            root.configure(menu=menubar)
-            self._menu = menubar
+            self._popup_menus = {
+                "File": file_m,
+                "View": view_m,
+                "Database": db_m,
+                "Operations": ops_m,
+                "Tools": tools_m,
+                "Reports": reports_m,
+                "Help": help_m,
+            }
+            self._menu = file_m
         except Exception:
             self._menu = None
 
     def _build_toolbar(self) -> None:
-        bar = ctk.CTkFrame(self, fg_color=cx(self.theme, "toolbar"), corner_radius=0, height=34)
-        bar.grid(row=0, column=0, sticky="ew")
+        bar = ctk.CTkFrame(self, fg_color=cx(self.theme, "toolbar"), corner_radius=0, height=36)
+        bar.grid(row=2, column=0, sticky="ew")
         bar.grid_propagate(False)
 
         def _sep() -> None:
             ctk.CTkFrame(bar, width=1, height=20, fg_color=cx(self.theme, "border"), corner_radius=0).pack(
-                side="left", padx=6, pady=6
+                side="left", padx=6, pady=7
             )
 
-        def _btn(label: str, command, tip: str, *, width: int = 76) -> None:
+        def _icon(name: str, color: str, size: int = 14):
+            try:
+                img = lucide_ctk_image(name, color, size=size)
+                self._toolbar_icons.append(img)
+                return img
+            except Exception:
+                return None
+
+        def _btn(
+            label: str,
+            command,
+            tip: str,
+            *,
+            width: int = 86,
+            icon: str | None = None,
+            success: bool = False,
+            muted: bool = False,
+        ) -> ctk.CTkButton:
+            if success:
+                fg, hover, tc, bw = (
+                    cx(self.theme, "connect_ok"),
+                    cx(self.theme, "connect_ok_hover"),
+                    "#FFFFFF",
+                    0,
+                )
+                icon_color = "#FFFFFF"
+            else:
+                fg, hover, tc, bw = (
+                    cx(self.theme, "bg_card"),
+                    cx(self.theme, "bg_card_hover"),
+                    cx(self.theme, "text_muted") if muted else cx(self.theme, "text_primary"),
+                    1,
+                )
+                icon_color = cx(self.theme, "primary") if not muted else cx(self.theme, "text_muted")
+            img = _icon(icon, icon_color) if icon else None
             btn = ctk.CTkButton(
                 bar,
-                text=label,
+                text=f"  {label}" if img is not None else label,
+                image=img,
+                compound="left",
                 width=width,
-                height=24,
-                corner_radius=2,
-                fg_color=cx(self.theme, "bg_card"),
-                hover_color=cx(self.theme, "bg_card_hover"),
-                border_width=1,
+                height=26,
+                corner_radius=5,
+                fg_color=fg,
+                hover_color=hover,
+                border_width=bw,
                 border_color=cx(self.theme, "border"),
-                text_color=cx(self.theme, "text_primary"),
-                font=ctk.CTkFont(family="Segoe UI", size=10),
+                text_color=tc,
+                font=ctk.CTkFont(
+                    family="Segoe UI",
+                    size=10,
+                    weight="bold" if success else "normal",
+                ),
                 command=command,
             )
-            btn.pack(side="left", padx=2, pady=4)
+            btn.pack(side="left", padx=2, pady=5)
             btn.bind("<Enter>", lambda _e, text=tip: self._set_status(text))
+            return btn
 
-        _btn("Connect", self._connect_selected_or_servers, "Connect the selected saved server")
-        _btn("Disconnect", self._do_disconnect, "Disconnect the active session", width=84)
-        _btn("Refresh", self.refresh, "Reload Object Explorer", width=68)
+        _btn(
+            "Connect",
+            self._connect_selected_or_servers,
+            "Connect the selected saved server",
+            width=92,
+            icon="database-zap",
+            success=True,
+        )
+        self._disconnect_btn = _btn(
+            "Disconnect",
+            self._do_disconnect,
+            "Disconnect the active session",
+            width=100,
+            icon="log-out",
+            muted=True,
+        )
+        self._disconnect_btn.configure(state="disabled")
+        _btn("Refresh", self.refresh, "Reload Object Explorer", width=86, icon="refresh-cw")
         _sep()
-        _btn("Backup", lambda: self._nav("backup"), "Open Backup")
-        _btn("Restore", lambda: self._nav("restore"), "Open Restore")
+        _btn("Backup", lambda: self._nav("backup"), "Open Backup", icon="archive")
+        _btn("Restore", lambda: self._nav("restore"), "Open Restore", icon="upload")
+        _btn("Migration", lambda: self._nav("migration"), "Open Migration", width=96, icon="briefcase")
+        _btn("Patching", lambda: self._nav("patching"), "Open Patching", width=88, icon="circle-check")
         ctk.CTkFrame(self, height=1, fg_color=cx(self.theme, "border"), corner_radius=0).grid(
-            row=0, column=0, sticky="sew"
+            row=2, column=0, sticky="sew"
         )
 
     def _nav(self, key: str, **extra) -> None:
@@ -410,16 +650,57 @@ class ClassicWorkspaceView(BaseView):
     def _refresh_connection_status(self) -> None:
         if not self._status or not self._status.winfo_exists():
             return
+        disc = getattr(self, "_disconnect_btn", None)
         if self.connection:
             name = self.connection.saved_name or self.connection.name
-            engine = getattr(self.connection.db_type, "value", self.connection.db_type)
+            engine = str(getattr(self.connection.db_type, "value", self.connection.db_type)).upper()
             self._status.configure(text=f"Connected  ·  {engine}  ·  {name}")
             if self._status_dot:
-                self._status_dot.configure(text_color="#92C353")
+                self._status_dot.configure(text_color=cx(self.theme, "active_dot"))
+            if disc is not None and disc.winfo_exists():
+                disc.configure(
+                    state="normal",
+                    text_color=cx(self.theme, "text_primary"),
+                )
         else:
             self._status.configure(text="Disconnected")
             if self._status_dot:
-                self._status_dot.configure(text_color=cx(self.theme, "status_text"))
+                self._status_dot.configure(text_color=cx(self.theme, "status_muted"))
+            if disc is not None and disc.winfo_exists():
+                disc.configure(
+                    state="disabled",
+                    text_color=cx(self.theme, "text_muted"),
+                )
+            self._session_version = "—"
+            self._session_uptime = "—"
+            self._session_sessions = "—"
+        self._paint_status_meta()
+
+    def _paint_status_meta(self) -> None:
+        if self._status_meta is None or not self._status_meta.winfo_exists():
+            return
+        self._status_meta.configure(
+            text=(
+                f"Version: {self._session_version}   ·   "
+                f"Uptime: {self._session_uptime}   ·   "
+                f"Sessions: {self._session_sessions}"
+            )
+        )
+
+    def update_session_status(
+        self,
+        *,
+        version: str = "—",
+        uptime: str = "—",
+        sessions: str = "—",
+        **_kwargs,
+    ) -> None:
+        """Keep the navy status strip in sync with live dashboard metrics."""
+        self._session_version = format_footer_version(version) if version else "—"
+        self._session_uptime = uptime or "—"
+        self._session_sessions = sessions or "—"
+        self._paint_status_meta()
+        self._refresh_connection_status()
 
     def _set_breadcrumb(self, node: TreeNodeData) -> None:
         if not getattr(self, "_breadcrumb", None):
@@ -531,7 +812,7 @@ class ClassicWorkspaceView(BaseView):
         if self.explorer:
             self.explorer.reload()
             if was_dashboard and not keep_server:
-                self.explorer.select_workspace()
+                self.explorer.apply_landing_tree()
         active = self._pages.get(self._active_content)
         if active is not None and hasattr(active, "refresh"):
             try:
@@ -548,5 +829,7 @@ class ClassicWorkspaceView(BaseView):
             self._set_status("No active session — select a server and Connect")
         if was_dashboard and not keep_server:
             self.show_embedded_page("dashboard")
+            if self.explorer:
+                self.explorer.apply_landing_tree()
         self._refresh_connection_status()
         self.log("Classic workspace refreshed", "INFO")

@@ -16,15 +16,34 @@ from desktop.db_performance import fetch_database_performance
 from desktop.db_performance_widgets import build_database_performance_section
 from desktop.design_system import font
 from desktop.employee_store import EmployeeSession
-from desktop.lucide_icons import lucide_icon_badge
+from desktop.engine_icons import engine_icon_label
+from desktop.lucide_icons import lucide_ctk_image, lucide_icon_badge, lucide_icon_label
 from desktop.ui_helpers import make_clickable
 from desktop.ops_widgets import (
     beacon_hero_header,
     compact_kpi_card,
     empty_state,
 )
+from desktop.status_footer import format_footer_version
 from desktop.theme import CONTENT_BOTTOM_INSET, ThemeManager
 from desktop.views.base_view import BaseView
+
+_ENGINE_COLORS = {
+    "POSTGRESQL": ("#336791", "#E8F1F8"),
+    "ORACLE": ("#C74634", "#FCEDEB"),
+    "MONGODB": ("#00684A", "#E6F4EF"),
+    "MYSQL": ("#00758F", "#E6F3F6"),
+    "MARIADB": ("#C3368B", "#F9EAF3"),
+    "SQLSERVER": ("#CC2927", "#FCE9E9"),
+}
+_ENGINE_NICE = {
+    "POSTGRESQL": "PostgreSQL",
+    "ORACLE": "Oracle",
+    "MONGODB": "MongoDB",
+    "MYSQL": "MySQL",
+    "MARIADB": "MariaDB",
+    "SQLSERVER": "SQL Server",
+}
 
 
 def _engine_label(db_type) -> str:
@@ -37,6 +56,32 @@ def _engine_label(db_type) -> str:
         return DatabaseType(text).value.upper()
     except ValueError:
         return text.upper()
+
+
+def _short_version(raw: str) -> str:
+    return format_footer_version(raw) if raw else "—"
+
+
+def _pad_uptime(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text or text in {"—", "-", "…"}:
+        return "—"
+    # Normalize "1d 3h 2m" → "01d 03h 02m" when possible.
+    parts = text.replace(",", " ").split()
+    out: list[str] = []
+    for part in parts:
+        num = ""
+        unit = ""
+        for ch in part:
+            if ch.isdigit():
+                num += ch
+            else:
+                unit += ch
+        if num and unit:
+            out.append(f"{int(num):02d}{unit}")
+        else:
+            out.append(part)
+    return " ".join(out) if out else text
 
 
 class DashboardView(BaseView):
@@ -72,6 +117,7 @@ class DashboardView(BaseView):
         self._timers_active = True
         self._db_health_rows: ctk.CTkFrame | None = None
         self._infra_summary_lbl: ctk.CTkLabel | None = None
+        self._infra_action_icons: list = []
         self._activity_list: ctk.CTkFrame | None = None
         self._jobs_list: ctk.CTkFrame | None = None
         self._backup_labels: dict[str, ctk.CTkLabel] = {}
@@ -80,6 +126,8 @@ class DashboardView(BaseView):
         self._conn_status_online: ctk.CTkLabel | None = None
         self._conn_status_offline: ctk.CTkLabel | None = None
         self._conn_status_health: ctk.CTkLabel | None = None
+        self._conn_active_name: ctk.CTkLabel | None = None
+        self._conn_detail_labels: dict[str, ctk.CTkLabel] = {}
         self._jobs_count_label: ctk.CTkLabel | None = None
         self._hero_refs: dict = {}
         self._perf_range = "24H"
@@ -204,7 +252,7 @@ class DashboardView(BaseView):
         self._build_command_center(scroll)
 
     def _build_command_center(self, scroll: ctk.CTkScrollableFrame) -> None:
-        # Approved order: hero → KPIs → infra+overview → performance → backup+jobs → recent
+        # Hero → KPIs → infra + connection → performance graphs → backup/jobs → recent activity
         self._hero_refs = beacon_hero_header(
             scroll,
             self.theme,
@@ -213,43 +261,43 @@ class DashboardView(BaseView):
             quick_action_text="Open Servers",
         )
         self._build_kpi_row(scroll)
-
         self._build_infrastructure_section(scroll)
         self._build_performance_overview(scroll)
-        self._build_backup_jobs_row(scroll)
         self._build_recent_operations(scroll)
-        # Clear the fixed status footer so the last section is fully reachable.
         ctk.CTkFrame(scroll, fg_color="transparent", height=CONTENT_BOTTOM_INSET).pack(fill="x")
 
     def _build_kpi_row(self, scroll: ctk.CTkScrollableFrame) -> None:
+        """Mockup: 4 equal KPIs on top, 2 wider cards below."""
         grid = ctk.CTkFrame(scroll, fg_color="transparent")
-        grid.pack(fill="x", pady=(0, 8))
+        grid.pack(fill="x", pady=(0, 10))
         for col in range(4):
             grid.grid_columnconfigure(col, weight=1, uniform="kpi4")
 
-        tiles = [
+        top_tiles = [
             ("linux_servers", "Registered Databases", "Saved profiles"),
             ("databases", "Connected Databases", "Active session"),
             ("active_alerts", "Active Alerts", "Failed ops today"),
             ("failed_today", "Failed Backups", "Failed today"),
-            ("active_jobs", "Running Automation Jobs", "In-flight ops"),
-            ("system_status", "System Health", "Live session health"),
         ]
-        for i, (key, label, secondary) in enumerate(tiles[:4]):
+        for i, (key, label, secondary) in enumerate(top_tiles):
             card, val, sec = compact_kpi_card(
                 grid, self.theme, key=key, label=label, secondary=secondary
             )
-            card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 4, 0), pady=0)
+            card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0), pady=0)
             self._metric_values[key] = val
             self._metric_secondary[key] = sec
             make_clickable(
                 card,
                 self.theme,
                 lambda k=key: self._nav_kpi(k),
-                hover_border=self.theme.c("border_strong") if hasattr(self.theme, "c") else self.theme.c("border"),
+                hover_border=self.theme.c("border"),
             )
 
-        for i, (key, label, secondary) in enumerate(tiles[4:]):
+        bottom_tiles = [
+            ("active_jobs", "Running Automation Jobs", "In-flight ops"),
+            ("system_status", "System Health", "Live session health"),
+        ]
+        for i, (key, label, secondary) in enumerate(bottom_tiles):
             card, val, sec = compact_kpi_card(
                 grid, self.theme, key=key, label=label, secondary=secondary
             )
@@ -258,8 +306,8 @@ class DashboardView(BaseView):
                 column=i * 2,
                 columnspan=2,
                 sticky="nsew",
-                padx=(0 if i == 0 else 4, 0),
-                pady=(4, 0),
+                padx=(0 if i == 0 else 8, 0),
+                pady=(8, 0),
             )
             self._metric_values[key] = val
             self._metric_secondary[key] = sec
@@ -275,20 +323,20 @@ class DashboardView(BaseView):
         shell = ctk.CTkFrame(
             parent,
             fg_color=self.theme.c("surface"),
-            corner_radius=2,
+            corner_radius=10,
             border_width=1,
             border_color=self.theme.c("border"),
         )
-        shell.pack(fill="x", pady=(0, 8))
+        shell.pack(fill="x", pady=(0, 10))
         content = ctk.CTkFrame(shell, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=12, pady=10)
+        content.pack(fill="both", expand=True, padx=14, pady=12)
 
         header = ctk.CTkFrame(content, fg_color="transparent")
         header.pack(fill="x", pady=(0, 4))
         ctk.CTkLabel(
             header,
-            text="DATABASE INFRASTRUCTURE",
-            font=font(self.theme, 11, weight="bold"),
+            text="Database Infrastructure",
+            font=font(self.theme, 13, weight="bold"),
             text_color=self.theme.c("text_primary"),
             anchor="w",
         ).pack(side="left")
@@ -296,7 +344,7 @@ class DashboardView(BaseView):
             header,
             text="View all →",
             font=font(self.theme, 10),
-            text_color=self.theme.c("text_secondary"),
+            text_color=self.theme.c("primary"),
             cursor="hand2",
         )
         view_all.pack(side="right")
@@ -313,28 +361,30 @@ class DashboardView(BaseView):
 
         grid = ctk.CTkFrame(content, fg_color="transparent")
         grid.pack(fill="both", expand=True)
-        grid.grid_columnconfigure(0, weight=7)
+        grid.grid_columnconfigure(0, weight=72)
         grid.grid_columnconfigure(1, weight=0)
-        grid.grid_columnconfigure(2, weight=3, minsize=150)
+        grid.grid_columnconfigure(2, weight=28, minsize=220)
 
         left = ctk.CTkFrame(grid, fg_color="transparent")
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        ctk.CTkFrame(grid, width=1, fg_color=self.theme.c("border")).grid(
-            row=0, column=1, sticky="ns", padx=6
+        ctk.CTkFrame(grid, width=1, fg_color=self.theme.c("border_subtle")).grid(
+            row=0, column=1, sticky="ns", padx=8
         )
         right = ctk.CTkFrame(grid, fg_color="transparent")
-        right.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
+        right.grid(row=0, column=2, sticky="nsew", padx=(4, 0))
 
-        cols = ctk.CTkFrame(left, fg_color=self.theme.c("bg_elevated"), corner_radius=0, height=22)
-        cols.pack(fill="x", pady=(0, 2))
+        cols = ctk.CTkFrame(left, fg_color=self.theme.c("bg_elevated"), corner_radius=6, height=28)
+        cols.pack(fill="x", pady=(0, 4))
         cols.pack_propagate(False)
         for text, width in (
-            ("DATABASE", 140),
-            ("ENGINE", 88),
-            ("HOST", 118),
-            ("STATUS", 100),
-            ("VERSION", 78),
-            ("SESSIONS", 62),
+            ("#", 24),
+            ("DATABASE", 126),
+            ("ENGINE", 108),
+            ("HOST", 100),
+            ("STATUS", 78),
+            ("VERSION", 80),
+            ("SESSIONS", 52),
+            ("ACTIONS", 52),
         ):
             ctk.CTkLabel(
                 cols,
@@ -343,90 +393,77 @@ class DashboardView(BaseView):
                 anchor="w",
                 font=font(self.theme, 9, weight="bold"),
                 text_color=self.theme.c("text_muted"),
-            ).pack(side="left", padx=(6 if text == "DATABASE" else 4, 0))
+            ).pack(side="left", padx=(6 if text == "#" else 3, 0))
 
         self._db_health_rows = ctk.CTkFrame(left, fg_color="transparent")
         self._db_health_rows.pack(fill="x")
+        self._infra_action_icons: list = []
 
-        # Traditional system-information style status panel
+        # Active connection card (mockup right rail)
         panel = ctk.CTkFrame(
             right,
             fg_color=self.theme.c("bg_elevated"),
-            corner_radius=0,
+            corner_radius=10,
             border_width=1,
             border_color=self.theme.c("border"),
         )
-        panel.pack(fill="x", anchor="n")
+        panel.pack(fill="both", expand=True, anchor="n")
         inner = ctk.CTkFrame(panel, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=10)
+        inner.pack(fill="x", padx=14, pady=14)
 
+        hdr = ctk.CTkFrame(inner, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 12))
         ctk.CTkLabel(
-            inner,
-            text="CONNECTION STATUS",
-            font=font(self.theme, 10, weight="bold"),
-            text_color=self.theme.c("text_muted"),
-            anchor="w",
-        ).pack(fill="x", pady=(0, 8))
-
-        online_row = ctk.CTkFrame(inner, fg_color="transparent")
-        online_row.pack(fill="x", pady=(0, 4))
-        ctk.CTkLabel(
-            online_row,
-            text="●  ONLINE",
-            font=font(self.theme, 11, weight="bold"),
-            text_color=self.theme.c("success"),
-            anchor="w",
-        ).pack(side="left")
-        self._conn_status_online = ctk.CTkLabel(
-            online_row,
-            text="0",
+            hdr,
+            text="Connection Status",
             font=font(self.theme, 12, weight="bold"),
             text_color=self.theme.c("text_primary"),
-            anchor="e",
-            width=28,
-        )
-        self._conn_status_online.pack(side="right")
-
-        offline_row = ctk.CTkFrame(inner, fg_color="transparent")
-        offline_row.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(
-            offline_row,
-            text="○  OFFLINE",
-            font=font(self.theme, 11, weight="bold"),
-            text_color=self.theme.c("text_muted"),
             anchor="w",
         ).pack(side="left")
-        self._conn_status_offline = ctk.CTkLabel(
-            offline_row,
-            text="0",
-            font=font(self.theme, 12, weight="bold"),
-            text_color=self.theme.c("text_primary"),
-            anchor="e",
-            width=28,
-        )
-        self._conn_status_offline.pack(side="right")
-
-        ctk.CTkFrame(inner, height=1, fg_color=self.theme.c("border")).pack(fill="x", pady=(0, 8))
-
         self._conn_status_health = ctk.CTkLabel(
-            inner,
-            text="○ READY",
-            font=font(self.theme, 11, weight="bold"),
-            text_color=self.theme.c("text_secondary"),
-            anchor="w",
+            hdr,
+            text="  OFFLINE  ",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color="#5A6573",
+            fg_color="#EEF1F5",
+            corner_radius=10,
+            height=22,
         )
-        self._conn_status_health.pack(fill="x", pady=(0, 6))
+        self._conn_status_health.pack(side="right")
         self._system_status_lbl = self._conn_status_health
 
-        for key, label in [
-            ("registered", "Registered"),
-            ("connected", "Active"),
-            ("alerts", "Alerts"),
-        ]:
+        self._conn_detail_labels: dict[str, ctk.CTkLabel] = {}
+        self._conn_row_icons: list = []
+        self._conn_active_name = None
+        conn_icons = {
+            "active": ("database", "#0078D4"),
+            "engine": ("server", "#336791"),
+            "host": ("hard-drive", "#64748B"),
+            "version": ("circle-check", "#107C10"),
+            "uptime": ("activity", "#0078D4"),
+            "sessions": ("cpu", "#CA5010"),
+        }
+        for key, label in (
+            ("active", "Active Connection"),
+            ("engine", "Engine"),
+            ("host", "Host"),
+            ("version", "Version"),
+            ("uptime", "Uptime"),
+            ("sessions", "Sessions"),
+        ):
             block = ctk.CTkFrame(inner, fg_color="transparent")
-            block.pack(fill="x", pady=(0, 3))
+            block.pack(fill="x", pady=(0, 7))
+            left = ctk.CTkFrame(block, fg_color="transparent")
+            left.pack(side="left")
+            icon_name, icon_color = conn_icons[key]
+            try:
+                ico = lucide_icon_label(left, icon_name, icon_color, size=13)
+                ico.pack(side="left", padx=(0, 6))
+                self._conn_row_icons.append(ico)
+            except Exception:
+                pass
             ctk.CTkLabel(
-                block,
+                left,
                 text=label,
                 font=font(self.theme, 10),
                 text_color=self.theme.c("text_secondary"),
@@ -434,13 +471,20 @@ class DashboardView(BaseView):
             ).pack(side="left")
             val = ctk.CTkLabel(
                 block,
-                text="0",
+                text="—",
                 font=font(self.theme, 11, weight="bold"),
                 text_color=self.theme.c("text_primary"),
                 anchor="e",
             )
             val.pack(side="right")
-            self._overview_labels[key] = val
+            self._conn_detail_labels[key] = val
+            if key == "active":
+                self._conn_active_name = val
+
+        # Hidden counters kept for apply_system_overview compatibility
+        self._conn_status_online = None
+        self._conn_status_offline = None
+        self._overview_labels = {}
 
     def _build_performance_overview(self, parent: ctk.CTkFrame) -> None:
         self._db_perf_refs = build_database_performance_section(
@@ -640,31 +684,49 @@ class DashboardView(BaseView):
         )
         alerts = bak_fail + restore_fail + connect_fail
 
+        badge_bg = self.theme.c("bg_elevated")
+        badge_fg = self.theme.c("text_muted")
+        badge_text = "  READY — Connect a database to begin.  "
+        pulse_color = self.theme.c("text_muted")
+        pulse_text = "● IDLE"
+
         if connected:
             bucket = self._connection_health_bucket(metrics)
             if bucket == "critical":
-                headline = "Your database infrastructure needs attention."
-                pulse_color = self.theme.c("error")
-                pulse_text = "● CRITICAL"
+                badge_text, badge_fg, badge_bg = (
+                    "  CRITICAL — Attention required.  ",
+                    self.theme.c("error"),
+                    self.theme.c("error_muted"),
+                )
+                pulse_color, pulse_text = self.theme.c("error"), "● CRITICAL"
             elif bucket == "warning" or alerts:
-                headline = "Your database infrastructure has warnings."
-                pulse_color = self.theme.c("warning")
-                pulse_text = "● DEGRADED"
+                badge_text, badge_fg, badge_bg = (
+                    "  DEGRADED — Warnings detected.  ",
+                    self.theme.c("warning"),
+                    self.theme.c("warning_muted"),
+                )
+                pulse_color, pulse_text = self.theme.c("warning"), "● DEGRADED"
             else:
-                headline = "Your database infrastructure is looking healthy."
-                pulse_color = self.theme.c("success")
-                pulse_text = "● LIVE"
+                badge_text, badge_fg, badge_bg = (
+                    "  HEALTHY — System is running normally.  ",
+                    "#0B6A0B",
+                    "#DFF5E5",
+                )
+                pulse_color, pulse_text = "#0B6A0B", "● LIVE"
         elif registered:
-            headline = "Registered databases are ready to connect."
-            pulse_color = self.theme.c("text_muted")
-            pulse_text = "● IDLE"
-        else:
-            headline = "Welcome to Database Automation Pro."
-            pulse_color = self.theme.c("info")
-            pulse_text = "● READY"
+            badge_text, badge_fg, badge_bg = (
+                "  READY — Registered databases available.  ",
+                "#5A6573",
+                "#EEF1F5",
+            )
+            pulse_color, pulse_text = "#64748B", "● IDLE"
 
         if refs.get("headline"):
-            refs["headline"].configure(text=headline)
+            refs["headline"].configure(text="Database Infrastructure Status")
+        if refs.get("health_badge"):
+            refs["health_badge"].configure(
+                text=badge_text, text_color=badge_fg, fg_color=badge_bg
+            )
         if refs.get("summary"):
             refs["summary"].configure(
                 text=(
@@ -677,29 +739,28 @@ class DashboardView(BaseView):
 
     def _status_pill(self, parent, text: str, tone: str) -> ctk.CTkLabel:
         palette = {
-            "success": (self.theme.c("success_muted"), self.theme.c("success")),
-            "warning": (self.theme.c("warning_muted"), self.theme.c("warning")),
-            "error": (self.theme.c("error_muted"), self.theme.c("error")),
-            "neutral": (self.theme.c("bg_elevated"), self.theme.c("text_secondary")),
+            "success": ("#E6F4E6", "#0B6A0B"),
+            "warning": ("#FFF4CE", "#8A5700"),
+            "error": ("#FDE7E9", "#A4262C"),
+            "neutral": ("#EEF1F5", "#5A6573"),
         }
         bg, fg = palette.get(tone, palette["neutral"])
         return ctk.CTkLabel(
             parent,
             text=f"  {text}  ",
-            font=font(self.theme, 11, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
             text_color=fg,
             fg_color=bg,
-            corner_radius=12,
-            height=24,
+            corner_radius=10,
+            height=20,
         )
 
     def _apply_system_overview(self) -> None:
         saved = load_saved_servers(self.owner_username)
         if not saved and self.owner_username:
             saved = load_saved_servers()
-        registered = len(saved)
         connected = 1 if self._is_actively_connected() else 0
-        offline = max(registered - connected, 0)
+        metrics = self._last_db_metrics or {}
         _bak_ok, bak_fail = self.monitoring.count_audit_today(
             actions=("backup",), user=self.owner_username
         )
@@ -711,46 +772,71 @@ class DashboardView(BaseView):
         )
         alerts = bak_fail + restore_fail + connect_fail
 
-        if self._conn_status_online is not None:
-            self._conn_status_online.configure(text=str(connected))
-        if self._conn_status_offline is not None:
-            self._conn_status_offline.configure(text=str(offline))
-
-        mapping = {
-            "registered": (str(registered), self.theme.c("text_primary")),
-            "connected": (str(connected), self.theme.c("text_primary")),
-            "alerts": (
-                str(alerts),
-                self.theme.c("error") if alerts else self.theme.c("text_primary"),
-            ),
-        }
-        for key, (text, color) in mapping.items():
-            lbl = self._overview_labels.get(key)
+        # Active connection card (right rail)
+        if self.connection and connected:
+            name = (self.connection.saved_name or self.connection.name or "Connected").strip()
+            engine = _engine_label(self.connection.db_type)
+            host = (
+                f"{self.connection.host}:{self.connection.port}"
+                if self.connection.host
+                else "—"
+            )
+            version = _short_version(str(metrics.get("version") or "").strip())
+            uptime = _pad_uptime(
+                str(metrics.get("uptime") or metrics.get("uptime_human") or "").strip()
+            )
+            sessions = metrics.get("sessions")
+            if sessions in (None, "", "—"):
+                sessions = metrics.get("connections_num")
+            session_txt = str(sessions) if sessions not in (None, "", "—") else "—"
+            details = {
+                "active": name,
+                "engine": _ENGINE_NICE.get(engine, engine) if engine != "—" else "—",
+                "host": host,
+                "version": version,
+                "uptime": uptime,
+                "sessions": session_txt,
+            }
+        else:
+            details = {
+                "active": "No active connection",
+                "engine": "—",
+                "host": "—",
+                "version": "—",
+                "uptime": "—",
+                "sessions": "—",
+            }
+        for key, text in details.items():
+            lbl = self._conn_detail_labels.get(key)
             if lbl:
-                lbl.configure(text=text, text_color=color)
+                lbl.configure(text=text)
 
         if self._system_status_lbl is not None:
             if connected:
-                bucket = self._connection_health_bucket(self._last_db_metrics or {})
+                bucket = self._connection_health_bucket(metrics)
                 if bucket == "critical":
                     self._system_status_lbl.configure(
-                        text="● CRITICAL", text_color=self.theme.c("error")
+                        text="  CRITICAL  ",
+                        text_color=self.theme.c("error"),
+                        fg_color=self.theme.c("error_muted"),
                     )
                 elif bucket == "warning" or alerts:
                     self._system_status_lbl.configure(
-                        text="● DEGRADED", text_color=self.theme.c("warning")
+                        text="  DEGRADED  ",
+                        text_color=self.theme.c("warning"),
+                        fg_color=self.theme.c("warning_muted"),
                     )
                 else:
                     self._system_status_lbl.configure(
-                        text="● HEALTHY", text_color=self.theme.c("success")
+                        text="  ONLINE  ",
+                        text_color="#0B6A0B",
+                        fg_color="#DFF5E5",
                     )
-            elif registered:
-                self._system_status_lbl.configure(
-                    text="○ READY", text_color=self.theme.c("text_secondary")
-                )
             else:
                 self._system_status_lbl.configure(
-                    text="○ IDLE", text_color=self.theme.c("text_muted")
+                    text="  OFFLINE  ",
+                    text_color="#5A6573",
+                    fg_color="#EEF1F5",
                 )
 
     def _apply_db_health_overview(self, metrics: dict, *, force: bool = False) -> None:
@@ -772,8 +858,10 @@ class DashboardView(BaseView):
         if not self._db_health_rows:
             return
 
-        version = str((metrics or {}).get("version") or "").strip() or "—"
+        version = _short_version(str((metrics or {}).get("version") or "").strip())
         sessions = metrics.get("sessions")
+        if sessions in (None, "", "—"):
+            sessions = metrics.get("connections_num")
         session_txt = str(sessions) if sessions not in (None, "", "—") else "—"
         # Rows: name, engine, host, status_text, tone, version, sessions
         rows: list[tuple[str, str, str, str, str, str, str]] = []
@@ -785,16 +873,16 @@ class DashboardView(BaseView):
             engine_title = _engine_label(self.connection.db_type)
             host = f"{self.connection.host}:{self.connection.port}" if self.connection.host else "—"
             if critical:
-                rows.append((name, engine_title, host, "● CRITICAL", "error", version, session_txt))
+                rows.append((name, engine_title, host, "CRITICAL", "error", version, session_txt))
                 online_count = 1
             elif warning:
-                rows.append((name, engine_title, host, "⚠ WARNING", "warning", version, session_txt))
+                rows.append((name, engine_title, host, "WARNING", "warning", version, session_txt))
                 online_count = 1
             elif connected:
-                rows.append((name, engine_title, host, "● ONLINE", "success", version, session_txt))
+                rows.append((name, engine_title, host, "ONLINE", "success", version, session_txt))
                 online_count = 1
             else:
-                rows.append((name, engine_title, host, "○ OFFLINE", "error", version, "—"))
+                rows.append((name, engine_title, host, "OFFLINE", "error", version, "—"))
 
         offline_rows: list[tuple[str, str, str, str, str, str, str]] = []
         for server in saved:
@@ -806,7 +894,7 @@ class DashboardView(BaseView):
                     server.name,
                     _engine_label(server.db_type),
                     host,
-                    "○ OFFLINE",
+                    "OFFLINE",
                     "neutral",
                     "—",
                     "—",
@@ -818,16 +906,17 @@ class DashboardView(BaseView):
         if self._infra_summary_lbl is not None:
             total = len(rows)
             self._infra_summary_lbl.configure(
-                text=f"{total} registered · {online_count} online"
+                text=f"{total} registered · {online_count} online · {max(total - online_count, 0)} offline"
             )
 
         show_empty = not rows
-        fingerprint = f"grid|{show_empty}|{rows[:20]}"
+        fingerprint = f"grid3|{show_empty}|{rows[:20]}"
         if not self._content_changed("health_rows", fingerprint, force=force):
             return
 
         for child in self._db_health_rows.winfo_children():
             child.destroy()
+        self._infra_action_icons = []
 
         if show_empty:
             empty_state(
@@ -842,28 +931,15 @@ class DashboardView(BaseView):
             )
             return
 
-        tone_colors = {
-            "success": self.theme.c("success"),
-            "warning": self.theme.c("warning"),
-            "error": self.theme.c("error"),
-            "neutral": self.theme.c("text_muted"),
-        }
         for idx, (name, engine, host, status, tone, ver, sess) in enumerate(rows):
-            bg = self.theme.c("bg_elevated") if idx % 2 else "transparent"
-            line = ctk.CTkFrame(self._db_health_rows, fg_color=bg, corner_radius=0, height=24)
-            line.pack(fill="x")
+            bg = "#F7F9FC" if idx % 2 else "#FFFFFF"
+            line = ctk.CTkFrame(self._db_health_rows, fg_color=bg, corner_radius=6, height=32)
+            line.pack(fill="x", pady=1)
             line.pack_propagate(False)
             line.configure(cursor="hand2")
             line.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
-            cells = (
-                (name, 140, self.theme.c("text_primary"), True),
-                (engine, 88, self.theme.c("text_secondary"), False),
-                (host, 118, self.theme.c("text_secondary"), False),
-                (status, 100, tone_colors.get(tone, self.theme.c("text_muted")), True),
-                (ver, 78, self.theme.c("text_secondary"), False),
-                (sess, 62, self.theme.c("text_secondary"), False),
-            )
-            for text, width, color, bold in cells:
+
+            def _cell(text: str, width: int, color: str, *, bold: bool = False, padx: int = 3) -> None:
                 lbl = ctk.CTkLabel(
                     line,
                     text=text,
@@ -873,8 +949,87 @@ class DashboardView(BaseView):
                     text_color=color,
                     cursor="hand2",
                 )
-                lbl.pack(side="left", padx=(6 if text == name else 4, 0))
+                lbl.pack(side="left", padx=(padx, 0))
                 lbl.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            _cell(str(idx + 1), 24, self.theme.c("text_muted"), padx=6)
+
+            # Database name with small engine brand icon (mockup style)
+            name_wrap = ctk.CTkFrame(line, fg_color="transparent", width=126, height=28)
+            name_wrap.pack(side="left", padx=3)
+            name_wrap.pack_propagate(False)
+            try:
+                db_ico = engine_icon_label(name_wrap, engine, size=14)
+                db_ico.pack(side="left", padx=(0, 6), pady=7)
+                self._infra_action_icons.append(getattr(db_ico, "_engine_image", None))
+            except Exception:
+                pass
+            name_lbl = ctk.CTkLabel(
+                name_wrap,
+                text=name,
+                anchor="w",
+                font=font(self.theme, 10, weight="bold"),
+                text_color=self.theme.c("text_primary"),
+                cursor="hand2",
+            )
+            name_lbl.pack(side="left", fill="x", expand=True)
+            name_lbl.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            eng_fg, eng_bg = _ENGINE_COLORS.get(engine, ("#475569", "#EEF2F7"))
+            eng_wrap = ctk.CTkFrame(line, fg_color="transparent", width=108, height=28)
+            eng_wrap.pack(side="left", padx=3)
+            eng_wrap.pack_propagate(False)
+            eng_inner = ctk.CTkFrame(eng_wrap, fg_color=eng_bg, corner_radius=8, height=22)
+            eng_inner.pack(anchor="w", pady=5)
+            try:
+                eng_ico = engine_icon_label(eng_inner, engine, size=12)
+                eng_ico.pack(side="left", padx=(6, 4), pady=3)
+                self._infra_action_icons.append(getattr(eng_ico, "_engine_image", None))
+            except Exception:
+                pass
+            eng_pill = ctk.CTkLabel(
+                eng_inner,
+                text=engine,
+                font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+                text_color=eng_fg,
+                cursor="hand2",
+            )
+            eng_pill.pack(side="left", padx=(0, 8), pady=2)
+            eng_pill.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            _cell(host, 100, self.theme.c("text_secondary"))
+
+            status_wrap = ctk.CTkFrame(line, fg_color="transparent", width=78, height=28)
+            status_wrap.pack(side="left", padx=3)
+            status_wrap.pack_propagate(False)
+            pill = self._status_pill(status_wrap, status, tone)
+            pill.configure(cursor="hand2")
+            pill.pack(anchor="w", pady=6)
+            pill.bind("<Button-1>", lambda _e, n=name: self._open_database_properties(n))
+
+            _cell(ver if ver != "—" else "—", 80, self.theme.c("text_secondary"))
+            _cell(sess, 52, self.theme.c("text_secondary"))
+
+            actions = ctk.CTkFrame(line, fg_color="transparent")
+            actions.pack(side="left", padx=(2, 4))
+            for icon_name in ("settings", "download"):
+                try:
+                    img = lucide_ctk_image(icon_name, "#0078D4", size=13)
+                    self._infra_action_icons.append(img)
+                    act = ctk.CTkButton(
+                        actions,
+                        text="",
+                        image=img,
+                        width=24,
+                        height=22,
+                        corner_radius=5,
+                        fg_color="transparent",
+                        hover_color="#DEECF9",
+                        command=lambda n=name: self._open_database_properties(n),
+                    )
+                    act.pack(side="left", padx=1)
+                except Exception:
+                    pass
 
     def _format_last_backup(self) -> str:
         try:
@@ -1330,31 +1485,37 @@ class DashboardView(BaseView):
         self._update_status_footer_from_metrics(metrics)
 
     def _update_status_footer_from_metrics(self, metrics: dict) -> None:
-        updater = None
-        widget = self.winfo_toplevel()
-        if callable(getattr(widget, "update_status_footer", None)):
-            updater = widget.update_status_footer
-        if not callable(updater):
-            return
         if self.connection:
             name = self.connection.saved_name or self.connection.name
             conn_status = f"● Connected · {name}"
         else:
             conn_status = "● Disconnected"
 
-        version = str(metrics.get("version") or "").strip() or "—"
-        uptime = str(metrics.get("uptime") or "—")
+        version = _short_version(str(metrics.get("version") or "").strip())
+        uptime = _pad_uptime(str(metrics.get("uptime") or metrics.get("uptime_human") or "—"))
         if metrics.get("connected"):
-            sessions = str(int(metrics.get("connections_num") or 0))
+            sessions = str(int(metrics.get("connections_num") or metrics.get("sessions") or 0))
         else:
             sessions = "—"
 
-        updater(
-            connection_status=conn_status,
-            version=version,
-            uptime=uptime,
-            sessions=sessions,
-        )
+        payload = {
+            "connection_status": conn_status,
+            "version": version,
+            "uptime": uptime,
+            "sessions": sessions,
+        }
+
+        widget = self.winfo_toplevel()
+        if callable(getattr(widget, "update_status_footer", None)):
+            widget.update_status_footer(**payload)
+
+        # Also paint the classic navy status strip (image-2).
+        parent = self.master
+        while parent is not None:
+            if callable(getattr(parent, "update_session_status", None)):
+                parent.update_session_status(**payload)
+                break
+            parent = getattr(parent, "master", None)
 
     def _dashboard_visible(self) -> bool:
         try:

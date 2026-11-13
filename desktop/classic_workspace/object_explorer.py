@@ -83,6 +83,7 @@ _GROUP_ICON = {
     "Servers": "server",
     # Distinct from each other and from parent Servers.
     "Saved Connection": "hard-drive",
+    "Saved Connections": "hard-drive",
     "New Connection": "database-zap",
 }
 
@@ -185,7 +186,7 @@ class ObjectExplorer(ctk.CTkFrame):
             text_color=cx(self.theme, "text_primary"),
             placeholder_text_color=cx(self.theme, "text_muted"),
             font=ctk.CTkFont(family="Segoe UI", size=11),
-            placeholder_text="Filter objects…",
+            placeholder_text="Search servers, databases…",
             textvariable=self._filter_var,
         )
         self._filter.pack(side="left", fill="both", expand=True, padx=(2, 6), pady=2)
@@ -219,9 +220,9 @@ class ObjectExplorer(ctk.CTkFrame):
             fieldbackground=cx(self.theme, "bg_input"),
             borderwidth=0,
             relief="flat",
-            rowheight=22,
+            rowheight=24,
             font=("Segoe UI", 10),
-            indent=16,
+            indent=18,
             focuscolor=sel,
         )
         style.configure(
@@ -286,6 +287,11 @@ class ObjectExplorer(ctk.CTkFrame):
             "muted",
             foreground=cx(self.theme, "text_muted"),
             font=("Segoe UI", 9),
+        )
+        self.tree.tag_configure(
+            "active_server",
+            foreground=cx(self.theme, "active_dot"),
+            font=("Segoe UI", 10, "bold"),
         )
 
         self.tree.bind("<<TreeviewOpen>>", self._on_open)
@@ -375,6 +381,7 @@ class ObjectExplorer(ctk.CTkFrame):
         self._insert_page(overview, "Workspace", "dashboard")
 
         infrastructure = self._insert_group("Infrastructure")
+        # Landing screenshot: Infrastructure shows Servers + Databases only (Servers collapsed).
         servers_node = self._insert(
             infrastructure,
             TreeNodeData(
@@ -383,7 +390,7 @@ class ObjectExplorer(ctk.CTkFrame):
                 expandable=True,
                 meta={"page": "servers"},
             ),
-            open_=True,
+            open_=False,
             tags=("section",),
         )
         self._insert(
@@ -399,7 +406,7 @@ class ObjectExplorer(ctk.CTkFrame):
             servers_node,
             TreeNodeData(
                 kind=NodeKind.FOLDER,
-                label="Saved Connection",
+                label="Saved Connections",
                 expandable=True,
                 meta={"page": "servers", "saved_list": True},
             ),
@@ -452,7 +459,9 @@ class ObjectExplorer(ctk.CTkFrame):
             return
         for server in sorted(servers, key=lambda s: s.name.lower()):
             self._servers[server.name] = server
-            mark = " ●" if server.name == active_name else ""
+            is_active = bool(active_name) and server.name == active_name
+            # Green bullet marks the live session (image-2 Object Explorer).
+            mark = "  ●" if is_active else ""
             sid = self._insert(
                 parent,
                 TreeNodeData(
@@ -463,8 +472,13 @@ class ObjectExplorer(ctk.CTkFrame):
                     expandable=True,
                 ),
                 mark=mark,
-                tags=("page",),
+                tags=("active_server",) if is_active else ("page",),
             )
+            if is_active:
+                try:
+                    self.tree.item(sid, tags=("active_server",))
+                except Exception:
+                    pass
             self._insert(
                 sid,
                 TreeNodeData(
@@ -546,24 +560,30 @@ class ObjectExplorer(ctk.CTkFrame):
                 return node
         return None
 
-    def select_workspace(self) -> None:
-        """Select Overview → Workspace and keep Infrastructure expanded (app landing)."""
+    def apply_landing_tree(self) -> None:
+        """Match the launch Object Explorer: groups open, Servers collapsed, Workspace selected."""
         workspace_item = None
         for item, node in self._nodes.items():
+            label = node.label
             meta = node.meta or {}
-            if meta.get("page") == "dashboard":
+            if meta.get("page") == "dashboard" or label == "Workspace":
                 workspace_item = item
-                break
-            if node.label == "Workspace" and meta.get("page") == "dashboard":
-                workspace_item = item
-                break
-        # Ensure Infrastructure / Servers / Saved Connection stay open like the landing screenshot.
-        for item, node in self._nodes.items():
-            if node.label in {"Overview", "Infrastructure", "Servers", "Saved Connection", "Operations", "Observability", "Settings"}:
-                try:
+            try:
+                if label in {
+                    "Overview",
+                    "Infrastructure",
+                    "Operations",
+                    "Observability",
+                    "Settings",
+                }:
                     self.tree.item(item, open=True)
-                except Exception:
-                    pass
+                elif label in {"Servers", "Saved Connections", "Saved Connection"}:
+                    # Image-2 landing: expand Servers → Saved Connections with profiles visible.
+                    self.tree.item(item, open=True)
+                elif label == "New Connection":
+                    self.tree.item(item, open=False)
+            except Exception:
+                pass
         if workspace_item is None:
             return
         try:
@@ -572,6 +592,10 @@ class ObjectExplorer(ctk.CTkFrame):
             self.tree.focus(workspace_item)
         except Exception:
             pass
+
+    def select_workspace(self) -> None:
+        """Select Overview → Workspace (app landing selection)."""
+        self.apply_landing_tree()
 
     def _open_servers_page(self, node: TreeNodeData) -> None:
         if not self.on_navigate:
